@@ -13,6 +13,8 @@ public class LobbyMatchResponse {
     private Long matchId;
     private String roomCode;
     private String status;
+    private Long currentTurnPlayerId;
+    private Integer turnNumber;
     private List<LobbyPlayerResponse> players;
 
     public static LobbyMatchResponse from(LobbyMatch match) {
@@ -25,8 +27,9 @@ public class LobbyMatchResponse {
             match.getId(),
             match.getRoomCode(),
             match.getStatus().name(),
+            match.getCurrentTurnPlayerId(),
+            match.getTurnNumber(),
             playerResponses
         );
     }
 }
-

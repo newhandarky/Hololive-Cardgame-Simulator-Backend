@@ -1,5 +1,5 @@
--- V1: Initial schema for HOLOLIVE Card Game
--- Core definitions
+-- V1：HOLOLIVE 卡牌遊戲初始資料庫結構
+-- 基礎主檔定義
 CREATE TABLE colors (
     code VARCHAR(20) PRIMARY KEY,
     name VARCHAR(50) NOT NULL
@@ -16,7 +16,7 @@ CREATE TABLE cards (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Oshi (lead) cards
+-- Oshi（主推）卡資料
 CREATE TABLE oshi_cards (
     card_id VARCHAR(50) PRIMARY KEY REFERENCES cards(card_id) ON DELETE CASCADE,
     life INT NOT NULL,
@@ -38,7 +38,7 @@ CREATE TABLE oshi_skills (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Member cards
+-- Holomen（成員）卡資料
 CREATE TABLE member_cards (
     card_id VARCHAR(50) PRIMARY KEY REFERENCES cards(card_id) ON DELETE CASCADE,
     hp INT NOT NULL,
@@ -64,7 +64,7 @@ CREATE TABLE member_arts (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Support cards
+-- Support（支援）卡資料
 CREATE TABLE support_cards (
     card_id VARCHAR(50) PRIMARY KEY REFERENCES cards(card_id) ON DELETE CASCADE,
     is_limited BOOLEAN NOT NULL DEFAULT FALSE,
@@ -77,7 +77,7 @@ CREATE TABLE support_cards (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Cheer cards
+-- Cheer（應援）卡資料
 CREATE TABLE cheer_cards (
     card_id VARCHAR(50) PRIMARY KEY REFERENCES cards(card_id) ON DELETE CASCADE,
     color VARCHAR(20) NOT NULL REFERENCES colors(code),
@@ -85,7 +85,7 @@ CREATE TABLE cheer_cards (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Users and ownership
+-- 使用者與持有卡資料
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,
     line_user_id VARCHAR(255) NOT NULL UNIQUE,
@@ -105,7 +105,7 @@ CREATE TABLE user_cards (
     UNIQUE (user_id, card_id)
 );
 
--- Matches
+-- 對戰與玩家狀態
 CREATE TABLE matches (
     id SERIAL PRIMARY KEY,
     room_code VARCHAR(20) NOT NULL UNIQUE,
@@ -134,7 +134,7 @@ CREATE TABLE match_players (
     UNIQUE (match_id, user_id)
 );
 
--- Card instance tracking
+-- 對戰中的卡片實例追蹤
 CREATE TABLE match_cards (
     id SERIAL PRIMARY KEY,
     match_id INT NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
@@ -193,7 +193,7 @@ CREATE TABLE match_holopower (
 CREATE INDEX idx_match_holopower_match_owner ON match_holopower(match_id, owner_user_id);
 CREATE INDEX idx_match_holopower_match_owner_faceup ON match_holopower(match_id, owner_user_id, is_face_up);
 
--- Actions log
+-- 行動紀錄（Action Log）
 CREATE TABLE match_actions (
     id SERIAL PRIMARY KEY,
     match_id INT NOT NULL REFERENCES matches(id) ON DELETE CASCADE,

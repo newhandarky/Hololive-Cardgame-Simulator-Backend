@@ -4,11 +4,13 @@ import com.hololive.cardgame.dto.JoinMatchRequest;
 import com.hololive.cardgame.dto.LobbyEvent;
 import com.hololive.cardgame.dto.LobbyMatchResponse;
 import com.hololive.cardgame.dto.ReadyRequest;
+import com.hololive.cardgame.dto.GameStateResponse;
 import com.hololive.cardgame.model.LobbyMatch;
+import com.hololive.cardgame.service.AuthUserResolver;
 import com.hololive.cardgame.service.LobbyMatchService;
+import com.hololive.cardgame.service.MatchGameStateService;
 import com.hololive.cardgame.websocket.MatchSocketHandler;
 import org.springframework.http.HttpStatus;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -23,11 +25,20 @@ import org.springframework.web.server.ResponseStatusException;
 public class MatchController {
 
     private final LobbyMatchService lobbyMatchService;
+    private final MatchGameStateService matchGameStateService;
     private final MatchSocketHandler matchSocketHandler;
+    private final AuthUserResolver authUserResolver;
 
-    public MatchController(LobbyMatchService lobbyMatchService, MatchSocketHandler matchSocketHandler) {
+    public MatchController(
+        LobbyMatchService lobbyMatchService,
+        MatchGameStateService matchGameStateService,
+        MatchSocketHandler matchSocketHandler,
+        AuthUserResolver authUserResolver
+    ) {
         this.lobbyMatchService = lobbyMatchService;
+        this.matchGameStateService = matchGameStateService;
         this.matchSocketHandler = matchSocketHandler;
+        this.authUserResolver = authUserResolver;
     }
 
     @PostMapping("/create")
@@ -89,19 +100,37 @@ public class MatchController {
         }
     }
 
+    @PostMapping("/{matchId}/actions/end-turn")
+    public LobbyMatchResponse endTurn(@PathVariable Long matchId) {
+        try {
+            LobbyMatch match = lobbyMatchService.endTurn(matchId, currentUserId());
+            LobbyMatchResponse response = LobbyMatchResponse.from(match);
+            publish(matchId, "TURN_ENDED", response);
+            return response;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    @GetMapping("/{matchId}/state")
+    public GameStateResponse getMatchState(@PathVariable Long matchId) {
+        try {
+            return matchGameStateService.getGameStateForUser(matchId, currentUserId());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, e.getMessage());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        }
+    }
+
     private void publish(Long matchId, String eventType, LobbyMatchResponse response) {
-        matchSocketHandler.publish(matchId, LobbyEvent.of(eventType, response));
+        GameStateResponse state = matchGameStateService.getGameState(matchId);
+        matchSocketHandler.publish(matchId, LobbyEvent.of(eventType, response, state));
     }
 
     private Long currentUserId() {
-        Object principal = SecurityContextHolder.getContext().getAuthentication().getPrincipal();
-        if (principal instanceof Long userId) {
-            return userId;
-        }
-        if (principal instanceof String text && text.matches("\\d+")) {
-            return Long.valueOf(text);
-        }
-        throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "未登入");
+        return authUserResolver.currentUserId();
     }
 }
-

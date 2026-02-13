@@ -1,6 +1,6 @@
--- V5: Seed basic colors, sample users, and minimal cards for testing
+-- V5：建立基本種子資料（顏色、測試玩家、最小可測卡組）
 
--- Colors
+-- 顏色主檔
 INSERT INTO colors (code, name) VALUES
  ('WHITE','白'),
  ('GREEN','緑'),
@@ -10,13 +10,13 @@ INSERT INTO colors (code, name) VALUES
  ('PURPLE','紫')
 ON CONFLICT (code) DO NOTHING;
 
--- Sample users
+-- 測試使用者
 INSERT INTO users (line_user_id, display_name, avatar_url) VALUES
  ('test_line_user_a','測試玩家A','https://example.com/avatarA.png'),
  ('test_line_user_b','測試玩家B','https://example.com/avatarB.png')
 ON CONFLICT (line_user_id) DO NOTHING;
 
--- Base cards
+-- 基礎卡片主檔
 INSERT INTO cards (card_id,name,rarity,image_url,card_type) VALUES
  ('OSHI-001','星街すいせい 推し', 'SR', NULL,'OSHI'),
  ('OSHI-002','兎田ぺこら 推し', 'SR', NULL,'OSHI'),
@@ -27,7 +27,7 @@ INSERT INTO cards (card_id,name,rarity,image_url,card_type) VALUES
  ('CHE-002','青エール', 'N', NULL,'CHEER')
 ON CONFLICT (card_id) DO NOTHING;
 
--- Oshi cards
+-- Oshi（主推）卡資料
 INSERT INTO oshi_cards (card_id, life, main_color, sub_color) VALUES
  ('OSHI-001', 6, 'BLUE', NULL),
  ('OSHI-002', 6, 'GREEN', NULL)
@@ -40,7 +40,7 @@ INSERT INTO oshi_skills (oshi_card_id, skill_type, skill_name, description, holo
  ('OSHI-002','SP','うさぎ大暴走','全場敵方各1點',2,'{"type":"aoe","amount":1,"target":"all_enemy"}')
 ON CONFLICT DO NOTHING;
 
--- Member cards
+-- Holomen（成員）卡資料
 INSERT INTO member_cards (card_id, hp, level_type, main_color, sub_color, bloom_level, passive_effect_json, trigger_condition) VALUES
  ('MEM-001', 5, 'DEBUT', 'BLUE', NULL, 1, NULL, NULL),
  ('MEM-002', 5, 'DEBUT', 'GREEN', NULL, 1, NULL, NULL)
@@ -51,12 +51,12 @@ INSERT INTO member_arts (member_card_id, name, description, cost_cheer_json, eff
  ('MEM-002','ぺこキック','對敵方中心造成1點', '{"GREEN":1}', '{"type":"damage","amount":1,"target":"enemy_center"}',0)
 ON CONFLICT DO NOTHING;
 
--- Support card
+-- Support（支援）卡資料
 INSERT INTO support_cards (card_id, is_limited, condition_type, condition_json, effect_type, effect_json, target_type) VALUES
  ('SUP-001', FALSE, 'ANY', NULL, 'DRAW', '{"cards":1}', 'SELF')
 ON CONFLICT (card_id) DO NOTHING;
 
--- Cheer cards details
+-- Cheer（應援）卡資料
 INSERT INTO cheer_cards (card_id, color) VALUES
  ('CHE-001','WHITE'),
  ('CHE-002','BLUE')

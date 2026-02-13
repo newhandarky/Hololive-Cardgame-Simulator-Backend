@@ -3,6 +3,7 @@ package com.hololive.cardgame.websocket;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hololive.cardgame.dto.LobbyEvent;
+import com.hololive.cardgame.service.LobbyMatchService;
 import java.io.IOException;
 import java.net.URI;
 import java.util.Map;
@@ -19,11 +20,22 @@ public class MatchSocketHandler extends TextWebSocketHandler {
 
     private final Map<Long, Set<WebSocketSession>> sessionsByMatchId = new ConcurrentHashMap<>();
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final LobbyMatchService lobbyMatchService;
+
+    public MatchSocketHandler(LobbyMatchService lobbyMatchService) {
+        this.lobbyMatchService = lobbyMatchService;
+    }
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
         Long matchId = parseMatchId(session.getUri());
-        if (matchId == null) {
+        Long userId = parseUserId(session);
+        if (matchId == null || userId == null) {
+            session.close(CloseStatus.POLICY_VIOLATION);
+            return;
+        }
+
+        if (!lobbyMatchService.isUserInMatch(matchId, userId)) {
             session.close(CloseStatus.BAD_DATA);
             return;
         }
@@ -83,5 +95,19 @@ public class MatchSocketHandler extends TextWebSocketHandler {
             return null;
         }
     }
-}
 
+    private Long parseUserId(WebSocketSession session) {
+        Object userId = session.getAttributes().get(WsAuthHandshakeInterceptor.USER_ID_ATTR);
+        if (userId instanceof Long value) {
+            return value;
+        }
+        if (userId instanceof String text) {
+            try {
+                return Long.parseLong(text);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+}

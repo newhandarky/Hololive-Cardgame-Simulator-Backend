@@ -8,9 +8,13 @@ import lombok.Data;
 public class LobbyEvent {
     private String type;
     private LobbyMatchResponse match;
+    private GameStateResponse gameState;
 
     public static LobbyEvent of(String type, LobbyMatchResponse match) {
-        return new LobbyEvent(type, match);
+        return new LobbyEvent(type, match, null);
+    }
+
+    public static LobbyEvent of(String type, LobbyMatchResponse match, GameStateResponse gameState) {
+        return new LobbyEvent(type, match, gameState);
     }
 }
-

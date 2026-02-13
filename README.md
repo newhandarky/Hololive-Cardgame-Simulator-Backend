@@ -3,9 +3,11 @@
 目前此專案為後端 + 資料庫開發主目錄，包含：
 - Spring Boot API（本地埠 `8090`）
 - PostgreSQL（本地容器埠 `5432`）
-- Flyway migration（`V1` schema、`V5` seed）
+- Flyway migration（`V1`、`V5`、`V6`、`V7`）
 - JWT 驗證與本地 mock 登入
-- Lobby MVP API（create/join/ready/start）與 WebSocket 房間推送
+- Lobby / GameRoom MVP（建房、入房、就緒、開始、結束回合）
+- WebSocket 房間推送（含 `match` + `gameState` 快照）
+- 卡片查詢、卡組編輯、卡片管理（card-admin）
 
 ## 開發規範
 - 開發與修改前，請先閱讀：`doc/AGENTS — 專案規則.md`
@@ -26,6 +28,7 @@
 - `src/main/java/com/hololive/cardgame/controller/`：API 控制器
 - `src/main/java/com/hololive/cardgame/service/`：服務層
 - `src/main/java/com/hololive/cardgame/config/`：Security/CORS/WebSocket 設定
+- `src/main/java/com/hololive/cardgame/websocket/`：房間 WebSocket 推播
 
 ## 快速啟動（本地）
 ### 1) 啟動 PostgreSQL（Docker）
@@ -101,19 +104,51 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   http://localhost:8090/api/matches/1/ready
 
 curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:8090/api/matches/1/start
+curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:8090/api/matches/1/actions/end-turn
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8090/api/matches/1/state
+```
+
+### 卡片 / 卡組 / 管理 API（需 JWT）
+```bash
+# 卡片查詢
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8090/api/cards?type=MEMBER&keyword=星街"
+
+# 我的卡組
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8090/api/decks/me
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"count":2}' \
+  http://localhost:8090/api/decks/me/cards/MEM-001
+
+# card-admin 建卡（目前為登入即可使用，尚未做角色限制）
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cardId":"CHE-999",
+    "name":"測試 Cheer 卡",
+    "cardType":"CHEER",
+    "rarity":"N",
+    "color":"WHITE"
+  }' \
+  http://localhost:8090/api/card-admin/cards
 ```
 
 ### WebSocket（房間）
 - 連線路徑：`ws://localhost:8090/ws/matches/{matchId}`
-- 前端會收到房間事件（如 `USER_JOINED`, `READY_UPDATED`, `MATCH_STARTED`）
+- 前端會收到房間事件（如 `USER_JOINED`, `READY_UPDATED`, `MATCH_STARTED`, `TURN_ENDED`）
+- 每個事件會帶 `match` 與 `gameState` 快照
 
 ## 當前進度
 - 已完成：
   - 後端基礎骨架與 DB migration
   - JWT + mock 登入
-  - 受保護 API（`/api/users/**`, `/api/matches/**`）
-  - Lobby 本地雙端連線 MVP（REST + WebSocket）
+  - 受保護 API（`/api/users/**`, `/api/matches/**`, `/api/cards/**`, `/api/decks/**`, `/api/card-admin/**`）
+  - Lobby / GameRoom 本地雙端連線 MVP（REST + WebSocket）
+  - `GET /api/matches/{id}/state` 場地快照 API
+  - Action pipeline 最小骨架（含 `END_TURN`）
+  - 卡片管理建卡 API（card-admin）
 - 尚未完成：
   - LIFF 真實登入驗證
-  - 正式對戰規則引擎完整實作
+  - 正式對戰初始化（發牌、起始場地）與完整規則引擎
+  - card-admin 的角色/白名單權限限制
   - 完整 E2E 測試與部署流程
