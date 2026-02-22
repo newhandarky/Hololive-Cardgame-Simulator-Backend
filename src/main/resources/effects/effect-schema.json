@@ -1,0 +1,22 @@
+{
+  "version": "0.1.0",
+  "description": "卡片效果 JSON 最小驗證規格（開發版）",
+  "allowedEffectTypes": [
+    "UNIMPLEMENTED",
+    "damage",
+    "draw",
+    "aoe",
+    "multi",
+    "attach_cheer",
+    "revive_from_archive",
+    "swap_positions",
+    "prevent_damage",
+    "buff_arts",
+    "search_and_deploy"
+  ],
+  "placeholderType": "UNIMPLEMENTED",
+  "placeholderRequiredAny": [
+    "rawText",
+    "rawHeader"
+  ]
+}

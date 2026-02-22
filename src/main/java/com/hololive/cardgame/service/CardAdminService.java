@@ -17,10 +17,16 @@ public class CardAdminService {
 
     private final JdbcTemplate jdbcTemplate;
     private final CardRepository cardRepository;
+    private final CardEffectValidator cardEffectValidator;
 
-    public CardAdminService(JdbcTemplate jdbcTemplate, CardRepository cardRepository) {
+    public CardAdminService(
+        JdbcTemplate jdbcTemplate,
+        CardRepository cardRepository,
+        CardEffectValidator cardEffectValidator
+    ) {
         this.jdbcTemplate = jdbcTemplate;
         this.cardRepository = cardRepository;
+        this.cardEffectValidator = cardEffectValidator;
     }
 
     @Transactional
@@ -96,6 +102,9 @@ public class CardAdminService {
             || !StringUtils.hasText(request.getMainColor())) {
             throw new IllegalArgumentException("MEMBER 需提供 hp、levelType、mainColor");
         }
+        String passiveEffectJson = defaultJson(request.getPassiveEffectJson());
+        cardEffectValidator.validateJsonObject(passiveEffectJson, "passiveEffectJson");
+
         jdbcTemplate.update(
             """
             INSERT INTO member_cards (
@@ -109,7 +118,7 @@ public class CardAdminService {
             normalize(request.getMainColor()),
             normalizeNullable(request.getSubColor()),
             request.getBloomLevel(),
-            defaultJson(request.getPassiveEffectJson()),
+            passiveEffectJson,
             trimOrNull(request.getTriggerCondition()),
             ts,
             ts
@@ -122,6 +131,11 @@ public class CardAdminService {
             || !StringUtils.hasText(request.getTargetType())) {
             throw new IllegalArgumentException("SUPPORT 需提供 effectType、effectJson、targetType");
         }
+        cardEffectValidator.validateEffectJson(request.getEffectJson(), "effectJson");
+        if (StringUtils.hasText(request.getConditionJson())) {
+            cardEffectValidator.validateJsonObject(request.getConditionJson(), "conditionJson");
+        }
+
         jdbcTemplate.update(
             """
             INSERT INTO support_cards (

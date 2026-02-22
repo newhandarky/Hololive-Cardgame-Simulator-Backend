@@ -3,7 +3,7 @@
 目前此專案為後端 + 資料庫開發主目錄，包含：
 - Spring Boot API（本地埠 `8090`）
 - PostgreSQL（本地容器埠 `5432`）
-- Flyway migration（`V1`、`V5`、`V6`、`V7`）
+- Flyway migration（`V1`、`V5`、`V6`、`V7`、`V8`、`V9`、`V10`、`V11`、`V12`）
 - JWT 驗證與本地 mock 登入
 - Lobby / GameRoom MVP（建房、入房、就緒、開始、結束回合）
 - WebSocket 房間推送（含 `match` + `gameState` 快照）
@@ -25,6 +25,8 @@
 ## 目錄重點
 - `src/main/resources/application.yaml`：環境設定
 - `src/main/resources/db/migration/`：資料庫 migration
+- `scripts/official_card_import.py`：官方卡表批次匯入 SQL 產生器
+- `src/main/resources/effects/effect-schema.json`：卡片效果 JSON 最小驗證規格
 - `src/main/java/com/hololive/cardgame/controller/`：API 控制器
 - `src/main/java/com/hololive/cardgame/service/`：服務層
 - `src/main/java/com/hololive/cardgame/config/`：Security/CORS/WebSocket 設定
@@ -120,6 +122,10 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
   -d '{"count":2}' \
   http://localhost:8090/api/decks/me/cards/MEM-001
 
+# 一鍵補齊本地測試牌組（快速測 Start Match）
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8090/api/decks/me/quick-setup
+
 # card-admin 建卡（目前為登入即可使用，尚未做角色限制）
 curl -X POST -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -132,6 +138,33 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   }' \
   http://localhost:8090/api/card-admin/cards
 ```
+
+## 官方卡表批次匯入（第一版）
+### 1) 產生 SQL migration（以 hSD13 為例）
+```bash
+python3 scripts/official_card_import.py \
+  --expansion hSD13 \
+  --output src/main/resources/db/migration/V9__seed_official_hsd13_batch_01.sql
+```
+
+### 2) 套用 migration
+```bash
+./mvnw -q flyway:migrate
+```
+
+### 3) 說明
+- `V8` 會先擴充欄位（`cards.tags_json`, `cards.expansion_code`, `cards.source_url`）與 `member_cards` Bloom 等級（含 `SPOT`, `BUZZ`）。
+- `V9` 為第一批官方資料匯入（`hSD13` 15 張）。
+- `V10` 為第二批官方資料匯入（`hSD12` 14 張）。
+- `V11` 為第三批官方資料匯入（`hSD11` 10 張）。
+- `V12` 為第四批官方資料匯入（`hSD10` 10 張）。
+- 匯入腳本產生的技能/アーツ `effect_json` 目前先用 `UNIMPLEMENTED + rawText`，方便後續逐張映射成可執行規則。
+
+### 4) effect_json 驗證
+- `CardAdminService` 建卡時會驗證 JSON：
+  - `effectJson`：必須有 `type`，且 `type` 必須在 `effect-schema.json` 白名單。
+  - `passiveEffectJson` / `conditionJson`：必須是合法 JSON 物件。
+- 若 `type = UNIMPLEMENTED`，至少要帶 `rawText` 或 `rawHeader`，避免匯入後無法追溯原始效果文字。
 
 ### WebSocket（房間）
 - 連線路徑：`ws://localhost:8090/ws/matches/{matchId}`

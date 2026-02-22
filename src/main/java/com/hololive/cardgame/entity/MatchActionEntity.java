@@ -8,6 +8,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.time.LocalDateTime;
 import lombok.Data;
+import org.hibernate.annotations.ColumnTransformer;
 
 @Entity
 @Table(name = "match_actions")
@@ -28,6 +29,7 @@ public class MatchActionEntity {
     private String actionType;
 
     @Column(name = "payload", nullable = false, columnDefinition = "jsonb")
+    @ColumnTransformer(write = "?::jsonb")
     private String payload;
 
     @Column(name = "turn_number", nullable = false)
