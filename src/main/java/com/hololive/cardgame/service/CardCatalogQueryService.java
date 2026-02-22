@@ -32,6 +32,7 @@ public class CardCatalogQueryService {
     }
 
     public List<CardSearchResponse> searchCards(
+        Long userId,
         String keyword,
         String type,
         String rarity,
@@ -49,23 +50,42 @@ public class CardCatalogQueryService {
                 c.name,
                 c.card_type,
                 c.rarity,
-                c.image_url,
+                COALESCE(preferred_variant.image_url, default_variant.image_url, c.image_url) AS display_image_url,
                 c.card_no,
                 c.expansion_code,
                 c.tags_json::text AS tags_json_text,
                 COALESCE(oc.main_color, mc.main_color, cc.color) AS main_color,
                 mc.level_type,
                 oc.life,
-                mc.hp
+                mc.hp,
+                preference.variant_id AS selected_variant_id,
+                COALESCE(variant_count.total_count, 0) AS variant_count
             FROM cards c
             LEFT JOIN oshi_cards oc ON oc.card_id = c.card_id
             LEFT JOIN member_cards mc ON mc.card_id = c.card_id
             LEFT JOIN cheer_cards cc ON cc.card_id = c.card_id
+            LEFT JOIN user_card_variant_prefs preference
+                ON preference.user_id = :userId AND preference.card_id = c.card_id
+            LEFT JOIN card_variants preferred_variant
+                ON preferred_variant.id = preference.variant_id
+            LEFT JOIN LATERAL (
+                SELECT cv.image_url
+                FROM card_variants cv
+                WHERE cv.card_id = c.card_id AND cv.is_default = TRUE
+                ORDER BY cv.id
+                LIMIT 1
+            ) default_variant ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::INT AS total_count
+                FROM card_variants cv
+                WHERE cv.card_id = c.card_id
+            ) variant_count ON TRUE
             WHERE 1 = 1
             """
         );
 
         MapSqlParameterSource params = new MapSqlParameterSource();
+        params.addValue("userId", userId);
 
         if (StringUtils.hasText(keyword)) {
             sql.append(" AND (c.name ILIKE :keyword OR c.card_id ILIKE :keyword)");
@@ -106,9 +126,11 @@ public class CardCatalogQueryService {
 
         if (hasImage != null) {
             if (hasImage) {
-                sql.append(" AND c.image_url IS NOT NULL AND c.image_url <> ''");
+                sql.append(" AND COALESCE(preferred_variant.image_url, default_variant.image_url, c.image_url) IS NOT NULL");
+                sql.append(" AND COALESCE(preferred_variant.image_url, default_variant.image_url, c.image_url) <> ''");
             } else {
-                sql.append(" AND (c.image_url IS NULL OR c.image_url = '')");
+                sql.append(" AND (COALESCE(preferred_variant.image_url, default_variant.image_url, c.image_url) IS NULL");
+                sql.append(" OR COALESCE(preferred_variant.image_url, default_variant.image_url, c.image_url) = '')");
             }
         }
 
@@ -117,7 +139,7 @@ public class CardCatalogQueryService {
         return namedParameterJdbcTemplate.query(sql.toString(), params, (rs, rowNum) -> toCardSearchResponse(rs));
     }
 
-    public CardDetailResponse getCardDetail(String cardId) {
+    public CardDetailResponse getCardDetail(String cardId, Long userId) {
         String normalizedCardId = cardId.trim().toUpperCase(Locale.ROOT);
         String sql =
             """
@@ -126,11 +148,12 @@ public class CardCatalogQueryService {
                 c.name,
                 c.card_type,
                 c.rarity,
-                c.image_url,
+                COALESCE(preferred_variant.image_url, default_variant.image_url, c.image_url) AS display_image_url,
                 c.card_no,
                 c.expansion_code,
                 c.source_url,
                 c.tags_json::text AS tags_json_text,
+                preference.variant_id AS selected_variant_id,
                 oc.life,
                 oc.main_color AS oshi_main_color,
                 oc.sub_color AS oshi_sub_color,
@@ -153,12 +176,26 @@ public class CardCatalogQueryService {
             LEFT JOIN member_cards mc ON mc.card_id = c.card_id
             LEFT JOIN support_cards sc ON sc.card_id = c.card_id
             LEFT JOIN cheer_cards cc ON cc.card_id = c.card_id
+            LEFT JOIN user_card_variant_prefs preference
+                ON preference.user_id = :userId AND preference.card_id = c.card_id
+            LEFT JOIN card_variants preferred_variant
+                ON preferred_variant.id = preference.variant_id
+            LEFT JOIN LATERAL (
+                SELECT cv.image_url
+                FROM card_variants cv
+                WHERE cv.card_id = c.card_id AND cv.is_default = TRUE
+                ORDER BY cv.id
+                LIMIT 1
+            ) default_variant ON TRUE
             WHERE c.card_id = :cardId
             """;
 
+        MapSqlParameterSource params = new MapSqlParameterSource();
+        params.addValue("cardId", normalizedCardId);
+        params.addValue("userId", userId);
         List<CardDetailResponse> details = namedParameterJdbcTemplate.query(
             sql,
-            new MapSqlParameterSource("cardId", normalizedCardId),
+            params,
             (rs, rowNum) -> toCardDetailResponse(rs)
         );
 
@@ -167,9 +204,57 @@ public class CardCatalogQueryService {
         }
 
         CardDetailResponse detail = details.get(0);
+        detail.setVariants(loadCardVariants(normalizedCardId));
         detail.setOshiSkills(loadOshiSkills(normalizedCardId));
         detail.setMemberArts(loadMemberArts(normalizedCardId));
         return detail;
+    }
+
+    public void setPreferredVariant(Long userId, String cardId, Long variantId) {
+        String normalizedCardId = cardId.trim().toUpperCase(Locale.ROOT);
+        Integer exists = namedParameterJdbcTemplate.queryForObject(
+            "SELECT COUNT(*)::INT FROM cards WHERE card_id = :cardId",
+            new MapSqlParameterSource("cardId", normalizedCardId),
+            Integer.class
+        );
+        if (exists == null || exists == 0) {
+            throw new IllegalArgumentException("找不到卡片：" + normalizedCardId);
+        }
+
+        if (variantId == null) {
+            namedParameterJdbcTemplate.update(
+                "DELETE FROM user_card_variant_prefs WHERE user_id = :userId AND card_id = :cardId",
+                new MapSqlParameterSource().addValue("userId", userId).addValue("cardId", normalizedCardId)
+            );
+            return;
+        }
+
+        Integer validVariant = namedParameterJdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)::INT
+            FROM card_variants
+            WHERE id = :variantId AND card_id = :cardId
+            """,
+            new MapSqlParameterSource().addValue("variantId", variantId).addValue("cardId", normalizedCardId),
+            Integer.class
+        );
+        if (validVariant == null || validVariant == 0) {
+            throw new IllegalArgumentException("指定的變體不存在或不屬於此卡片");
+        }
+
+        namedParameterJdbcTemplate.update(
+            """
+            INSERT INTO user_card_variant_prefs (user_id, card_id, variant_id, created_at, updated_at)
+            VALUES (:userId, :cardId, :variantId, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id, card_id) DO UPDATE SET
+                variant_id = EXCLUDED.variant_id,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            new MapSqlParameterSource()
+                .addValue("userId", userId)
+                .addValue("cardId", normalizedCardId)
+                .addValue("variantId", variantId)
+        );
     }
 
     public List<String> getAvailableTags() {
@@ -189,14 +274,16 @@ public class CardCatalogQueryService {
             rs.getString("name"),
             rs.getString("card_type"),
             rs.getString("rarity"),
-            rs.getString("image_url"),
+            rs.getString("display_image_url"),
             rs.getString("card_no"),
             rs.getString("expansion_code"),
             rs.getString("main_color"),
             rs.getString("level_type"),
             (Integer) rs.getObject("life"),
             (Integer) rs.getObject("hp"),
-            parseJsonTextToStringList(rs.getString("tags_json_text"))
+            parseJsonTextToStringList(rs.getString("tags_json_text")),
+            (Long) rs.getObject("selected_variant_id"),
+            (Integer) rs.getObject("variant_count")
         );
     }
 
@@ -210,11 +297,13 @@ public class CardCatalogQueryService {
             rs.getString("name"),
             cardType,
             rs.getString("rarity"),
-            rs.getString("image_url"),
+            rs.getString("display_image_url"),
             rs.getString("card_no"),
             rs.getString("expansion_code"),
             rs.getString("source_url"),
             parseJsonTextToStringList(rs.getString("tags_json_text")),
+            (Long) rs.getObject("selected_variant_id"),
+            Collections.emptyList(),
             mainColor,
             subColor,
             (Integer) rs.getObject("life"),
@@ -232,6 +321,27 @@ public class CardCatalogQueryService {
             rs.getString("cheer_color"),
             Collections.emptyList(),
             Collections.emptyList()
+        );
+    }
+
+    private List<CardDetailResponse.CardVariantItem> loadCardVariants(String cardId) {
+        String sql =
+            """
+            SELECT id, variant_code, variant_name, image_url, is_default
+            FROM card_variants
+            WHERE card_id = :cardId
+            ORDER BY is_default DESC, id
+            """;
+        return namedParameterJdbcTemplate.query(
+            sql,
+            new MapSqlParameterSource("cardId", cardId),
+            (rs, rowNum) -> new CardDetailResponse.CardVariantItem(
+                (Long) rs.getObject("id"),
+                rs.getString("variant_code"),
+                rs.getString("variant_name"),
+                rs.getString("image_url"),
+                (Boolean) rs.getObject("is_default")
+            )
         );
     }
 

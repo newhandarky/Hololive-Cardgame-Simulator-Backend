@@ -88,12 +88,12 @@ public class DeckController {
     @ResponseStatus(HttpStatus.OK)
     public List<DeckCardResponse> setupQuickDeck() {
         Long userId = authUserResolver.currentUserId();
+        // 改用官方批次已存在的卡片，避免依賴已清除的舊測試種子卡。
         Map<String, Integer> minimalDeck = Map.of(
-            "OSHI-001", 1,
-            "MEM-001", 4,
-            "SUP-001", 1,
-            "CHE-001", 4,
-            "CHE-002", 2
+            "HSD13-001", 1,
+            "HSD13-003", 4,
+            "HSD13-004", 4,
+            "HY03-001", 3
         );
 
         for (Map.Entry<String, Integer> entry : minimalDeck.entrySet()) {

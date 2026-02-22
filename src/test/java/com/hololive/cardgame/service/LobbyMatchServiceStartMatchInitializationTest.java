@@ -42,15 +42,15 @@ class LobbyMatchServiceStartMatchInitializationTest {
         User guest = createUser("start-guest");
 
         // 最小可測牌組：1 推し + 7 主牌庫 + 7 エール
-        grantCards(host, "OSHI-001", 1);
-        grantCards(host, "MEM-001", 6);
-        grantCards(host, "SUP-001", 1);
-        grantCards(host, "CHE-001", 7);
+        grantCards(host, "HSD13-001", 1);
+        grantCards(host, "HSD13-003", 4);
+        grantCards(host, "HSD13-004", 3);
+        grantCards(host, "HY03-001", 7);
 
-        grantCards(guest, "OSHI-002", 1);
-        grantCards(guest, "MEM-002", 6);
-        grantCards(guest, "SUP-001", 1);
-        grantCards(guest, "CHE-002", 7);
+        grantCards(guest, "HSD13-002", 1);
+        grantCards(guest, "HSD13-006", 4);
+        grantCards(guest, "HSD13-007", 3);
+        grantCards(guest, "HY03-001", 7);
 
         LobbyMatch created = lobbyMatchService.createMatch(host.getId());
         lobbyMatchService.joinMatch(created.getRoomCode(), guest.getId());
@@ -65,17 +65,17 @@ class LobbyMatchServiceStartMatchInitializationTest {
 
         assertZoneCount(created.getId(), host.getId(), "HAND", 5);
         assertZoneCount(created.getId(), host.getId(), "DECK", 2);
-        assertZoneCount(created.getId(), host.getId(), "LIFE", 6);
-        assertZoneCount(created.getId(), host.getId(), "CHEER_DECK", 1);
+        assertZoneCount(created.getId(), host.getId(), "LIFE", 5);
+        assertZoneCount(created.getId(), host.getId(), "CHEER_DECK", 2);
 
         assertZoneCount(created.getId(), guest.getId(), "HAND", 5);
         assertZoneCount(created.getId(), guest.getId(), "DECK", 2);
-        assertZoneCount(created.getId(), guest.getId(), "LIFE", 6);
-        assertZoneCount(created.getId(), guest.getId(), "CHEER_DECK", 1);
+        assertZoneCount(created.getId(), guest.getId(), "LIFE", 5);
+        assertZoneCount(created.getId(), guest.getId(), "CHEER_DECK", 2);
 
         var hostPlayer = matchPlayerRepository.findByMatchIdAndUserId(created.getId(), host.getId()).orElseThrow();
-        assertThat(hostPlayer.getOshiCardId()).isEqualTo("OSHI-001");
-        assertThat(hostPlayer.getCurrentLife()).isEqualTo(6);
+        assertThat(hostPlayer.getOshiCardId()).isEqualTo("HSD13-001");
+        assertThat(hostPlayer.getCurrentLife()).isEqualTo(5);
     }
 
     @Test
@@ -83,13 +83,13 @@ class LobbyMatchServiceStartMatchInitializationTest {
         User host = createUser("invalid-host");
         User guest = createUser("invalid-guest");
 
-        grantCards(host, "OSHI-001", 1);
-        grantCards(host, "MEM-001", 1);
-        grantCards(host, "CHE-001", 1);
+        grantCards(host, "HSD13-001", 1);
+        grantCards(host, "HSD13-003", 1);
+        grantCards(host, "HY03-001", 1);
 
-        grantCards(guest, "OSHI-002", 1);
-        grantCards(guest, "MEM-002", 1);
-        grantCards(guest, "CHE-002", 1);
+        grantCards(guest, "HSD13-002", 1);
+        grantCards(guest, "HSD13-006", 1);
+        grantCards(guest, "HY03-001", 1);
 
         LobbyMatch created = lobbyMatchService.createMatch(host.getId());
         lobbyMatchService.joinMatch(created.getRoomCode(), guest.getId());

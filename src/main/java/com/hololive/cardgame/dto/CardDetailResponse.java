@@ -17,6 +17,8 @@ public class CardDetailResponse {
     private String expansionCode;
     private String sourceUrl;
     private List<String> tags;
+    private Long selectedVariantId;
+    private List<CardVariantItem> variants;
 
     private String mainColor;
     private String subColor;
@@ -39,6 +41,16 @@ public class CardDetailResponse {
 
     private List<OshiSkillItem> oshiSkills;
     private List<MemberArtItem> memberArts;
+
+    @Data
+    @AllArgsConstructor
+    public static class CardVariantItem {
+        private Long id;
+        private String variantCode;
+        private String variantName;
+        private String imageUrl;
+        private Boolean isDefault;
+    }
 
     @Data
     @AllArgsConstructor

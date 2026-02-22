@@ -20,4 +20,6 @@ public class CardSearchResponse {
     private Integer life;
     private Integer hp;
     private List<String> tags;
+    private Long selectedVariantId;
+    private Integer variantCount;
 }

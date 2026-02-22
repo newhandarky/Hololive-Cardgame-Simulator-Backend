@@ -2,10 +2,14 @@ package com.hololive.cardgame.controller;
 
 import com.hololive.cardgame.dto.CardDetailResponse;
 import com.hololive.cardgame.dto.CardSearchResponse;
+import com.hololive.cardgame.dto.UpdatePreferredVariantRequest;
 import com.hololive.cardgame.service.CardCatalogQueryService;
+import com.hololive.cardgame.service.AuthUserResolver;
 import java.util.List;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -17,9 +21,11 @@ import org.springframework.http.HttpStatus;
 public class CardController {
 
     private final CardCatalogQueryService cardCatalogQueryService;
+    private final AuthUserResolver authUserResolver;
 
-    public CardController(CardCatalogQueryService cardCatalogQueryService) {
+    public CardController(CardCatalogQueryService cardCatalogQueryService, AuthUserResolver authUserResolver) {
         this.cardCatalogQueryService = cardCatalogQueryService;
+        this.authUserResolver = authUserResolver;
     }
 
     @GetMapping
@@ -34,7 +40,9 @@ public class CardController {
         @RequestParam(required = false) Boolean hasImage,
         @RequestParam(required = false, defaultValue = "cardNo") String sort
     ) {
+        Long userId = authUserResolver.currentUserId();
         return cardCatalogQueryService.searchCards(
+            userId,
             keyword,
             type,
             rarity,
@@ -55,9 +63,27 @@ public class CardController {
     @GetMapping("/{cardId}")
     public CardDetailResponse getCardDetail(@PathVariable String cardId) {
         try {
-            return cardCatalogQueryService.getCardDetail(cardId);
+            Long userId = authUserResolver.currentUserId();
+            return cardCatalogQueryService.getCardDetail(cardId, userId);
         } catch (IllegalArgumentException ex) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, ex.getMessage());
+        }
+    }
+
+    @PutMapping("/{cardId}/preferred-variant")
+    public CardDetailResponse updatePreferredVariant(
+        @PathVariable String cardId,
+        @RequestBody UpdatePreferredVariantRequest request
+    ) {
+        try {
+            Long userId = authUserResolver.currentUserId();
+            cardCatalogQueryService.setPreferredVariant(userId, cardId, request == null ? null : request.getVariantId());
+            return cardCatalogQueryService.getCardDetail(cardId, userId);
+        } catch (IllegalArgumentException ex) {
+            if (ex.getMessage() != null && ex.getMessage().startsWith("找不到卡片")) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, ex.getMessage());
+            }
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, ex.getMessage());
         }
     }
 }

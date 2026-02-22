@@ -3,7 +3,7 @@
 目前此專案為後端 + 資料庫開發主目錄，包含：
 - Spring Boot API（本地埠 `8090`）
 - PostgreSQL（本地容器埠 `5432`）
-- Flyway migration（`V1`、`V5`、`V6`、`V7`、`V8`、`V9`、`V10`、`V11`、`V12`）
+- Flyway migration（`V1`、`V5`、`V6`、`V7`、`V8`、`V9`、`V10`、`V11`、`V12`、`V13`、`V14`、`V15`、`V16`、`V17`、`V18`、`V19`、`V20`、`V21`、`V22`）
 - JWT 驗證與本地 mock 登入
 - Lobby / GameRoom MVP（建房、入房、就緒、開始、結束回合）
 - WebSocket 房間推送（含 `match` + `gameState` 快照）
@@ -114,6 +114,13 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8090/api/matches/1/state
 ```bash
 # 卡片查詢
 curl -H "Authorization: Bearer $TOKEN" "http://localhost:8090/api/cards?type=MEMBER&keyword=星街"
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8090/api/cards/HBP02-069"
+
+# 設定卡片偏好顯示圖（variantId 可由卡片詳細資料 variants 取得）
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"variantId":123}' \
+  http://localhost:8090/api/cards/HBP02-069/preferred-variant
 
 # 我的卡組
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8090/api/decks/me
@@ -158,6 +165,17 @@ python3 scripts/official_card_import.py \
 - `V10` 為第二批官方資料匯入（`hSD12` 14 張）。
 - `V11` 為第三批官方資料匯入（`hSD11` 10 張）。
 - `V12` 為第四批官方資料匯入（`hSD10` 10 張）。
+- `V13` 清除舊測試種子卡（`OSHI-001/002`、`MEM-001/002`、`CHE-001/002`、`SUP-001/999`）。
+- `V14` 為第五批官方資料匯入（`hSD09` 10 張）。
+- `V15` 為第六批官方資料匯入（`hBP01` 133 張）。
+- `V16` 新增卡片變體表（`card_variants`）與使用者偏好表（`user_card_variant_prefs`）。
+- `V17` 為第七批官方資料匯入（`hBP02` 115 張）。
+- `V18` 為第八批官方資料匯入（`hBP03` 128 張，實際新增 123 張）。
+- `V19` 為第九批官方資料匯入（`hBP04` 114 張，含部分既有卡號更新）。
+- `V20` 為第十批官方資料匯入（`hBP05` 107 張，含部分既有卡號更新）。
+- `V21` 為第十一批官方資料匯入（`hBP06` 129 張，含部分既有卡號更新）。
+- `V22` 為第十二批官方資料匯入（`hSD01` 23 張，含部分既有卡號更新）。
+- 匯入腳本支援自動抓多分頁，並會將平行版本圖片寫入 `card_variants`（`DEFAULT`、`ALT_n`）。
 - 匯入腳本產生的技能/アーツ `effect_json` 目前先用 `UNIMPLEMENTED + rawText`，方便後續逐張映射成可執行規則。
 
 ### 4) effect_json 驗證
