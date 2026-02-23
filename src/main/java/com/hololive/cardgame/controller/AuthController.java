@@ -4,6 +4,7 @@ import com.hololive.cardgame.dto.LineLoginRequest;
 import com.hololive.cardgame.dto.LineLoginResponse;
 import com.hololive.cardgame.entity.User;
 import com.hololive.cardgame.repository.UserRepository;
+import com.hololive.cardgame.service.DeckService;
 import com.hololive.cardgame.service.JwtTokenProvider;
 import com.hololive.cardgame.service.LineTokenVerifier;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -20,22 +21,26 @@ public class AuthController {
     private final LineTokenVerifier lineTokenVerifier;
     private final JwtTokenProvider jwtTokenProvider;
     private final UserRepository userRepository;
+    private final DeckService deckService;
 
     public AuthController(
         LineTokenVerifier lineTokenVerifier,
         JwtTokenProvider jwtTokenProvider,
-        UserRepository userRepository
+        UserRepository userRepository,
+        DeckService deckService
     ) {
         this.lineTokenVerifier = lineTokenVerifier;
         this.jwtTokenProvider = jwtTokenProvider;
         this.userRepository = userRepository;
+        this.deckService = deckService;
     }
 
     @PostMapping("/line-login")
     public ResponseEntity<LineLoginResponse> lineLogin(@RequestBody LineLoginRequest request) {
         String lineUserId = lineTokenVerifier.verifyIdToken(request.getIdToken());
 
-        User user = findOrCreateUser(lineUserId, request);
+        UserUpsertResult upsertResult = findOrCreateUser(lineUserId, request);
+        User user = upsertResult.user();
 
         // 若已有使用者且前端帶了新顯示名稱/頭像，進行同步
         boolean updated = false;
@@ -52,16 +57,26 @@ public class AuthController {
             user = userRepository.save(user);
         }
 
+        if (upsertResult.created()) {
+            // 新使用者登入時自動建立可測試牌組，避免第一次進站還要手動組牌。
+            try {
+                deckService.setupQuickDeck(user.getId(), "AUTO");
+            } catch (RuntimeException ignored) {
+                // 若當下缺少卡片資料，仍允許登入，後續可由使用者手動建立牌組。
+            }
+        }
+
         String token = jwtTokenProvider.generateToken(user.getId(), lineUserId);
         return ResponseEntity.ok(new LineLoginResponse(token, user.getId(), user.getDisplayName()));
     }
 
-    private User findOrCreateUser(String lineUserId, LineLoginRequest request) {
+    private UserUpsertResult findOrCreateUser(String lineUserId, LineLoginRequest request) {
         return userRepository.findByLineUserId(lineUserId)
+            .map(user -> new UserUpsertResult(user, false))
             .orElseGet(() -> createUserWithRaceFallback(lineUserId, request));
     }
 
-    private User createUserWithRaceFallback(String lineUserId, LineLoginRequest request) {
+    private UserUpsertResult createUserWithRaceFallback(String lineUserId, LineLoginRequest request) {
         User newUser = new User();
         newUser.setLineUserId(lineUserId);
         newUser.setDisplayName(
@@ -72,9 +87,12 @@ public class AuthController {
         newUser.setAvatarUrl(request.getAvatarUrl());
 
         try {
-            return userRepository.save(newUser);
+            return new UserUpsertResult(userRepository.save(newUser), true);
         } catch (DataIntegrityViolationException ex) {
-            return userRepository.findByLineUserId(lineUserId).orElseThrow(() -> ex);
+            User existingUser = userRepository.findByLineUserId(lineUserId).orElseThrow(() -> ex);
+            return new UserUpsertResult(existingUser, false);
         }
     }
+
+    private record UserUpsertResult(User user, boolean created) {}
 }

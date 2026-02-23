@@ -1,22 +1,26 @@
 package com.hololive.cardgame.controller;
 
 import com.hololive.cardgame.dto.DeckCardResponse;
+import com.hololive.cardgame.dto.CreateDeckRequest;
+import com.hololive.cardgame.dto.DeckDetailResponse;
+import com.hololive.cardgame.dto.DeckSummaryResponse;
+import com.hololive.cardgame.dto.DeckValidationResponse;
+import com.hololive.cardgame.dto.StarterDeckPresetResponse;
 import com.hololive.cardgame.dto.UpdateDeckCardRequest;
-import com.hololive.cardgame.entity.UserCard;
-import com.hololive.cardgame.repository.CardRepository;
-import com.hololive.cardgame.repository.UserCardRepository;
+import com.hololive.cardgame.dto.UpdateDeckMetaRequest;
 import com.hololive.cardgame.service.AuthUserResolver;
+import com.hololive.cardgame.service.DeckService;
 import jakarta.validation.Valid;
-import java.time.LocalDateTime;
-import java.util.Map;
 import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
@@ -25,27 +29,83 @@ import org.springframework.web.server.ResponseStatusException;
 @RequestMapping("/api/decks")
 public class DeckController {
 
-    private final UserCardRepository userCardRepository;
-    private final CardRepository cardRepository;
+    private final DeckService deckService;
     private final AuthUserResolver authUserResolver;
 
     public DeckController(
-        UserCardRepository userCardRepository,
-        CardRepository cardRepository,
+        DeckService deckService,
         AuthUserResolver authUserResolver
     ) {
-        this.userCardRepository = userCardRepository;
-        this.cardRepository = cardRepository;
+        this.deckService = deckService;
         this.authUserResolver = authUserResolver;
+    }
+
+    @GetMapping("/me/list")
+    public List<DeckSummaryResponse> listMyDecks() {
+        Long userId = authUserResolver.currentUserId();
+        return deckService.listDeckSummaries(userId);
+    }
+
+    @PostMapping("/me")
+    @ResponseStatus(HttpStatus.CREATED)
+    public DeckDetailResponse createDeck(@Valid @RequestBody CreateDeckRequest request) {
+        Long userId = authUserResolver.currentUserId();
+        try {
+            return deckService.createDeck(userId, request.getName());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
+    }
+
+    @GetMapping("/me/{deckId}")
+    public DeckDetailResponse getMyDeckDetail(@PathVariable Long deckId) {
+        Long userId = authUserResolver.currentUserId();
+        try {
+            return deckService.getDeckDetail(userId, deckId);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        }
+    }
+
+    @PatchMapping("/me/{deckId}")
+    public DeckDetailResponse renameDeck(@PathVariable Long deckId, @Valid @RequestBody UpdateDeckMetaRequest request) {
+        Long userId = authUserResolver.currentUserId();
+        try {
+            return deckService.renameDeck(userId, deckId, request.getName());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
+    }
+
+    @PostMapping("/me/{deckId}/activate")
+    public DeckDetailResponse activateDeck(@PathVariable Long deckId) {
+        Long userId = authUserResolver.currentUserId();
+        try {
+            return deckService.activateDeck(userId, deckId);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        }
+    }
+
+    @PostMapping("/me/{deckId}/validate")
+    public DeckValidationResponse validateDeck(@PathVariable Long deckId) {
+        Long userId = authUserResolver.currentUserId();
+        try {
+            return deckService.validateDeck(userId, deckId);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        }
     }
 
     @GetMapping("/me")
     public List<DeckCardResponse> getMyDeck() {
         Long userId = authUserResolver.currentUserId();
-        return userCardRepository.findByUserIdOrderByCardIdAsc(userId)
-            .stream()
-            .map(DeckCardResponse::from)
-            .toList();
+        return deckService.getActiveDeckCards(userId);
+    }
+
+    @GetMapping("/starter-presets")
+    public List<StarterDeckPresetResponse> listStarterDeckPresets() {
+        return deckService.listStarterDeckPresets();
     }
 
     @PutMapping("/me/cards/{cardId}")
@@ -54,31 +114,27 @@ public class DeckController {
         @PathVariable String cardId,
         @Valid @RequestBody UpdateDeckCardRequest request
     ) {
-        String normalizedCardId = cardId.trim().toUpperCase();
-        if (!cardRepository.existsById(normalizedCardId)) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "找不到卡片：" + normalizedCardId);
-        }
-
         Long userId = authUserResolver.currentUserId();
-        int count = request.getCount();
-        UserCard userCard = userCardRepository.findByUserIdAndCardId(userId, normalizedCardId).orElse(null);
-
-        if (count == 0) {
-            if (userCard != null) {
-                userCardRepository.delete(userCard);
-            }
-            return new DeckCardResponse(normalizedCardId, 0);
+        try {
+            return deckService.updateActiveDeckCard(userId, cardId, request.getCount());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
         }
+    }
 
-        if (userCard == null) {
-            userCard = new UserCard();
-            userCard.setUserId(userId);
-            userCard.setCardId(normalizedCardId);
-            userCard.setCreatedAt(LocalDateTime.now());
+    @PutMapping("/me/{deckId}/cards/{cardId}")
+    @ResponseStatus(HttpStatus.OK)
+    public DeckCardResponse updateDeckCardInSpecificDeck(
+        @PathVariable Long deckId,
+        @PathVariable String cardId,
+        @Valid @RequestBody UpdateDeckCardRequest request
+    ) {
+        Long userId = authUserResolver.currentUserId();
+        try {
+            return deckService.updateDeckCard(userId, deckId, cardId, request.getCount());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
         }
-        userCard.setCount(count);
-        userCard.setUpdatedAt(LocalDateTime.now());
-        return DeckCardResponse.from(userCardRepository.save(userCard));
     }
 
     /**
@@ -86,38 +142,14 @@ public class DeckController {
      */
     @PostMapping("/me/quick-setup")
     @ResponseStatus(HttpStatus.OK)
-    public List<DeckCardResponse> setupQuickDeck() {
+    public List<DeckCardResponse> setupQuickDeck(@RequestParam(required = false) String preset) {
         Long userId = authUserResolver.currentUserId();
-        // 改用官方批次已存在的卡片，避免依賴已清除的舊測試種子卡。
-        Map<String, Integer> minimalDeck = Map.of(
-            "HSD13-001", 1,
-            "HSD13-003", 4,
-            "HSD13-004", 4,
-            "HY03-001", 3
-        );
-
-        for (Map.Entry<String, Integer> entry : minimalDeck.entrySet()) {
-            String cardId = entry.getKey();
-            Integer count = entry.getValue();
-            if (!cardRepository.existsById(cardId)) {
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "缺少卡片種子資料：" + cardId);
-            }
-
-            UserCard userCard = userCardRepository.findByUserIdAndCardId(userId, cardId).orElse(null);
-            if (userCard == null) {
-                userCard = new UserCard();
-                userCard.setUserId(userId);
-                userCard.setCardId(cardId);
-                userCard.setCreatedAt(LocalDateTime.now());
-            }
-            userCard.setCount(count);
-            userCard.setUpdatedAt(LocalDateTime.now());
-            userCardRepository.save(userCard);
+        try {
+            return deckService.setupQuickDeck(userId, preset);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
         }
-
-        return userCardRepository.findByUserIdOrderByCardIdAsc(userId)
-            .stream()
-            .map(DeckCardResponse::from)
-            .toList();
     }
 }

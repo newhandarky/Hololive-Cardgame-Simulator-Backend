@@ -10,6 +10,6 @@ public class UpdateDeckCardRequest {
 
     @NotNull
     @Min(0)
-    @Max(4)
+    @Max(20)
     private Integer count;
 }

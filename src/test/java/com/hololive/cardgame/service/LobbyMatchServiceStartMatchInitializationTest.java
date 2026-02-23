@@ -4,11 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.hololive.cardgame.entity.User;
-import com.hololive.cardgame.entity.UserCard;
 import com.hololive.cardgame.model.LobbyMatch;
 import com.hololive.cardgame.model.LobbyMatchStatus;
 import com.hololive.cardgame.repository.MatchPlayerRepository;
-import com.hololive.cardgame.repository.UserCardRepository;
 import com.hololive.cardgame.repository.UserRepository;
 import java.time.LocalDateTime;
 import org.junit.jupiter.api.Test;
@@ -28,7 +26,7 @@ class LobbyMatchServiceStartMatchInitializationTest {
     private UserRepository userRepository;
 
     @Autowired
-    private UserCardRepository userCardRepository;
+    private DeckService deckService;
 
     @Autowired
     private MatchPlayerRepository matchPlayerRepository;
@@ -41,16 +39,9 @@ class LobbyMatchServiceStartMatchInitializationTest {
         User host = createUser("start-host");
         User guest = createUser("start-guest");
 
-        // 最小可測牌組：1 推し + 7 主牌庫 + 7 エール
-        grantCards(host, "HSD13-001", 1);
-        grantCards(host, "HSD13-003", 4);
-        grantCards(host, "HSD13-004", 3);
-        grantCards(host, "HY03-001", 7);
-
-        grantCards(guest, "HSD13-002", 1);
-        grantCards(guest, "HSD13-006", 4);
-        grantCards(guest, "HSD13-007", 3);
-        grantCards(guest, "HY03-001", 7);
+        // 測試快捷牌組：1 推し + 主牌庫 50 + エール 20
+        deckService.setupQuickDeck(host.getId());
+        deckService.setupQuickDeck(guest.getId());
 
         LobbyMatch created = lobbyMatchService.createMatch(host.getId());
         lobbyMatchService.joinMatch(created.getRoomCode(), guest.getId());
@@ -64,17 +55,17 @@ class LobbyMatchServiceStartMatchInitializationTest {
         assertThat(started.getTurnNumber()).isEqualTo(1);
 
         assertZoneCount(created.getId(), host.getId(), "HAND", 5);
-        assertZoneCount(created.getId(), host.getId(), "DECK", 2);
+        assertZoneCount(created.getId(), host.getId(), "DECK", 45);
         assertZoneCount(created.getId(), host.getId(), "LIFE", 5);
-        assertZoneCount(created.getId(), host.getId(), "CHEER_DECK", 2);
+        assertZoneCount(created.getId(), host.getId(), "CHEER_DECK", 15);
 
         assertZoneCount(created.getId(), guest.getId(), "HAND", 5);
-        assertZoneCount(created.getId(), guest.getId(), "DECK", 2);
+        assertZoneCount(created.getId(), guest.getId(), "DECK", 45);
         assertZoneCount(created.getId(), guest.getId(), "LIFE", 5);
-        assertZoneCount(created.getId(), guest.getId(), "CHEER_DECK", 2);
+        assertZoneCount(created.getId(), guest.getId(), "CHEER_DECK", 15);
 
         var hostPlayer = matchPlayerRepository.findByMatchIdAndUserId(created.getId(), host.getId()).orElseThrow();
-        assertThat(hostPlayer.getOshiCardId()).isEqualTo("HSD13-001");
+        assertThat(hostPlayer.getOshiCardId()).isNotBlank();
         assertThat(hostPlayer.getCurrentLife()).isEqualTo(5);
     }
 
@@ -83,13 +74,19 @@ class LobbyMatchServiceStartMatchInitializationTest {
         User host = createUser("invalid-host");
         User guest = createUser("invalid-guest");
 
-        grantCards(host, "HSD13-001", 1);
-        grantCards(host, "HSD13-003", 1);
-        grantCards(host, "HY03-001", 1);
+        String hostOshiCardId = findFirstCardIdByType("OSHI");
+        String hostMemberCardId = findFirstCardIdByType("MEMBER");
+        String hostCheerCardId = findFirstCardIdByType("CHEER");
+        String guestMemberCardId = findFirstCardIdByType("MEMBER");
+        String guestCheerCardId = findFirstCardIdByType("CHEER");
 
-        grantCards(guest, "HSD13-002", 1);
-        grantCards(guest, "HSD13-006", 1);
-        grantCards(guest, "HY03-001", 1);
+        setupDeckCard(host, hostOshiCardId, 1);
+        setupDeckCard(host, hostMemberCardId, 1);
+        setupDeckCard(host, hostCheerCardId, 20);
+
+        deckService.setupQuickDeck(guest.getId());
+        setupDeckCard(guest, guestMemberCardId, 4);
+        setupDeckCard(guest, guestCheerCardId, 20);
 
         LobbyMatch created = lobbyMatchService.createMatch(host.getId());
         lobbyMatchService.joinMatch(created.getRoomCode(), guest.getId());
@@ -98,7 +95,22 @@ class LobbyMatchServiceStartMatchInitializationTest {
 
         assertThatThrownBy(() -> lobbyMatchService.startMatch(created.getId(), host.getId()))
             .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("主牌庫不足");
+            .hasMessageContaining("主牌庫必須剛好");
+    }
+
+    @Test
+    void starterJusticePresetShouldPassDeckValidation() {
+        User user = createUser("starter-justice");
+
+        deckService.setupQuickDeck(user.getId(), "STARTER_JUSTICE_ERB");
+        DeckService.ActiveDeckForMatch activeDeck = deckService.loadValidatedActiveDeckForMatch(user.getId());
+
+        assertThat(activeDeck.validation().isValid()).isTrue();
+        int justiceDebutCount = activeDeck.cards().stream()
+            .filter(card -> "HSD13-003".equals(card.cardId()))
+            .mapToInt(card -> card.count() == null ? 0 : card.count())
+            .sum();
+        assertThat(justiceDebutCount).isEqualTo(6);
     }
 
     private User createUser(String prefix) {
@@ -112,14 +124,18 @@ class LobbyMatchServiceStartMatchInitializationTest {
         return userRepository.save(user);
     }
 
-    private void grantCards(User user, String cardId, int count) {
-        UserCard userCard = new UserCard();
-        userCard.setUserId(user.getId());
-        userCard.setCardId(cardId);
-        userCard.setCount(count);
-        userCard.setCreatedAt(LocalDateTime.now());
-        userCard.setUpdatedAt(LocalDateTime.now());
-        userCardRepository.save(userCard);
+    private void setupDeckCard(User user, String cardId, int count) {
+        deckService.updateActiveDeckCard(user.getId(), cardId, count);
+    }
+
+    private String findFirstCardIdByType(String cardType) {
+        String cardId = jdbcTemplate.queryForObject(
+            "SELECT card_id FROM cards WHERE card_type = ? ORDER BY card_id LIMIT 1",
+            String.class,
+            cardType
+        );
+        assertThat(cardId).isNotBlank();
+        return cardId;
     }
 
     private void assertZoneCount(Long matchId, Long userId, String zone, int expected) {

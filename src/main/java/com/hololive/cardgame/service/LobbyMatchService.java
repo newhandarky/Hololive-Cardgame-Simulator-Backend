@@ -2,22 +2,24 @@ package com.hololive.cardgame.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hololive.cardgame.entity.MatchActionEntity;
+import com.hololive.cardgame.entity.MatchDeckSnapshotEntity;
 import com.hololive.cardgame.entity.MatchEntity;
 import com.hololive.cardgame.entity.MatchPlayerEntity;
-import com.hololive.cardgame.entity.UserCard;
 import com.hololive.cardgame.model.LobbyMatch;
 import com.hololive.cardgame.model.LobbyMatchStatus;
 import com.hololive.cardgame.model.LobbyPlayer;
 import com.hololive.cardgame.repository.MatchActionRepository;
+import com.hololive.cardgame.repository.MatchDeckSnapshotRepository;
 import com.hololive.cardgame.repository.MatchPlayerRepository;
 import com.hololive.cardgame.repository.MatchRepository;
-import com.hololive.cardgame.repository.UserCardRepository;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -32,14 +34,15 @@ public class LobbyMatchService {
     private static final String ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     private static final int ROOM_CODE_LENGTH = 6;
     private static final int INITIAL_HAND_SIZE = 5;
-    private static final int MIN_MAIN_DECK_SIZE = 5;
-    private static final int MIN_CHEER_DECK_SIZE = 5;
+    private static final int REQUIRED_MAIN_DECK_SIZE = 50;
+    private static final int REQUIRED_CHEER_DECK_SIZE = 20;
     private static final int DEFAULT_OSHI_LIFE = 5;
 
     private final MatchRepository matchRepository;
     private final MatchPlayerRepository matchPlayerRepository;
     private final MatchActionRepository matchActionRepository;
-    private final UserCardRepository userCardRepository;
+    private final MatchDeckSnapshotRepository matchDeckSnapshotRepository;
+    private final DeckService deckService;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final SecureRandom random = new SecureRandom();
@@ -48,14 +51,16 @@ public class LobbyMatchService {
         MatchRepository matchRepository,
         MatchPlayerRepository matchPlayerRepository,
         MatchActionRepository matchActionRepository,
-        UserCardRepository userCardRepository,
+        MatchDeckSnapshotRepository matchDeckSnapshotRepository,
+        DeckService deckService,
         JdbcTemplate jdbcTemplate,
         ObjectMapper objectMapper
     ) {
         this.matchRepository = matchRepository;
         this.matchPlayerRepository = matchPlayerRepository;
         this.matchActionRepository = matchActionRepository;
-        this.userCardRepository = userCardRepository;
+        this.matchDeckSnapshotRepository = matchDeckSnapshotRepository;
+        this.deckService = deckService;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
     }
@@ -143,6 +148,14 @@ public class LobbyMatchService {
             throw new IllegalStateException("尚有玩家未準備完成");
         }
 
+        Map<Long, DeckService.ActiveDeckForMatch> activeDeckByUserId = new LinkedHashMap<>();
+        for (MatchPlayerEntity player : players) {
+            activeDeckByUserId.put(
+                player.getUserId(),
+                deckService.loadValidatedActiveDeckForMatch(player.getUserId())
+            );
+        }
+
         match.setLobbyStatus(LobbyMatchStatus.STARTED.name());
         match.setCurrentTurnPlayerId(match.getPlayerAId());
         match.setTurnNumber(1);
@@ -150,7 +163,8 @@ public class LobbyMatchService {
         touchUpdatedAt(match);
         matchRepository.save(match);
 
-        initializeMatchRuntime(match, players);
+        initializeMatchRuntime(match, players, activeDeckByUserId);
+        saveDeckSnapshots(match.getId(), activeDeckByUserId);
 
         appendAction(match, userId, "START_MATCH", "{\"source\":\"host\",\"initialized\":true}", 1);
         return toModel(match, players);
@@ -256,7 +270,11 @@ public class LobbyMatchService {
     /**
      * 對戰開始時初始化每位玩家的牌區快照資料（DECK/HAND/LIFE/CHEER_DECK）。
      */
-    private void initializeMatchRuntime(MatchEntity match, List<MatchPlayerEntity> players) {
+    private void initializeMatchRuntime(
+        MatchEntity match,
+        List<MatchPlayerEntity> players,
+        Map<Long, DeckService.ActiveDeckForMatch> activeDeckByUserId
+    ) {
         // 若重複觸發初始化（例如本地測試重跑），先清空舊的卡片實例資料。
         jdbcTemplate.update(
             "DELETE FROM match_holomem_cheers WHERE match_holomem_id IN (SELECT id FROM match_holomems WHERE match_id = ?)",
@@ -267,35 +285,38 @@ public class LobbyMatchService {
         jdbcTemplate.update("DELETE FROM match_cards WHERE match_id = ?", match.getId());
 
         for (MatchPlayerEntity player : players) {
-            initializePlayerRuntime(match.getId(), player);
+            DeckService.ActiveDeckForMatch activeDeck = activeDeckByUserId.get(player.getUserId());
+            if (activeDeck == null) {
+                throw new IllegalStateException("玩家 #" + player.getUserId() + " 缺少牌組快照資料");
+            }
+            initializePlayerRuntime(match.getId(), player, activeDeck);
         }
     }
 
-    private void initializePlayerRuntime(Long matchId, MatchPlayerEntity matchPlayer) {
-        List<UserCard> userCards = userCardRepository.findByUserIdOrderByCardIdAsc(matchPlayer.getUserId())
-            .stream()
-            .filter(card -> card.getCount() != null && card.getCount() > 0)
-            .toList();
-
+    private void initializePlayerRuntime(
+        Long matchId,
+        MatchPlayerEntity matchPlayer,
+        DeckService.ActiveDeckForMatch activeDeck
+    ) {
         List<String> oshiCandidates = new ArrayList<>();
         List<String> mainDeck = new ArrayList<>();
         List<String> cheerDeck = new ArrayList<>();
 
-        for (UserCard userCard : userCards) {
-            String cardType = resolveCardType(userCard.getCardId());
+        for (DeckService.DeckCardEntry deckCard : activeDeck.cards()) {
+            String cardType = deckCard.cardType();
             if (!StringUtils.hasText(cardType)) {
                 continue;
             }
-            int count = userCard.getCount();
+            int count = deckCard.count() == null ? 0 : deckCard.count();
             if ("OSHI".equals(cardType)) {
-                oshiCandidates.add(userCard.getCardId());
+                oshiCandidates.add(deckCard.cardId());
             } else if ("CHEER".equals(cardType)) {
                 for (int i = 0; i < count; i++) {
-                    cheerDeck.add(userCard.getCardId());
+                    cheerDeck.add(deckCard.cardId());
                 }
             } else {
                 for (int i = 0; i < count; i++) {
-                    mainDeck.add(userCard.getCardId());
+                    mainDeck.add(deckCard.cardId());
                 }
             }
         }
@@ -303,14 +324,14 @@ public class LobbyMatchService {
         if (oshiCandidates.isEmpty()) {
             throw new IllegalStateException("玩家 #" + matchPlayer.getUserId() + " 沒有推し卡，無法開始對戰");
         }
-        if (mainDeck.size() < MIN_MAIN_DECK_SIZE) {
+        if (mainDeck.size() != REQUIRED_MAIN_DECK_SIZE) {
             throw new IllegalStateException(
-                "玩家 #" + matchPlayer.getUserId() + " 主牌庫不足，至少需要 " + MIN_MAIN_DECK_SIZE + " 張"
+                "玩家 #" + matchPlayer.getUserId() + " 主牌庫必須剛好 " + REQUIRED_MAIN_DECK_SIZE + " 張"
             );
         }
-        if (cheerDeck.size() < MIN_CHEER_DECK_SIZE) {
+        if (cheerDeck.size() != REQUIRED_CHEER_DECK_SIZE) {
             throw new IllegalStateException(
-                "玩家 #" + matchPlayer.getUserId() + " エール牌庫不足，至少需要 " + MIN_CHEER_DECK_SIZE + " 張"
+                "玩家 #" + matchPlayer.getUserId() + " エール牌庫必須剛好 " + REQUIRED_CHEER_DECK_SIZE + " 張"
             );
         }
 
@@ -340,6 +361,38 @@ public class LobbyMatchService {
         matchPlayer.setCurrentLife(oshiLife);
         matchPlayer.setUpdatedAt(LocalDateTime.now());
         matchPlayerRepository.save(matchPlayer);
+    }
+
+    private void saveDeckSnapshots(
+        Long matchId,
+        Map<Long, DeckService.ActiveDeckForMatch> activeDeckByUserId
+    ) {
+        matchDeckSnapshotRepository.deleteByMatchId(matchId);
+        for (Map.Entry<Long, DeckService.ActiveDeckForMatch> entry : activeDeckByUserId.entrySet()) {
+            Long userId = entry.getKey();
+            DeckService.ActiveDeckForMatch activeDeck = entry.getValue();
+
+            String snapshotJson;
+            try {
+                snapshotJson = objectMapper.writeValueAsString(
+                    Map.of(
+                        "deckId", activeDeck.deckId(),
+                        "validation", activeDeck.validation(),
+                        "cards", activeDeck.cards()
+                    )
+                );
+            } catch (Exception e) {
+                snapshotJson = "{\"deckId\":" + activeDeck.deckId() + "}";
+            }
+
+            MatchDeckSnapshotEntity snapshot = new MatchDeckSnapshotEntity();
+            snapshot.setMatchId(matchId);
+            snapshot.setUserId(userId);
+            snapshot.setDeckId(activeDeck.deckId());
+            snapshot.setSnapshotJson(snapshotJson);
+            snapshot.setCreatedAt(LocalDateTime.now());
+            matchDeckSnapshotRepository.save(snapshot);
+        }
     }
 
     private void batchInsertMatchCards(
@@ -376,15 +429,6 @@ public class LobbyMatchService {
             return DEFAULT_OSHI_LIFE;
         }
         return life;
-    }
-
-    private String resolveCardType(String cardId) {
-        List<String> types = jdbcTemplate.query(
-            "SELECT card_type FROM cards WHERE card_id = ?",
-            (rs, rowNum) -> rs.getString("card_type"),
-            cardId
-        );
-        return types.isEmpty() ? null : types.get(0);
     }
 
     private void appendAction(
