@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import org.springframework.stereotype.Service;
@@ -47,7 +48,7 @@ public class CardEffectValidator {
             throw new IllegalArgumentException(fieldName + " 缺少 type（字串）");
         }
 
-        String effectType = typeNode.asText();
+        String effectType = normalizeEffectType(typeNode.asText());
         if (!allowedEffectTypes.contains(effectType)) {
             throw new IllegalArgumentException(fieldName + " type 不支援：" + effectType);
         }
@@ -95,7 +96,7 @@ public class CardEffectValidator {
             if (typeArray != null && typeArray.isArray()) {
                 for (JsonNode item : typeArray) {
                     if (item.isTextual() && StringUtils.hasText(item.asText())) {
-                        types.add(item.asText());
+                        types.add(normalizeEffectType(item.asText()));
                     }
                 }
             }
@@ -103,7 +104,7 @@ public class CardEffectValidator {
                 throw new IllegalStateException("effect schema 缺少 allowedEffectTypes");
             }
 
-            String loadedPlaceholderType = root.path("placeholderType").asText();
+            String loadedPlaceholderType = normalizeEffectType(root.path("placeholderType").asText());
             if (!StringUtils.hasText(loadedPlaceholderType)) {
                 loadedPlaceholderType = "UNIMPLEMENTED";
             }
@@ -127,6 +128,13 @@ public class CardEffectValidator {
         } catch (IOException ex) {
             throw new IllegalStateException("讀取 effect schema 失敗", ex);
         }
+    }
+
+    private String normalizeEffectType(String value) {
+        if (!StringUtils.hasText(value)) {
+            return "";
+        }
+        return value.trim().toUpperCase(Locale.ROOT);
     }
 
     private record EffectSchemaConfig(

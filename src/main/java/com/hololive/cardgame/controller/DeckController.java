@@ -108,6 +108,13 @@ public class DeckController {
         return deckService.listStarterDeckPresets();
     }
 
+    @PostMapping("/me/bootstrap-starter-decks")
+    @ResponseStatus(HttpStatus.OK)
+    public List<DeckSummaryResponse> bootstrapStarterDecksForCurrentUser() {
+        Long userId = authUserResolver.currentUserId();
+        return deckService.bootstrapStarterDecksForUser(userId);
+    }
+
     @PutMapping("/me/cards/{cardId}")
     @ResponseStatus(HttpStatus.OK)
     public DeckCardResponse updateDeckCard(

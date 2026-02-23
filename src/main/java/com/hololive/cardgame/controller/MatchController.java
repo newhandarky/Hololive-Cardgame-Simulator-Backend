@@ -1,13 +1,18 @@
 package com.hololive.cardgame.controller;
 
+import com.hololive.cardgame.dto.AttachCheerActionRequest;
+import com.hololive.cardgame.dto.AttackArtActionRequest;
 import com.hololive.cardgame.dto.JoinMatchRequest;
 import com.hololive.cardgame.dto.LobbyEvent;
 import com.hololive.cardgame.dto.LobbyMatchResponse;
 import com.hololive.cardgame.dto.ReadyRequest;
 import com.hololive.cardgame.dto.GameStateResponse;
+import com.hololive.cardgame.dto.PlaySupportActionRequest;
+import com.hololive.cardgame.dto.PlayToStageActionRequest;
 import com.hololive.cardgame.model.LobbyMatch;
 import com.hololive.cardgame.service.AuthUserResolver;
 import com.hololive.cardgame.service.LobbyMatchService;
+import com.hololive.cardgame.service.MatchActionService;
 import com.hololive.cardgame.service.MatchGameStateService;
 import com.hololive.cardgame.websocket.MatchSocketHandler;
 import org.springframework.http.HttpStatus;
@@ -25,17 +30,20 @@ import org.springframework.web.server.ResponseStatusException;
 public class MatchController {
 
     private final LobbyMatchService lobbyMatchService;
+    private final MatchActionService matchActionService;
     private final MatchGameStateService matchGameStateService;
     private final MatchSocketHandler matchSocketHandler;
     private final AuthUserResolver authUserResolver;
 
     public MatchController(
         LobbyMatchService lobbyMatchService,
+        MatchActionService matchActionService,
         MatchGameStateService matchGameStateService,
         MatchSocketHandler matchSocketHandler,
         AuthUserResolver authUserResolver
     ) {
         this.lobbyMatchService = lobbyMatchService;
+        this.matchActionService = matchActionService;
         this.matchGameStateService = matchGameStateService;
         this.matchSocketHandler = matchSocketHandler;
         this.authUserResolver = authUserResolver;
@@ -100,11 +108,79 @@ public class MatchController {
         }
     }
 
+    @PostMapping("/{matchId}/actions/play-to-stage")
+    public LobbyMatchResponse playToStage(
+        @PathVariable Long matchId,
+        @RequestBody PlayToStageActionRequest request
+    ) {
+        try {
+            matchActionService.playToStage(matchId, currentUserId(), request);
+            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+            publish(matchId, "PLAY_TO_STAGE", response);
+            return response;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    @PostMapping("/{matchId}/actions/play-support")
+    public LobbyMatchResponse playSupport(
+        @PathVariable Long matchId,
+        @RequestBody PlaySupportActionRequest request
+    ) {
+        try {
+            matchActionService.playSupport(matchId, currentUserId(), request);
+            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+            publish(matchId, "PLAY_SUPPORT", response);
+            return response;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    @PostMapping("/{matchId}/actions/attach-cheer")
+    public LobbyMatchResponse attachCheer(
+        @PathVariable Long matchId,
+        @RequestBody AttachCheerActionRequest request
+    ) {
+        try {
+            matchActionService.attachCheer(matchId, currentUserId(), request);
+            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+            publish(matchId, "ATTACH_CHEER", response);
+            return response;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    @PostMapping("/{matchId}/actions/attack-art")
+    public LobbyMatchResponse attackArt(
+        @PathVariable Long matchId,
+        @RequestBody AttackArtActionRequest request
+    ) {
+        try {
+            matchActionService.attackArt(matchId, currentUserId(), request);
+            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+            publish(matchId, "ATTACK_ART", response);
+            return response;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
     @PostMapping("/{matchId}/actions/end-turn")
     public LobbyMatchResponse endTurn(@PathVariable Long matchId) {
         try {
-            LobbyMatch match = lobbyMatchService.endTurn(matchId, currentUserId());
-            LobbyMatchResponse response = LobbyMatchResponse.from(match);
+            matchActionService.endTurn(matchId, currentUserId());
+            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
             publish(matchId, "TURN_ENDED", response);
             return response;
         } catch (IllegalArgumentException e) {

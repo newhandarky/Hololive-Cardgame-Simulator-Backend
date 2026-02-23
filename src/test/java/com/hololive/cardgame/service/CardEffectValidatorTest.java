@@ -25,6 +25,18 @@ class CardEffectValidatorTest {
     }
 
     @Test
+    void validateEffectJsonShouldAcceptUpperAndLowerCaseTypes() {
+        assertThatCode(() -> cardEffectValidator.validateEffectJson(
+            "{\"type\":\"DRAW\",\"value\":1}",
+            "effectJson"
+        )).doesNotThrowAnyException();
+        assertThatCode(() -> cardEffectValidator.validateEffectJson(
+            "{\"type\":\"draw\",\"value\":1}",
+            "effectJson"
+        )).doesNotThrowAnyException();
+    }
+
+    @Test
     void validateEffectJsonShouldRejectMissingType() {
         assertThatThrownBy(() -> cardEffectValidator.validateEffectJson(
             "{\"rawText\":\"缺少 type\"}",

@@ -235,6 +235,51 @@ public class DeckService {
         return presets;
     }
 
+    @Transactional
+    public void bootstrapStarterDecksForNewUser(Long userId) {
+        List<DeckEntity> existingDecks = deckRepository.findByUserIdOrderByUpdatedAtDesc(userId);
+        if (!existingDecks.isEmpty()) {
+            return;
+        }
+
+        bootstrapStarterDecksForUser(userId);
+    }
+
+    @Transactional
+    public List<DeckSummaryResponse> bootstrapStarterDecksForUser(Long userId) {
+        List<DeckEntity> existingDecks = deckRepository.findByUserIdOrderByUpdatedAtDesc(userId);
+        boolean hasExistingDeck = !existingDecks.isEmpty();
+        boolean hasActiveDeck = existingDecks.stream().anyMatch(DeckEntity::isActive);
+        Set<String> existingNames = existingDecks.stream().map(DeckEntity::getName).collect(Collectors.toSet());
+
+        boolean createdAnyDeck = false;
+        for (StarterDeckPreset preset : starterPresetBootstrapOrder()) {
+            if (preset == null) {
+                continue;
+            }
+            if (existingNames.contains(preset.name())) {
+                continue;
+            }
+            try {
+                boolean shouldActive = !hasActiveDeck && !createdAnyDeck;
+                DeckEntity createdDeck = createDeckFromPreset(userId, preset, shouldActive);
+                existingNames.add(createdDeck.getName());
+                if (createdDeck.isActive()) {
+                    hasActiveDeck = true;
+                }
+                createdAnyDeck = true;
+            } catch (RuntimeException ignored) {
+                // 某套牌缺卡時略過，盡量讓其他官方套牌仍可建立。
+            }
+        }
+
+        if (!hasExistingDeck && !createdAnyDeck) {
+            setupQuickDeck(userId, PRESET_AUTO);
+        }
+
+        return listDeckSummaries(userId);
+    }
+
     @Transactional(readOnly = true)
     public ActiveDeckForMatch loadValidatedActiveDeckForMatch(Long userId) {
         DeckEntity activeDeck = deckRepository.findByUserIdAndActiveTrue(userId)
@@ -355,6 +400,21 @@ public class DeckService {
         } catch (RuntimeException ex) {
             return false;
         }
+    }
+
+    private DeckEntity createDeckFromPreset(Long userId, StarterDeckPreset preset, boolean active) {
+        DeckEntity deck = new DeckEntity();
+        deck.setUserId(userId);
+        deck.setName(ensureUniqueDeckName(userId, preset.name(), null));
+        deck.setFormat("STANDARD");
+        deck.setActive(active);
+        deck.setVersion(1);
+        deck.setCreatedAt(LocalDateTime.now());
+        deck.setUpdatedAt(LocalDateTime.now());
+        DeckEntity savedDeck = deckRepository.save(deck);
+
+        applyPresetEntries(userId, savedDeck.getId(), preset.entries());
+        return savedDeck;
     }
 
     private void applyPresetEntries(Long userId, Long deckId, Map<String, Integer> entries) {
@@ -486,6 +546,15 @@ public class DeckService {
             )
         );
         return Map.copyOf(presets);
+    }
+
+    private static List<StarterDeckPreset> starterPresetBootstrapOrder() {
+        return List.of(
+            STARTER_DECK_PRESETS.get(DEFAULT_STARTER_PRESET),
+            STARTER_DECK_PRESETS.get(PRESET_STARTER_JUSTICE_GIGI),
+            STARTER_DECK_PRESETS.get(PRESET_STARTER_ADVENT_SHIORI),
+            STARTER_DECK_PRESETS.get(PRESET_STARTER_ADVENT_BIJOU)
+        );
     }
 
     private static Map<String, Integer> createStarterAdventEntries(String oshiCardId) {

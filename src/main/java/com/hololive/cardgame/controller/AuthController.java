@@ -57,12 +57,17 @@ public class AuthController {
             user = userRepository.save(user);
         }
 
-        if (upsertResult.created()) {
-            // 新使用者登入時自動建立可測試牌組，避免第一次進站還要手動組牌。
+        // 每次登入都嘗試補齊官方預設套牌：新使用者直接建、舊使用者補缺漏。
+        try {
+            deckService.bootstrapStarterDecksForUser(user.getId());
+        } catch (RuntimeException ignored) {
+            // 若缺少官方卡片資料，回退為單一可測試牌組，仍允許登入。
             try {
-                deckService.setupQuickDeck(user.getId(), "AUTO");
-            } catch (RuntimeException ignored) {
-                // 若當下缺少卡片資料，仍允許登入，後續可由使用者手動建立牌組。
+                if (upsertResult.created()) {
+                    deckService.setupQuickDeck(user.getId(), "AUTO");
+                }
+            } catch (RuntimeException ignoredAgain) {
+                // 保底不阻擋登入流程。
             }
         }
 

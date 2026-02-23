@@ -8,6 +8,7 @@ import com.hololive.cardgame.entity.MatchPlayerEntity;
 import com.hololive.cardgame.model.LobbyMatch;
 import com.hololive.cardgame.model.LobbyMatchStatus;
 import com.hololive.cardgame.model.LobbyPlayer;
+import com.hololive.cardgame.model.MatchPhase;
 import com.hololive.cardgame.repository.MatchActionRepository;
 import com.hololive.cardgame.repository.MatchDeckSnapshotRepository;
 import com.hololive.cardgame.repository.MatchPlayerRepository;
@@ -73,6 +74,7 @@ public class LobbyMatchService {
         match.setLobbyStatus(LobbyMatchStatus.WAITING.name());
         match.setStatus("active");
         match.setTurnNumber(1);
+        match.setCurrentPhase(MatchPhase.RESET.name());
         match.setCreatedAt(LocalDateTime.now());
         match.setUpdatedAt(LocalDateTime.now());
         match = matchRepository.save(match);
@@ -159,6 +161,7 @@ public class LobbyMatchService {
         match.setLobbyStatus(LobbyMatchStatus.STARTED.name());
         match.setCurrentTurnPlayerId(match.getPlayerAId());
         match.setTurnNumber(1);
+        match.setCurrentPhase(MatchPhase.MAIN.name());
         match.setStartedAt(LocalDateTime.now());
         touchUpdatedAt(match);
         matchRepository.save(match);
@@ -200,6 +203,7 @@ public class LobbyMatchService {
 
         match.setCurrentTurnPlayerId(opponentId);
         match.setTurnNumber(turnNumber + 1);
+        match.setCurrentPhase(MatchPhase.MAIN.name());
         touchUpdatedAt(match);
         matchRepository.save(match);
 
@@ -352,6 +356,8 @@ public class LobbyMatchService {
         List<String> lifeCards = new ArrayList<>(cheerDeck.subList(0, oshiLife));
         List<String> cheerDeckCards = new ArrayList<>(cheerDeck.subList(oshiLife, cheerDeck.size()));
 
+        // OSHI 在對戰初始化時也落地成 match_cards 實例，供前端與 action pipeline 取得真實 instanceId。
+        batchInsertMatchCards(matchId, matchPlayer.getUserId(), List.of(oshiCardId), "OSHI", false);
         batchInsertMatchCards(matchId, matchPlayer.getUserId(), deckCards, "DECK", true);
         batchInsertMatchCards(matchId, matchPlayer.getUserId(), handCards, "HAND", false);
         batchInsertMatchCards(matchId, matchPlayer.getUserId(), lifeCards, "LIFE", true);

@@ -1,5 +1,6 @@
 package com.hololive.cardgame.entity;
 
+import com.hololive.cardgame.model.MatchPhase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
@@ -41,6 +42,9 @@ public class MatchEntity {
 
     @Column(name = "turn_number", nullable = false)
     private Integer turnNumber = 1;
+
+    @Column(name = "current_phase", nullable = false)
+    private String currentPhase = MatchPhase.RESET.name();
 
     @Column(name = "started_at", nullable = false)
     private LocalDateTime startedAt = LocalDateTime.now();

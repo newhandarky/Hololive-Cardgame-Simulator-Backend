@@ -113,6 +113,35 @@ class LobbyMatchServiceStartMatchInitializationTest {
         assertThat(justiceDebutCount).isEqualTo(6);
     }
 
+    @Test
+    void bootstrapStarterDecksForNewUserShouldCreateSelectableOfficialDecks() {
+        User user = createUser("starter-bootstrap");
+
+        deckService.bootstrapStarterDecksForNewUser(user.getId());
+        var deckSummaries = deckService.listDeckSummaries(user.getId());
+
+        assertThat(deckSummaries).isNotEmpty();
+        assertThat(deckSummaries).hasSizeGreaterThanOrEqualTo(2);
+        assertThat(deckSummaries.stream().anyMatch(deck -> deck.getName().contains("咲き誇る友情"))).isTrue();
+        assertThat(deckSummaries.stream().filter(deck -> deck.isActive()).count()).isEqualTo(1);
+    }
+
+    @Test
+    void bootstrapStarterDecksForExistingUserShouldFillMissingOfficialDecksWithoutDuplicating() {
+        User user = createUser("starter-existing");
+
+        deckService.setupQuickDeck(user.getId(), "STARTER_JUSTICE_ERB");
+        int beforeCount = deckService.listDeckSummaries(user.getId()).size();
+
+        var firstBootstrap = deckService.bootstrapStarterDecksForUser(user.getId());
+        var secondBootstrap = deckService.bootstrapStarterDecksForUser(user.getId());
+
+        assertThat(firstBootstrap.size()).isGreaterThanOrEqualTo(beforeCount);
+        assertThat(secondBootstrap.size()).isEqualTo(firstBootstrap.size());
+        assertThat(firstBootstrap.stream().anyMatch(deck -> deck.getName().contains("魔法少女ホロウィッチ！"))).isTrue();
+        assertThat(firstBootstrap.stream().filter(deck -> deck.isActive()).count()).isEqualTo(1);
+    }
+
     private User createUser(String prefix) {
         User user = new User();
         String unique = prefix + "_" + System.nanoTime();
