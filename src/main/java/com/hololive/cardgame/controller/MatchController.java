@@ -2,10 +2,12 @@ package com.hololive.cardgame.controller;
 
 import com.hololive.cardgame.dto.AttachCheerActionRequest;
 import com.hololive.cardgame.dto.AttackArtActionRequest;
+import com.hololive.cardgame.dto.BloomActionRequest;
 import com.hololive.cardgame.dto.JoinMatchRequest;
 import com.hololive.cardgame.dto.LobbyEvent;
 import com.hololive.cardgame.dto.LobbyMatchResponse;
 import com.hololive.cardgame.dto.ReadyRequest;
+import com.hololive.cardgame.dto.ResolveDecisionRequest;
 import com.hololive.cardgame.dto.GameStateResponse;
 import com.hololive.cardgame.dto.PlaySupportActionRequest;
 import com.hololive.cardgame.dto.PlayToStageActionRequest;
@@ -125,6 +127,23 @@ public class MatchController {
         }
     }
 
+    @PostMapping("/{matchId}/actions/bloom")
+    public LobbyMatchResponse bloom(
+        @PathVariable Long matchId,
+        @RequestBody BloomActionRequest request
+    ) {
+        try {
+            matchActionService.bloom(matchId, currentUserId(), request);
+            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+            publish(matchId, "BLOOM", response);
+            return response;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
     @PostMapping("/{matchId}/actions/play-support")
     public LobbyMatchResponse playSupport(
         @PathVariable Long matchId,
@@ -182,6 +201,23 @@ public class MatchController {
             matchActionService.endTurn(matchId, currentUserId());
             LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
             publish(matchId, "TURN_ENDED", response);
+            return response;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    @PostMapping("/{matchId}/actions/resolve-decision")
+    public LobbyMatchResponse resolveDecision(
+        @PathVariable Long matchId,
+        @RequestBody ResolveDecisionRequest request
+    ) {
+        try {
+            matchActionService.resolveDecision(matchId, currentUserId(), request);
+            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+            publish(matchId, "DECISION_RESOLVED", response);
             return response;
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());

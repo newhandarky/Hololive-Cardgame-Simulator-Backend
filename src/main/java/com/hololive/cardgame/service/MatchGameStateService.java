@@ -1,12 +1,21 @@
 package com.hololive.cardgame.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hololive.cardgame.dto.BoardZoneStateResponse;
 import com.hololive.cardgame.dto.GameStateResponse;
+import com.hololive.cardgame.dto.PendingDecisionCandidateResponse;
+import com.hololive.cardgame.dto.PendingDecisionResponse;
 import com.hololive.cardgame.dto.PlayerZoneStateResponse;
+import com.hololive.cardgame.dto.RecentMatchActionResponse;
 import com.hololive.cardgame.dto.ZoneCardInstanceResponse;
 import com.hololive.cardgame.entity.MatchEntity;
 import com.hololive.cardgame.entity.MatchPlayerEntity;
 import com.hololive.cardgame.model.MatchPhase;
+import java.sql.Array;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.util.ArrayList;
 import com.hololive.cardgame.repository.MatchPlayerRepository;
 import com.hololive.cardgame.repository.MatchRepository;
 import java.util.LinkedHashMap;
@@ -39,15 +48,18 @@ public class MatchGameStateService {
     private final MatchRepository matchRepository;
     private final MatchPlayerRepository matchPlayerRepository;
     private final JdbcTemplate jdbcTemplate;
+    private final ObjectMapper objectMapper;
 
     public MatchGameStateService(
         MatchRepository matchRepository,
         MatchPlayerRepository matchPlayerRepository,
-        JdbcTemplate jdbcTemplate
+        JdbcTemplate jdbcTemplate,
+        ObjectMapper objectMapper
     ) {
         this.matchRepository = matchRepository;
         this.matchPlayerRepository = matchPlayerRepository;
         this.jdbcTemplate = jdbcTemplate;
+        this.objectMapper = objectMapper;
     }
 
     @Transactional(readOnly = true)
@@ -55,7 +67,9 @@ public class MatchGameStateService {
         if (!matchPlayerRepository.existsByMatchIdAndUserId(matchId, userId)) {
             throw new IllegalStateException("你不在此房間中");
         }
-        return getGameState(matchId);
+        GameStateResponse response = getGameState(matchId);
+        response.getPendingDecisions().addAll(loadPendingDecisions(matchId, userId));
+        return response;
     }
 
     @Transactional(readOnly = true)
@@ -112,9 +126,18 @@ public class MatchGameStateService {
                 mc.id AS card_instance_id,
                 h.card_id,
                 ROW_NUMBER() OVER (PARTITION BY h.owner_user_id, h.zone ORDER BY h.id) AS position_index,
-                h.is_face_down
+                h.is_face_down,
+                COALESCE(stack_info.stack_depth, 1) AS stack_depth,
+                stack_info.stack_card_instance_ids
             FROM match_holomems h
             JOIN match_cards mc ON mc.id = h.match_card_id
+            LEFT JOIN LATERAL (
+                SELECT
+                    COUNT(*)::int AS stack_depth,
+                    ARRAY_AGG(s.match_card_id ORDER BY s.stack_order) AS stack_card_instance_ids
+                FROM match_holomem_stack_cards s
+                WHERE s.match_holomem_id = h.id
+            ) stack_info ON TRUE
             WHERE h.match_id = ?
             ORDER BY h.owner_user_id, h.zone, position_index, h.id
             """,
@@ -133,7 +156,9 @@ public class MatchGameStateService {
                 zone,
                 toInt(row.get("position_index")),
                 ownerUserId,
-                toBoolean(row.get("is_face_down"))
+                toBoolean(row.get("is_face_down")),
+                toInt(row.get("stack_depth")),
+                toLongList(row.get("stack_card_instance_ids"), toLong(row.get("card_instance_id")))
             );
             addCardToZone(playerState, card);
         }
@@ -146,7 +171,106 @@ public class MatchGameStateService {
         response.setCurrentTurnPlayerId(match.getCurrentTurnPlayerId());
         response.setTurnNumber(match.getTurnNumber());
         response.getPlayers().addAll(playerStates.values());
+        response.getRecentActions().addAll(loadRecentActions(matchId));
         return response;
+    }
+
+    private List<RecentMatchActionResponse> loadRecentActions(Long matchId) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+            """
+            SELECT id,
+                   user_id,
+                   action_type,
+                   turn_number,
+                   action_order,
+                   payload::text AS payload_text,
+                   executed_at AS created_at
+            FROM match_actions
+            WHERE match_id = ?
+            ORDER BY id DESC
+            LIMIT 20
+            """,
+            matchId
+        );
+        List<RecentMatchActionResponse> actions = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            RecentMatchActionResponse action = new RecentMatchActionResponse();
+            action.setActionId(toLong(row.get("id")));
+            action.setUserId(toLong(row.get("user_id")));
+            action.setActionType(toStringValue(row.get("action_type")));
+            action.setTurnNumber(toInt(row.get("turn_number")));
+            action.setActionOrder(toInt(row.get("action_order")));
+            action.setPayload(parsePayloadJson(toStringValue(row.get("payload_text"))));
+            action.setCreatedAt(toLocalDateTime(row.get("created_at")));
+            actions.add(action);
+        }
+        return actions;
+    }
+
+    private List<PendingDecisionResponse> loadPendingDecisions(Long matchId, Long userId) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+            """
+            SELECT id,
+                   decision_type,
+                   source_action_type,
+                   source_card_instance_id,
+                   source_card_id,
+                   effect_type,
+                   min_select,
+                   max_select,
+                   context_json::text AS context_text,
+                   created_at
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+            ORDER BY id ASC
+            LIMIT 5
+            """,
+            matchId,
+            userId
+        );
+        List<PendingDecisionResponse> decisions = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            PendingDecisionResponse decision = new PendingDecisionResponse();
+            decision.setDecisionId(toLong(row.get("id")));
+            decision.setDecisionType(toStringValue(row.get("decision_type")));
+            decision.setSourceActionType(toStringValue(row.get("source_action_type")));
+            decision.setSourceCardInstanceId(toLong(row.get("source_card_instance_id")));
+            decision.setSourceCardId(toStringValue(row.get("source_card_id")));
+            decision.setEffectType(toStringValue(row.get("effect_type")));
+            decision.setMinSelect(toInt(row.get("min_select")));
+            decision.setMaxSelect(toInt(row.get("max_select")));
+            decision.setCreatedAt(toLocalDateTime(row.get("created_at")));
+
+            JsonNode contextNode = parsePayloadJson(toStringValue(row.get("context_text")));
+            decision.setTargetHolomemCardInstanceId(toLong(contextNode.path("targetHolomemCardInstanceId").asText(null)));
+            decision.getCandidates().addAll(loadPendingDecisionCandidates(contextNode));
+            decisions.add(decision);
+        }
+        return decisions;
+    }
+
+    private List<PendingDecisionCandidateResponse> loadPendingDecisionCandidates(JsonNode contextNode) {
+        if (contextNode == null || contextNode.isNull()) {
+            return List.of();
+        }
+        JsonNode candidateNodes = contextNode.path("candidateCards");
+        if (!candidateNodes.isArray() || candidateNodes.isEmpty()) {
+            return List.of();
+        }
+        List<PendingDecisionCandidateResponse> candidates = new ArrayList<>();
+        for (JsonNode node : candidateNodes) {
+            PendingDecisionCandidateResponse candidate = new PendingDecisionCandidateResponse();
+            candidate.setCardInstanceId(toLong(node.path("cardInstanceId").asText(null)));
+            candidate.setCardId(toStringValue(node.path("cardId").asText(null)));
+            candidate.setName(toStringValue(node.path("name").asText(null)));
+            candidate.setCardType(toStringValue(node.path("cardType").asText(null)));
+            candidate.setLevelType(toStringValue(node.path("levelType").asText(null)));
+            candidate.setZone(toStringValue(node.path("zone").asText(null)));
+            candidates.add(candidate);
+        }
+        return candidates;
     }
 
     private boolean isMatchCardSupportedZone(String zone) {
@@ -253,5 +377,56 @@ public class MatchGameStateService {
             return Boolean.parseBoolean(text);
         }
         return false;
+    }
+
+    private List<Long> toLongList(Object value, Long fallbackSingle) {
+        if (value == null) {
+            return fallbackSingle == null ? List.of() : List.of(fallbackSingle);
+        }
+        if (value instanceof Array sqlArray) {
+            try {
+                Object rawArray = sqlArray.getArray();
+                if (rawArray instanceof Object[] array) {
+                    List<Long> values = new ArrayList<>();
+                    for (Object item : array) {
+                        Long converted = toLong(item);
+                        if (converted != null) {
+                            values.add(converted);
+                        }
+                    }
+                    if (!values.isEmpty()) {
+                        return values;
+                    }
+                }
+            } catch (SQLException ignored) {
+                // fallback to single top instance
+            }
+        }
+        Long converted = toLong(value);
+        if (converted != null) {
+            return List.of(converted);
+        }
+        return fallbackSingle == null ? List.of() : List.of(fallbackSingle);
+    }
+
+    private JsonNode parsePayloadJson(String value) {
+        if (!StringUtils.hasText(value)) {
+            return objectMapper.nullNode();
+        }
+        try {
+            return objectMapper.readTree(value);
+        } catch (Exception ignored) {
+            return objectMapper.valueToTree(Map.of("raw", value));
+        }
+    }
+
+    private java.time.LocalDateTime toLocalDateTime(Object value) {
+        if (value instanceof java.time.LocalDateTime dateTime) {
+            return dateTime;
+        }
+        if (value instanceof Timestamp timestamp) {
+            return timestamp.toLocalDateTime();
+        }
+        return null;
     }
 }

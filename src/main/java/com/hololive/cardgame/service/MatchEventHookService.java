@@ -33,6 +33,46 @@ public class MatchEventHookService {
         result.put("cardInstanceId", cardInstanceId);
         result.put("stageZone", normalize(stageZone));
 
+        Map<String, Object> summary = loadMemberTriggerSummary(cardId);
+        if (summary == null) {
+            result.put("hasPassive", false);
+            result.put("detectedTriggers", List.of());
+            return result;
+        }
+        result.putAll(summary);
+        result.put("note", "目前僅建立事件鉤子與觸發辨識，效果執行將在後續 P2 擴充");
+        return result;
+    }
+
+    public Map<String, Object> onHolomemBloom(
+        Long matchId,
+        Long userId,
+        String cardId,
+        Long cardInstanceId,
+        Long previousTopCardInstanceId,
+        String stageZone
+    ) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("event", "ON_HOLOMEM_BLOOM");
+        result.put("matchId", matchId);
+        result.put("userId", userId);
+        result.put("cardId", cardId);
+        result.put("cardInstanceId", cardInstanceId);
+        result.put("previousTopCardInstanceId", previousTopCardInstanceId);
+        result.put("stageZone", normalize(stageZone));
+
+        Map<String, Object> summary = loadMemberTriggerSummary(cardId);
+        if (summary == null) {
+            result.put("hasPassive", false);
+            result.put("detectedTriggers", List.of());
+            return result;
+        }
+        result.putAll(summary);
+        result.put("note", "目前僅建立事件鉤子與觸發辨識，效果執行將在後續 P2 擴充");
+        return result;
+    }
+
+    private Map<String, Object> loadMemberTriggerSummary(String cardId) {
         Map<String, Object> row = jdbcTemplate.query(
             """
             SELECT passive_effect_json::text AS passive_text, trigger_condition
@@ -51,9 +91,7 @@ public class MatchEventHookService {
             cardId
         );
         if (row == null) {
-            result.put("hasPassive", false);
-            result.put("detectedTriggers", List.of());
-            return result;
+            return null;
         }
 
         String passiveText = asText(row.get("passive_text"));
@@ -69,11 +107,11 @@ public class MatchEventHookService {
             detected.add("COLLAB");
         }
 
-        result.put("hasPassive", StringUtils.hasText(passiveText));
-        result.put("triggerCondition", triggerCondition);
-        result.put("detectedTriggers", detected);
-        result.put("note", "目前僅建立事件鉤子與觸發辨識，效果執行將在後續 P2 擴充");
-        return result;
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("hasPassive", StringUtils.hasText(passiveText));
+        summary.put("triggerCondition", triggerCondition);
+        summary.put("detectedTriggers", detected);
+        return summary;
     }
 
     private boolean contains(String source, String target) {
