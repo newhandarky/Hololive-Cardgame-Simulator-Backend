@@ -8,4 +8,5 @@ import lombok.Data;
 public class ResolveDecisionRequest {
     private Long decisionId;
     private List<Long> selectedCardInstanceIds = new ArrayList<>();
+    private String placement;
 }

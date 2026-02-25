@@ -18,6 +18,9 @@ public class PendingInteractionResponse {
     private Long targetHolomemCardInstanceId;
     private String title;
     private String message;
+    private Long lookedCardInstanceId;
+    private String lookedCardId;
+    private final List<String> placementOptions = new ArrayList<>();
     private LocalDateTime createdAt;
     private final List<PendingDecisionCandidateResponse> cards = new ArrayList<>();
 }

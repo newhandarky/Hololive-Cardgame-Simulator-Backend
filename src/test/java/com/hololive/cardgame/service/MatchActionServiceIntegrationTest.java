@@ -6,12 +6,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import jakarta.persistence.EntityManager;
 import com.hololive.cardgame.dto.AttachCheerActionRequest;
 import com.hololive.cardgame.dto.AttackArtActionRequest;
+import com.hololive.cardgame.dto.BatonTouchActionRequest;
 import com.hololive.cardgame.dto.BloomActionRequest;
 import com.hololive.cardgame.dto.GameStateResponse;
 import com.hololive.cardgame.dto.MulliganActionRequest;
 import com.hololive.cardgame.dto.PlaySupportActionRequest;
 import com.hololive.cardgame.dto.PlayToStageActionRequest;
 import com.hololive.cardgame.dto.ResolveDecisionRequest;
+import com.hololive.cardgame.dto.UseOshiSkillActionRequest;
+import com.hololive.cardgame.error.GameErrorCode;
+import com.hololive.cardgame.error.GameRuleException;
 import com.hololive.cardgame.entity.User;
 import com.hololive.cardgame.model.LobbyMatch;
 import com.hololive.cardgame.repository.UserRepository;
@@ -600,6 +604,153 @@ class MatchActionServiceIntegrationTest {
     }
 
     @Test
+    void endTurnShouldAutoReplenishCenterFromBackPreferNonRested() {
+        StartedMatchContext context = createStartedMatch("end-center-host", "end-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String restedBackCardId = createMemberCardDefinition("TEND_CENTER_RESTED", "休息後排", "DEBUT", 120, "GREEN");
+        String activeBackCardId = createMemberCardDefinition("TEND_CENTER_ACTIVE", "站立後排", "DEBUT", 120, "BLUE");
+        Long restedBackCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, restedBackCardId, "BACK", "DEBUT", 0);
+        Long activeBackCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, activeBackCardId, "BACK", "DEBUT", 0);
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET is_rested = TRUE
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            restedBackCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'CENTER'
+            """,
+            matchId,
+            hostId
+        );
+
+        matchActionService.drawTurn(matchId, hostId);
+        resolvePendingInteractionIfExists(matchId, hostId, "DRAW_REVEAL");
+        matchActionService.endTurn(matchId, hostId);
+
+        Long currentCenterCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT match_card_id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'CENTER'
+            ORDER BY id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("match_card_id") : null,
+            matchId,
+            hostId
+        );
+        assertThat(currentCenterCardInstanceId).isEqualTo(activeBackCardInstanceId);
+    }
+
+    @Test
+    void endTurnShouldAutoReplenishCenterFromRestedBackWhenNoActiveBack() {
+        StartedMatchContext context = createStartedMatch("end-center-rested-host", "end-center-rested-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String restedBackCardId = createMemberCardDefinition("TEND_CENTER_ONLY_RESTED", "唯一後排", "DEBUT", 120, "GREEN");
+        Long restedBackCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, restedBackCardId, "BACK", "DEBUT", 0);
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET is_rested = TRUE
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            restedBackCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'CENTER'
+            """,
+            matchId,
+            hostId
+        );
+
+        matchActionService.drawTurn(matchId, hostId);
+        resolvePendingInteractionIfExists(matchId, hostId, "DRAW_REVEAL");
+        matchActionService.endTurn(matchId, hostId);
+
+        Long currentCenterCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT match_card_id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'CENTER'
+            ORDER BY id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("match_card_id") : null,
+            matchId,
+            hostId
+        );
+        assertThat(currentCenterCardInstanceId).isEqualTo(restedBackCardInstanceId);
+    }
+
+    @Test
+    void endTurnShouldFinishMatchWhenCurrentPlayerHasNoHolomemAfterCenterReplenishCycle() {
+        StartedMatchContext context = createStartedMatch("end-no-holomem-host", "end-no-holomem-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+            """,
+            matchId,
+            hostId
+        );
+
+        matchActionService.drawTurn(matchId, hostId);
+        resolvePendingInteractionIfExists(matchId, hostId, "DRAW_REVEAL");
+        matchActionService.endTurn(matchId, hostId);
+
+        String status = jdbcTemplate.queryForObject(
+            "SELECT status FROM matches WHERE id = ?",
+            String.class,
+            matchId
+        );
+        Long winnerUserId = jdbcTemplate.queryForObject(
+            "SELECT winner_user_id FROM matches WHERE id = ?",
+            Long.class,
+            matchId
+        );
+        String phase = jdbcTemplate.queryForObject(
+            "SELECT current_phase FROM matches WHERE id = ?",
+            String.class,
+            matchId
+        );
+        assertThat(status).isEqualTo("finished");
+        assertThat(winnerUserId).isEqualTo(guestId);
+        assertThat(phase).isEqualTo("END");
+    }
+
+    @Test
     void resolveDecisionShouldConfirmDrawRevealInteraction() {
         StartedMatchContext context = createStartedMatch("turn-draw-confirm-host", "turn-draw-confirm-guest");
         Long matchId = context.matchId();
@@ -671,6 +822,109 @@ class MatchActionServiceIntegrationTest {
             guestId
         );
         assertThat(payloadText).containsPattern("\"interactionType\"\\s*:\\s*\"DRAW_REVEAL\"");
+    }
+
+    @Test
+    void playSupportLookTopDeckShouldExposePendingInteractionWithCardContext() {
+        StartedMatchContext context = createStartedMatch("look-top-host", "look-top-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TLOOK_TOP_" + System.nanoTime(),
+            false,
+            "LOOK_TOP_DECK",
+            "{\"type\":\"LOOK_TOP_DECK\",\"rawText\":\"自分のデッキの上から1枚を見る。\"}",
+            "SELF"
+        );
+
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        GameStateResponse state = matchGameStateService.getGameStateForUser(matchId, hostId);
+        var lookTop = state.getPendingInteractions().stream()
+            .filter(item -> "LOOK_TOP_DECK".equals(item.getInteractionType()))
+            .findFirst()
+            .orElseThrow();
+
+        assertThat(lookTop.getTitle()).isEqualTo("查看牌庫頂");
+        assertThat(lookTop.getMessage()).contains("保留在牌庫頂");
+        assertThat(lookTop.getCards()).hasSize(1);
+        assertThat(lookTop.getPlacementOptions()).containsExactly("TOP", "BOTTOM");
+        assertThat(lookTop.getLookedCardInstanceId()).isEqualTo(lookTop.getCards().get(0).getCardInstanceId());
+        assertThat(lookTop.getLookedCardId()).isEqualTo(lookTop.getCards().get(0).getCardId());
+        assertThat(lookTop.getCards().get(0).getCardInstanceId()).isNotNull();
+        assertThat(lookTop.getCards().get(0).getCardId()).isNotBlank();
+    }
+
+    @Test
+    void resolveLookTopDeckDecisionShouldAcceptPlacementOption() {
+        StartedMatchContext context = createStartedMatch("look-top-placement-host", "look-top-placement-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TLOOK_TOP_PLACE_" + System.nanoTime(),
+            false,
+            "LOOK_TOP_DECK",
+            "{\"type\":\"LOOK_TOP_DECK\",\"rawText\":\"自分のデッキの上から1枚を見る。\"}",
+            "SELF"
+        );
+
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        Long decisionId = jdbcTemplate.queryForObject(
+            """
+            SELECT id
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'LOOK_TOP_DECK'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            Long.class,
+            matchId,
+            hostId
+        );
+        assertThat(decisionId).isNotNull();
+
+        ResolveDecisionRequest resolve = new ResolveDecisionRequest();
+        resolve.setDecisionId(decisionId);
+        resolve.setPlacement("BOTTOM");
+        matchActionService.resolveDecision(matchId, hostId, resolve);
+
+        String status = jdbcTemplate.queryForObject(
+            "SELECT status FROM match_pending_decisions WHERE id = ?",
+            String.class,
+            decisionId
+        );
+        assertThat(status).isEqualTo("RESOLVED");
+
+        String payload = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'INTERACTION_CONFIRMED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        assertThat(payload).containsPattern("\"decisionType\"\\s*:\\s*\"LOOK_TOP_DECK\"");
+        assertThat(payload).containsPattern("\"placement\"\\s*:\\s*\"BOTTOM\"");
     }
 
     @Test
@@ -1395,6 +1649,69 @@ class MatchActionServiceIntegrationTest {
     }
 
     @Test
+    void bloomShouldRejectSkippingLevelTransition() {
+        StartedMatchContext context = createStartedMatch("bloom-skip-level-host", "bloom-skip-level-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String displayName = "測試 Bloom 跳階";
+        String debutCardId = createMemberCardDefinition("TBLOOM_SKIP_DEBUT", displayName, "DEBUT", 120, "RED");
+        String secondCardId = createMemberCardDefinition("TBLOOM_SKIP_SECOND", displayName, "SECOND", 220, "RED");
+
+        Long targetHolomemCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            debutCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long bloomCardInstanceId = insertCardIntoHand(matchId, hostId, secondCardId);
+
+        BloomActionRequest request = new BloomActionRequest();
+        request.setBloomCardInstanceId(bloomCardInstanceId);
+        request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
+
+        assertThatThrownBy(() -> matchActionService.bloom(matchId, hostId, request))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("依序遞進");
+    }
+
+    @Test
+    void playToStageShouldRejectFirstSecondBuzzFromHand() {
+        StartedMatchContext context = createStartedMatch("play-to-stage-first-host", "play-to-stage-first-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String firstCardId = createMemberCardDefinition("TPTS_FIRST_ONLY", "測試 First 直上", "FIRST", 170, "BLUE");
+        Long firstCardInstanceId = insertCardIntoHand(matchId, hostId, firstCardId);
+
+        PlayToStageActionRequest request = new PlayToStageActionRequest();
+        request.setCardInstanceId(firstCardInstanceId);
+        request.setTargetZone("BACK");
+
+        assertThatThrownBy(() -> matchActionService.playToStage(matchId, hostId, request))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("請改用 BLOOM");
+
+        Integer stillInHand = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_cards
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            Integer.class,
+            firstCardInstanceId,
+            matchId,
+            hostId
+        );
+        assertThat(stillInHand).isEqualTo(1);
+    }
+
+    @Test
     void bloomShouldRejectTargetEnteredThisTurn() {
         StartedMatchContext context = createStartedMatch("bloom-newly-host", "bloom-newly-guest");
         Long matchId = context.matchId();
@@ -1407,7 +1724,7 @@ class MatchActionServiceIntegrationTest {
         Long debutInHand = insertCardIntoHand(matchId, hostId, debutCardId);
         PlayToStageActionRequest playToStage = new PlayToStageActionRequest();
         playToStage.setCardInstanceId(debutInHand);
-        playToStage.setTargetZone("CENTER");
+        playToStage.setTargetZone("BACK");
         matchActionService.playToStage(matchId, hostId, playToStage);
 
         Long targetHolomemCardInstanceId = jdbcTemplate.queryForObject(
@@ -1416,7 +1733,7 @@ class MatchActionServiceIntegrationTest {
             FROM match_holomems
             WHERE match_id = ?
               AND owner_user_id = ?
-              AND zone = 'CENTER'
+              AND zone = 'BACK'
             LIMIT 1
             """,
             Long.class,
@@ -3117,10 +3434,11 @@ class MatchActionServiceIntegrationTest {
     }
 
     @Test
-    void playSupportLimitedShouldRejectOnPlayersFirstTurn() {
+    void playSupportLimitedShouldRejectOnlyForFirstPlayerOnTurnOne() {
         StartedMatchContext context = createStartedMatch("support-limited-first-host", "support-limited-first-guest");
         Long matchId = context.matchId();
         Long hostId = context.hostId();
+        Long guestId = context.guestId();
 
         Long limitedSupportCardInstanceId = insertSupportCardIntoHand(
             matchId,
@@ -3136,8 +3454,8 @@ class MatchActionServiceIntegrationTest {
         request.setCardInstanceId(limitedSupportCardInstanceId);
 
         assertThatThrownBy(() -> matchActionService.playSupport(matchId, hostId, request))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("首回合");
+            .isInstanceOf(GameRuleException.class)
+            .satisfies(ex -> assertThat(((GameRuleException) ex).getCode()).isEqualTo(GameErrorCode.LIMITED_FIRST_TURN));
 
         Integer stillInHand = jdbcTemplate.queryForObject(
             """
@@ -3154,6 +3472,48 @@ class MatchActionServiceIntegrationTest {
             hostId
         );
         assertThat(stillInHand).isEqualTo(1);
+
+        Long guestLimitedSupportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            guestId,
+            "TLIMIT_FIRST_GUEST_" + System.nanoTime(),
+            true,
+            "DRAW",
+            "{\"type\":\"DRAW\",\"value\":1}",
+            "SELF"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET current_turn_player_id = ?,
+                turn_number = 2,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            guestId,
+            matchId
+        );
+
+        PlaySupportActionRequest guestRequest = new PlaySupportActionRequest();
+        guestRequest.setCardInstanceId(guestLimitedSupportCardInstanceId);
+        matchActionService.playSupport(matchId, guestId, guestRequest);
+
+        Integer guestStillInHand = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_cards
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            Integer.class,
+            guestLimitedSupportCardInstanceId,
+            matchId,
+            guestId
+        );
+        assertThat(guestStillInHand).isZero();
     }
 
     @Test
@@ -3192,8 +3552,8 @@ class MatchActionServiceIntegrationTest {
         PlaySupportActionRequest secondRequest = new PlaySupportActionRequest();
         secondRequest.setCardInstanceId(secondLimited);
         assertThatThrownBy(() -> matchActionService.playSupport(matchId, hostId, secondRequest))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("LIMITED");
+            .isInstanceOf(GameRuleException.class)
+            .satisfies(ex -> assertThat(((GameRuleException) ex).getCode()).isEqualTo(GameErrorCode.LIMITED_ALREADY_USED_THIS_TURN));
     }
 
     @Test
@@ -5407,6 +5767,293 @@ class MatchActionServiceIntegrationTest {
         assertThat(totalDamageTaken).isEqualTo(70);
     }
 
+    @Test
+    void batonTouchShouldAllowOnlyOncePerTurn() {
+        StartedMatchContext context = createStartedMatch("baton-once-host", "baton-once-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long centerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            30,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":30}",
+            1,
+            "RED",
+            "TBATON_ONCE_CENTER"
+        );
+        Long backCardAInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "BACK",
+            170,
+            "GREEN",
+            20,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":20}",
+            1,
+            "GREEN",
+            "TBATON_ONCE_BACK_A"
+        );
+        Long backCardBInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "BACK",
+            160,
+            "BLUE",
+            20,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":20}",
+            1,
+            "BLUE",
+            "TBATON_ONCE_BACK_B"
+        );
+
+        BatonTouchActionRequest first = new BatonTouchActionRequest();
+        first.setSourceHolomemCardInstanceId(centerCardInstanceId);
+        first.setTargetBackHolomemCardInstanceId(backCardAInstanceId);
+        matchActionService.batonTouch(matchId, hostId, first);
+
+        BatonTouchActionRequest second = new BatonTouchActionRequest();
+        second.setSourceHolomemCardInstanceId(backCardAInstanceId);
+        second.setTargetBackHolomemCardInstanceId(backCardBInstanceId);
+        assertThatThrownBy(() -> matchActionService.batonTouch(matchId, hostId, second))
+            .isInstanceOf(GameRuleException.class)
+            .satisfies(ex -> assertThat(((GameRuleException) ex).getCode()).isEqualTo(GameErrorCode.BATON_TOUCH_ALREADY_USED_THIS_TURN));
+    }
+
+    @Test
+    void batonTouchShouldBeBlockedByActionLockEffect() {
+        StartedMatchContext context = createStartedMatch("baton-lock-host", "baton-lock-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long centerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            30,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":30}",
+            1,
+            "RED",
+            "TBATON_LOCK_CENTER"
+        );
+        Long backCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "BACK",
+            170,
+            "GREEN",
+            20,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":20}",
+            1,
+            "GREEN",
+            "TBATON_LOCK_BACK"
+        );
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TBATON_LOCK_SUPPORT_" + System.nanoTime(),
+            false,
+            "ACTION_LOCK",
+            "{\"type\":\"ACTION_LOCK\",\"rawText\":\"このターンの間、自分のセンターホロメンとコラボホロメンは、バトンタッチ、移動、交代できない。\"}",
+            "SELF"
+        );
+
+        PlaySupportActionRequest playSupport = new PlaySupportActionRequest();
+        playSupport.setCardInstanceId(supportCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, playSupport);
+
+        BatonTouchActionRequest batonTouch = new BatonTouchActionRequest();
+        batonTouch.setSourceHolomemCardInstanceId(centerCardInstanceId);
+        batonTouch.setTargetBackHolomemCardInstanceId(backCardInstanceId);
+        assertThatThrownBy(() -> matchActionService.batonTouch(matchId, hostId, batonTouch))
+            .isInstanceOf(GameRuleException.class)
+            .satisfies(ex -> assertThat(((GameRuleException) ex).getCode()).isEqualTo(GameErrorCode.STAGE_ACTION_LOCKED));
+    }
+
+    @Test
+    void batonTouchShouldRequireBackTargetNotRested() {
+        StartedMatchContext context = createStartedMatch("baton-rest-host", "baton-rest-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long centerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            30,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":30}",
+            1,
+            "RED",
+            "TBATON_REST_CENTER"
+        );
+        Long backCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "BACK",
+            170,
+            "GREEN",
+            20,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":20}",
+            1,
+            "GREEN",
+            "TBATON_REST_BACK"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET is_rested = TRUE
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            backCardInstanceId
+        );
+
+        BatonTouchActionRequest batonTouch = new BatonTouchActionRequest();
+        batonTouch.setSourceHolomemCardInstanceId(centerCardInstanceId);
+        batonTouch.setTargetBackHolomemCardInstanceId(backCardInstanceId);
+        assertThatThrownBy(() -> matchActionService.batonTouch(matchId, hostId, batonTouch))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("非休息");
+    }
+
+    @Test
+    void useOshiSkillShouldConsumeHolopowerAndMarkSkillUsedThisTurn() {
+        StartedMatchContext context = createStartedMatch("oshi-skill-host", "oshi-skill-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Integer holopowerCost = jdbcTemplate.query(
+            """
+            SELECT os.holopower_cost
+            FROM match_players mp
+            JOIN oshi_skills os
+              ON os.oshi_card_id = mp.oshi_card_id
+            WHERE mp.match_id = ?
+              AND mp.user_id = ?
+              AND os.skill_type = 'NORMAL'
+            ORDER BY os.id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt("holopower_cost") : null,
+            matchId,
+            hostId
+        );
+        assertThat(holopowerCost).isNotNull();
+        seedHolopower(matchId, hostId, holopowerCost);
+        int archiveBefore = countZone(matchId, hostId, "ARCHIVE");
+        int holopowerBefore = countZone(matchId, hostId, "HOLOPOWER");
+
+        UseOshiSkillActionRequest request = new UseOshiSkillActionRequest();
+        request.setSkillType("NORMAL");
+        matchActionService.useOshiSkill(matchId, hostId, request);
+
+        Boolean usedThisTurn = jdbcTemplate.queryForObject(
+            """
+            SELECT skill_used_this_turn
+            FROM match_players
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            Boolean.class,
+            matchId,
+            hostId
+        );
+        assertThat(usedThisTurn).isTrue();
+        assertThat(countZone(matchId, hostId, "HOLOPOWER")).isEqualTo(holopowerBefore - holopowerCost);
+        assertThat(countZone(matchId, hostId, "ARCHIVE")).isEqualTo(archiveBefore + holopowerCost);
+
+        Integer actionCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'USE_OSHI_SKILL'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        assertThat(actionCount).isEqualTo(1);
+    }
+
+    @Test
+    void useOshiSkillShouldAllowReuseAfterTurnCycles() {
+        StartedMatchContext context = createStartedMatch("oshi-turn-host", "oshi-turn-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Integer holopowerCost = jdbcTemplate.query(
+            """
+            SELECT os.holopower_cost
+            FROM match_players mp
+            JOIN oshi_skills os
+              ON os.oshi_card_id = mp.oshi_card_id
+            WHERE mp.match_id = ?
+              AND mp.user_id = ?
+              AND os.skill_type = 'NORMAL'
+            ORDER BY os.id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt("holopower_cost") : null,
+            matchId,
+            hostId
+        );
+        assertThat(holopowerCost).isNotNull();
+        seedHolopower(matchId, hostId, holopowerCost * 2);
+
+        UseOshiSkillActionRequest request = new UseOshiSkillActionRequest();
+        request.setSkillType("NORMAL");
+        matchActionService.useOshiSkill(matchId, hostId, request);
+        assertThatThrownBy(() -> matchActionService.useOshiSkill(matchId, hostId, request))
+            .isInstanceOf(GameRuleException.class)
+            .satisfies(ex -> assertThat(((GameRuleException) ex).getCode()).isEqualTo(GameErrorCode.OSHI_SKILL_ALREADY_USED_THIS_TURN));
+
+        matchActionService.drawTurn(matchId, hostId);
+        resolvePendingInteractionIfExists(matchId, hostId, "DRAW_REVEAL");
+        matchActionService.endTurn(matchId, hostId);
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TURN_START");
+        matchActionService.drawTurn(matchId, guestId);
+        resolvePendingInteractionIfExists(matchId, guestId, "DRAW_REVEAL");
+        matchActionService.endTurn(matchId, guestId);
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TURN_START");
+        matchActionService.useOshiSkill(matchId, hostId, request);
+
+        Integer actionCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'USE_OSHI_SKILL'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        assertThat(actionCount).isEqualTo(2);
+    }
+
     private StartedMatchContext createStartedMatch(String hostPrefix, String guestPrefix) {
         StartedMatchContext context = createReadyMatch(hostPrefix, guestPrefix);
         lobbyMatchService.startMatch(context.matchId(), context.hostId());
@@ -5492,6 +6139,46 @@ class MatchActionServiceIntegrationTest {
             matchId,
             userId
         );
+    }
+
+    private void seedHolopower(Long matchId, Long userId, int count) {
+        if (count <= 0) {
+            return;
+        }
+        List<Long> deckCardIds = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'DECK'
+            ORDER BY order_index NULLS LAST, id
+            LIMIT ?
+            """,
+            (rs, rowNum) -> rs.getLong("id"),
+            matchId,
+            userId,
+            count
+        );
+        for (int i = 0; i < deckCardIds.size(); i++) {
+            jdbcTemplate.update(
+                """
+                UPDATE match_cards
+                SET zone = 'HOLOPOWER',
+                    order_index = ?,
+                    is_face_down = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'DECK'
+                """,
+                i + 1,
+                deckCardIds.get(i),
+                matchId,
+                userId
+            );
+        }
     }
 
     private Long createStageHolomemWithArtAndCheer(

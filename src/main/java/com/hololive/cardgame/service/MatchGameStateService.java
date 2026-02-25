@@ -26,6 +26,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -35,6 +37,8 @@ import org.springframework.util.StringUtils;
 @Service
 @Slf4j
 public class MatchGameStateService {
+    private static final Pattern SPECIAL_DAMAGE_PATTERN = Pattern.compile("特殊ダメージ\\s*(\\d+)");
+    private static final Pattern DAMAGE_PATTERN = Pattern.compile("ダメージ\\s*(\\d+)");
 
     // 場地 1~9 映射，供前端直接依 slot 渲染。
     private static final Map<String, Integer> BOARD_ZONE_SLOT_INDEX = Map.of(
@@ -141,6 +145,7 @@ public class MatchGameStateService {
                 h.is_face_down,
                 h.damage_taken,
                 m.hp AS base_max_hp,
+                COALESCE(art_info.effect_json_text, '') AS primary_art_effect_json_text,
                 COALESCE(cheer_info.cheer_count, 0) AS cheer_count,
                 COALESCE(cheer_info.cheer_color_counts, '{}'::jsonb)::text AS cheer_color_counts_text,
                 COALESCE(stack_info.stack_depth, 1) AS stack_depth,
@@ -149,6 +154,13 @@ public class MatchGameStateService {
             FROM match_holomems h
             JOIN match_cards mc ON mc.id = h.match_card_id
             JOIN member_cards m ON m.card_id = h.card_id
+            LEFT JOIN LATERAL (
+                SELECT effect_json::text AS effect_json_text
+                FROM member_arts
+                WHERE member_card_id = h.card_id
+                ORDER BY order_index ASC, id ASC
+                LIMIT 1
+            ) art_info ON TRUE
             LEFT JOIN LATERAL (
                 SELECT
                     COALESCE(SUM(color_counts.count), 0)::int AS cheer_count,
@@ -178,6 +190,11 @@ public class MatchGameStateService {
             """,
             matchId
         );
+        Map<Long, Integer> activeTurnDamageModifiers = resolveActiveTurnDamageModifiers(
+            matchId,
+            match.getTurnNumber(),
+            stageRows
+        );
         for (Map<String, Object> row : stageRows) {
             Long ownerUserId = toLong(row.get("owner_user_id"));
             String zone = normalizeZone(row.get("zone"));
@@ -189,8 +206,14 @@ public class MatchGameStateService {
             Integer damageTaken = toNullableInt(row.get("damage_taken"));
             Integer baseMaxHp = toNullableInt(row.get("base_max_hp"));
             int hpBonus = matchEffectService.resolveAttachedSupportHpBonus(matchId, holomemId);
+            int artBonus = matchEffectService.resolveAttachedSupportArtBonus(matchId, holomemId);
+            int turnDamageModifier = activeTurnDamageModifiers.getOrDefault(ownerUserId, 0);
             int adjustedMaxHp = Math.max((baseMaxHp == null ? 0 : baseMaxHp) + hpBonus, 0);
             int adjustedCurrentHp = Math.max(adjustedMaxHp - (damageTaken == null ? 0 : damageTaken), 0);
+            int currentAttack = Math.max(
+                resolveArtDamage(toStringValue(row.get("primary_art_effect_json_text"))) + artBonus + turnDamageModifier,
+                0
+            );
             ZoneCardInstanceResponse card = new ZoneCardInstanceResponse(
                 toLong(row.get("card_instance_id")),
                 toStringValue(row.get("card_id")),
@@ -203,6 +226,7 @@ public class MatchGameStateService {
                 adjustedCurrentHp,
                 adjustedMaxHp,
                 damageTaken,
+                currentAttack,
                 toNullableInt(row.get("cheer_count")),
                 toColorCountMap(parsePayloadJson(toStringValue(row.get("cheer_color_counts_text")))),
                 toNullableInt(row.get("attached_support_count"))
@@ -368,6 +392,17 @@ public class MatchGameStateService {
             interaction.setTargetHolomemCardInstanceId(toLong(contextNode.path("targetHolomemCardInstanceId").asText(null)));
             interaction.setTitle(toStringValue(contextNode.path("title").asText(null)));
             interaction.setMessage(toStringValue(contextNode.path("message").asText(null)));
+            interaction.setLookedCardInstanceId(toLong(contextNode.path("lookedCardInstanceId").asText(null)));
+            interaction.setLookedCardId(toStringValue(contextNode.path("lookedCardId").asText(null)));
+            JsonNode placementOptionsNode = contextNode.path("placementOptions");
+            if (placementOptionsNode.isArray()) {
+                for (JsonNode optionNode : placementOptionsNode) {
+                    String option = toStringValue(optionNode.asText(null));
+                    if (StringUtils.hasText(option)) {
+                        interaction.getPlacementOptions().add(option.trim().toUpperCase(Locale.ROOT));
+                    }
+                }
+            }
             interaction.setCreatedAt(toLocalDateTime(row.get("created_at")));
             interaction.getCards().addAll(loadPendingInteractionCards(matchId, contextNode));
             interactions.add(interaction);
@@ -607,6 +642,54 @@ public class MatchGameStateService {
         return null;
     }
 
+    private Map<Long, Integer> resolveActiveTurnDamageModifiers(
+        Long matchId,
+        Integer turnNumber,
+        List<Map<String, Object>> stageRows
+    ) {
+        if (matchId == null || stageRows == null || stageRows.isEmpty()) {
+            return Map.of();
+        }
+        int currentTurn = turnNumber == null || turnNumber <= 0 ? 1 : turnNumber;
+        Set<Long> ownerUserIds = stageRows.stream()
+            .map(row -> toLong(row.get("owner_user_id")))
+            .filter(id -> id != null && id > 0)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (ownerUserIds.isEmpty()) {
+            return Map.of();
+        }
+        String placeholders = ownerUserIds.stream().map(id -> "?").collect(Collectors.joining(", "));
+        List<Object> params = new ArrayList<>();
+        params.add(matchId);
+        params.add(currentTurn);
+        params.addAll(ownerUserIds);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+            """
+            SELECT affected_user_id,
+                   COALESCE(SUM(modifier_value), 0)::int AS modifier_total
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND expires_turn >= ?
+              AND stat_type = 'DAMAGE_MODIFIER'
+              AND affected_user_id IN (%s)
+            GROUP BY affected_user_id
+            """.formatted(placeholders),
+            params.toArray()
+        );
+        if (rows.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, Integer> modifiers = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            Long affectedUserId = toLong(row.get("affected_user_id"));
+            if (affectedUserId == null || affectedUserId <= 0) {
+                continue;
+            }
+            modifiers.put(affectedUserId, toInt(row.get("modifier_total")));
+        }
+        return modifiers;
+    }
+
     private Long toLong(Object value) {
         if (value instanceof Number number) {
             return number.longValue();
@@ -690,5 +773,40 @@ public class MatchGameStateService {
             return timestamp.toLocalDateTime();
         }
         return null;
+    }
+
+    private int resolveArtDamage(String effectJsonText) {
+        if (!StringUtils.hasText(effectJsonText)) {
+            return 0;
+        }
+        JsonNode node = parsePayloadJson(effectJsonText);
+        Integer direct = toNullableInt(node.path("value").asText(null));
+        if (direct != null && direct > 0) {
+            return direct;
+        }
+        String rawHeader = toStringValue(node.path("rawHeader").asText(null));
+        int headerDamage = extractDamageFromText(rawHeader);
+        if (headerDamage > 0) {
+            return headerDamage;
+        }
+        String rawText = toStringValue(node.path("rawText").asText(null));
+        return extractDamageFromText(rawText);
+    }
+
+    private int extractDamageFromText(String text) {
+        if (!StringUtils.hasText(text)) {
+            return 0;
+        }
+        Matcher special = SPECIAL_DAMAGE_PATTERN.matcher(text);
+        if (special.find()) {
+            Integer parsed = toNullableInt(special.group(1));
+            return parsed == null ? 0 : parsed;
+        }
+        Matcher normal = DAMAGE_PATTERN.matcher(text);
+        if (normal.find()) {
+            Integer parsed = toNullableInt(normal.group(1));
+            return parsed == null ? 0 : parsed;
+        }
+        return 0;
     }
 }

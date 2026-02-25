@@ -17,6 +17,7 @@ public class ZoneCardInstanceResponse {
     private Integer currentHp;
     private Integer maxHp;
     private Integer damageTaken;
+    private Integer currentAttack;
     private Integer cheerCount;
     private Map<String, Integer> cheerColorCounts;
     private Integer attachedSupportCount;
@@ -38,6 +39,7 @@ public class ZoneCardInstanceResponse {
             faceDown,
             1,
             List.of(cardInstanceId),
+            null,
             null,
             null,
             null,
@@ -71,6 +73,7 @@ public class ZoneCardInstanceResponse {
             null,
             null,
             null,
+            null,
             null
         );
     }
@@ -87,6 +90,7 @@ public class ZoneCardInstanceResponse {
         Integer currentHp,
         Integer maxHp,
         Integer damageTaken,
+        Integer currentAttack,
         Integer cheerCount,
         Map<String, Integer> cheerColorCounts,
         Integer attachedSupportCount
@@ -103,6 +107,7 @@ public class ZoneCardInstanceResponse {
         this.currentHp = currentHp;
         this.maxHp = maxHp;
         this.damageTaken = damageTaken;
+        this.currentAttack = currentAttack;
         this.cheerCount = cheerCount;
         this.cheerColorCounts = cheerColorCounts == null ? Map.of() : Map.copyOf(cheerColorCounts);
         this.attachedSupportCount = attachedSupportCount == null ? 0 : attachedSupportCount;

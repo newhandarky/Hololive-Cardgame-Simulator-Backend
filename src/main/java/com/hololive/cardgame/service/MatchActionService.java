@@ -4,15 +4,19 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hololive.cardgame.dto.AttachCheerActionRequest;
 import com.hololive.cardgame.dto.AttackArtActionRequest;
+import com.hololive.cardgame.dto.BatonTouchActionRequest;
 import com.hololive.cardgame.dto.BloomActionRequest;
 import com.hololive.cardgame.dto.MulliganActionRequest;
 import com.hololive.cardgame.dto.MoveStageHolomemActionRequest;
 import com.hololive.cardgame.dto.PlaySupportActionRequest;
 import com.hololive.cardgame.dto.PlayToStageActionRequest;
 import com.hololive.cardgame.dto.ResolveDecisionRequest;
+import com.hololive.cardgame.dto.UseOshiSkillActionRequest;
 import com.hololive.cardgame.entity.MatchActionEntity;
 import com.hololive.cardgame.entity.MatchEntity;
 import com.hololive.cardgame.entity.MatchPlayerEntity;
+import com.hololive.cardgame.error.GameErrorCode;
+import com.hololive.cardgame.error.GameRuleException;
 import com.hololive.cardgame.model.LobbyMatchStatus;
 import com.hololive.cardgame.model.MatchPhase;
 import com.hololive.cardgame.repository.MatchActionRepository;
@@ -44,8 +48,11 @@ public class MatchActionService {
     private static final String INTERACTION_TYPE_TURN_START = "TURN_START";
     private static final String INTERACTION_TYPE_DRAW_REVEAL = "DRAW_REVEAL";
     private static final String INTERACTION_TYPE_SEND_CHEER = "SEND_CHEER";
+    private static final String DECISION_TYPE_LOOK_TOP_DECK = "LOOK_TOP_DECK";
     private static final String ACTION_TYPE_DRAW_TURN = "DRAW_TURN";
     private static final String ACTION_TYPE_TURN_CHEER = "TURN_CHEER";
+    private static final String ACTION_TYPE_USE_OSHI_SKILL = "USE_OSHI_SKILL";
+    private static final String ACTION_TYPE_BATON_TOUCH = "BATON_TOUCH";
     private static final String PENDING_STATUS = "PENDING";
     private static final String SUPPORT_TYPE_MASCOT = "MASCOT";
     private static final String SUPPORT_TYPE_TOOL = "TOOL";
@@ -111,7 +118,10 @@ public class MatchActionService {
         }
         String normalizedLevelType = normalizeLevel(levelType);
         if (!Set.of("DEBUT", "SPOT").contains(normalizedLevelType)) {
-            throw new IllegalStateException("只有 DEBUT 或 SPOT Holomem 可以從手牌放置到場上");
+            throw new GameRuleException(
+                GameErrorCode.PLAY_TO_STAGE_LEVEL_NOT_ALLOWED,
+                "只有 DEBUT 或 SPOT Holomem 可以從手牌放置到場上；FIRST/SECOND/BUZZ 請改用 BLOOM"
+            );
         }
         if (!"BACK".equals(targetZone)) {
             throw new IllegalStateException("手牌 Holomem 只能放置到 BACK");
@@ -244,25 +254,37 @@ public class MatchActionService {
 
         BloomTarget target = loadOwnedBloomTarget(matchId, userId, targetHolomemCardInstanceId);
         if (target == null) {
-            throw new IllegalArgumentException("找不到要 BLOOM 的目標 Holomem");
+            throw new GameRuleException(GameErrorCode.BLOOM_NO_TARGET, "找不到要 BLOOM 的目標 Holomem");
         }
         if (isSpecialOrUnbloomableLevel(target.topLevelType())) {
-            throw new IllegalStateException("Spot Holomem 不能作為 BLOOM 目標");
+            throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "Spot Holomem 不能作為 BLOOM 目標");
         }
         if (target.enteredTurnNumber() == context.turnNumber) {
-            throw new IllegalStateException("本回合剛上場的 Holomem 不能 BLOOM");
+            throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "本回合剛上場的 Holomem 不能 BLOOM");
         }
+        Long extraBloomAllowanceId = null;
         if (target.lastBloomTurn() != null && target.lastBloomTurn() == context.turnNumber) {
-            throw new IllegalStateException("此 Holomem 本回合已執行過 BLOOM");
+            extraBloomAllowanceId = findExtraBloomAllowanceId(
+                matchId,
+                userId,
+                context.turnNumber,
+                target.holomemId()
+            );
+            if (extraBloomAllowanceId == null) {
+                throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "此 Holomem 本回合已執行過 BLOOM");
+            }
         }
         if (!StringUtils.hasText(target.topCardName()) || !target.topCardName().equals(bloomCardName)) {
-            throw new IllegalStateException("BLOOM 需要與目標 Holomem 同名");
+            throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "BLOOM 需要與目標 Holomem 同名");
         }
-        if (!isBloomLevelHigher(target.topLevelType(), bloomLevel)) {
-            throw new IllegalStateException("BLOOM 等級必須高於目標目前等級");
+        if (!isBloomLevelNextStep(target.topLevelType(), bloomLevel)) {
+            throw new GameRuleException(
+                GameErrorCode.BLOOM_INVALID_TARGET,
+                "BLOOM 只能依序遞進：DEBUT→FIRST、FIRST→SECOND、SECOND→BUZZ"
+            );
         }
         if (bloomHp < target.damageTaken()) {
-            throw new IllegalStateException("BLOOM 卡 HP 不足以承受目標目前傷害");
+            throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "BLOOM 卡 HP 不足以承受目標目前傷害");
         }
 
         int moved = jdbcTemplate.update(
@@ -309,6 +331,9 @@ public class MatchActionService {
         if (updated != 1) {
             throw new IllegalStateException("BLOOM 失敗：目標 Holomem 更新異常");
         }
+        if (extraBloomAllowanceId != null) {
+            consumeExtraBloomAllowance(extraBloomAllowanceId, matchId, userId);
+        }
 
         int stackDepth = countHolomemStackDepth(target.holomemId());
         Map<String, Object> bloomEffectSummary = matchEffectService.applyBloomTriggeredEffects(
@@ -341,6 +366,18 @@ public class MatchActionService {
         payload.put("stackDepth", stackDepth);
         payload.put("bloomEffect", bloomEffectSummary);
         payload.put("triggerSummary", triggerSummary);
+        Long bloomLookTopDeckDecisionId = createLookTopDeckPendingDecisionIfNeeded(
+            matchId,
+            userId,
+            "BLOOM",
+            bloomCardInstanceId,
+            bloomCardId,
+            "LOOK_TOP_DECK",
+            bloomEffectSummary
+        );
+        if (bloomLookTopDeckDecisionId != null) {
+            payload.put("pendingLookTopDeckDecisionId", bloomLookTopDeckDecisionId);
+        }
 
         appendAction(
             context.match,
@@ -417,11 +454,14 @@ public class MatchActionService {
         boolean attachableSupport = isAttachableSupportType(supportType);
         boolean isLimited = toBoolean(supportRow.get("is_limited"));
         if (isLimited) {
-            if (context.turnNumber == 1) {
-                throw new IllegalStateException("LIMITED SUPPORT 只能在整場對戰第 1 回合後使用");
+            if (context.turnNumber == 1 && userId.equals(context.match.getPlayerAId())) {
+                throw new GameRuleException(
+                    GameErrorCode.LIMITED_FIRST_TURN,
+                    "LIMITED SUPPORT 只能在先攻玩家的第一回合後使用；後攻玩家第一回合可使用"
+                );
             }
             if (hasUsedLimitedSupportThisTurn(matchId, userId, context.turnNumber)) {
-                throw new IllegalStateException("本回合已使用過 LIMITED SUPPORT");
+                throw new GameRuleException(GameErrorCode.LIMITED_ALREADY_USED_THIS_TURN, "本回合已使用過 LIMITED SUPPORT");
             }
         }
         if (attachableSupport) {
@@ -545,16 +585,18 @@ public class MatchActionService {
         }
 
         if (decisionPlan != null) {
-            Long decisionId = createSupportPendingDecision(
+            Long decisionId = createCardSelectionPendingDecision(
                 context.match.getId(),
                 userId,
+                "PLAY_SUPPORT",
                 cardInstanceId,
                 cardId,
                 asString(supportRow.get("effect_type")),
                 asString(supportRow.get("effect_json_text")),
                 asString(supportRow.get("target_type")),
                 targetHolomemCardInstanceId,
-                decisionPlan
+                decisionPlan,
+                hasSupportDefinitionLimitedFlag(cardId)
             );
             if (decisionId == null) {
                 throw new IllegalStateException("建立效果選擇決策失敗");
@@ -604,6 +646,18 @@ public class MatchActionService {
         payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
         payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
         payload.put("effect", effectSummary);
+        Long lookTopDeckDecisionId = createLookTopDeckPendingDecisionIfNeeded(
+            matchId,
+            userId,
+            "PLAY_SUPPORT",
+            cardInstanceId,
+            cardId,
+            asString(supportRow.get("effect_type")),
+            effectSummary
+        );
+        if (lookTopDeckDecisionId != null) {
+            payload.put("pendingLookTopDeckDecisionId", lookTopDeckDecisionId);
+        }
         appendAction(
             context.match,
             userId,
@@ -785,6 +839,57 @@ public class MatchActionService {
             }
             return;
         }
+        if (DECISION_TYPE_LOOK_TOP_DECK.equals(decisionType)) {
+            String requestedPlacement = normalizeDecisionPlacement(request == null ? null : request.getPlacement());
+            List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
+                request == null ? null : request.getSelectedCardInstanceIds()
+            );
+            if (requestedPlacement != null) {
+                if ("TOP".equals(requestedPlacement)) {
+                    Long lookedCardInstanceId = pending.candidateCardInstanceIds().isEmpty()
+                        ? null
+                        : pending.candidateCardInstanceIds().get(0);
+                    selectedCardInstanceIds = lookedCardInstanceId == null
+                        ? List.of()
+                        : List.of(lookedCardInstanceId);
+                } else if ("BOTTOM".equals(requestedPlacement)) {
+                    selectedCardInstanceIds = List.of();
+                } else {
+                    throw new IllegalArgumentException("placement 只支援 TOP 或 BOTTOM");
+                }
+            }
+            if (selectedCardInstanceIds.size() > pending.maxSelect()) {
+                throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
+            }
+            validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
+            Long lookedCardInstanceId = pending.candidateCardInstanceIds().isEmpty()
+                ? null
+                : pending.candidateCardInstanceIds().get(0);
+            boolean keepOnTop = lookedCardInstanceId != null && selectedCardInstanceIds.contains(lookedCardInstanceId);
+            if (lookedCardInstanceId != null && !keepOnTop) {
+                moveDeckCardToBottom(matchId, userId, lookedCardInstanceId);
+            }
+            markDecisionResolved(pending.decisionId());
+
+            context.match.setCurrentPhase(MatchPhase.MAIN.name());
+            touchUpdatedAt(context.match);
+            matchRepository.saveAndFlush(context.match);
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("decisionId", pending.decisionId());
+            payload.put("decisionType", DECISION_TYPE_LOOK_TOP_DECK);
+            payload.put("sourceActionType", pending.sourceActionType());
+            payload.put("lookedCardInstanceId", lookedCardInstanceId);
+            payload.put("placement", keepOnTop ? "TOP" : "BOTTOM");
+            appendAction(
+                context.match,
+                userId,
+                "INTERACTION_CONFIRMED",
+                toJson(payload),
+                context.turnNumber
+            );
+            return;
+        }
         if (!SUPPORT_DECISION_TYPE_CARD_SELECTION.equals(decisionType)) {
             throw new IllegalStateException("目前不支援此類型決策: " + decisionType);
         }
@@ -816,17 +921,39 @@ public class MatchActionService {
         matchRepository.saveAndFlush(context.match);
 
         Map<String, Object> payload = new LinkedHashMap<>();
+        String sourceActionType = normalizeZone(pending.sourceActionType());
+        String resolvedActionType = ACTION_TYPE_USE_OSHI_SKILL.equals(sourceActionType)
+            ? ACTION_TYPE_USE_OSHI_SKILL
+            : "PLAY_SUPPORT";
         payload.put("decisionId", pending.decisionId());
-        payload.put("cardInstanceId", pending.sourceCardInstanceId());
-        payload.put("cardId", pending.sourceCardId());
-        payload.put("limited", pending.limited());
+        payload.put("sourceActionType", sourceActionType);
         payload.put("targetHolomemCardInstanceId", pending.targetHolomemCardInstanceId());
         payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
         payload.put("effect", effectSummary);
+        if (ACTION_TYPE_USE_OSHI_SKILL.equals(sourceActionType)) {
+            payload.put("oshiCardInstanceId", pending.sourceCardInstanceId());
+            payload.put("oshiCardId", pending.sourceCardId());
+        } else {
+            payload.put("cardInstanceId", pending.sourceCardInstanceId());
+            payload.put("cardId", pending.sourceCardId());
+            payload.put("limited", pending.limited());
+        }
+        Long lookTopDeckDecisionId = createLookTopDeckPendingDecisionIfNeeded(
+            matchId,
+            userId,
+            sourceActionType,
+            pending.sourceCardInstanceId(),
+            pending.sourceCardId(),
+            pending.effectType(),
+            effectSummary
+        );
+        if (lookTopDeckDecisionId != null) {
+            payload.put("pendingLookTopDeckDecisionId", lookTopDeckDecisionId);
+        }
         appendAction(
             context.match,
             userId,
-            "PLAY_SUPPORT",
+            resolvedActionType,
             toJson(payload),
             context.turnNumber
         );
@@ -927,7 +1054,7 @@ public class MatchActionService {
             return;
         }
         if (hasDrawTurnAction(matchId, userId, context.turnNumber)) {
-            throw new IllegalStateException("這回合你已經抽過卡了");
+            throw new GameRuleException(GameErrorCode.TURN_DRAW_ALREADY_USED, "這回合你已經抽過卡了");
         }
 
         Long drawnCardInstanceId = drawTopDeckCardToHand(matchId, userId);
@@ -973,7 +1100,7 @@ public class MatchActionService {
             return;
         }
         if (hasTurnCheerAction(matchId, userId, context.turnNumber)) {
-            throw new IllegalStateException("這回合你已經發送過吶喊了");
+            throw new GameRuleException(GameErrorCode.TURN_CHEER_ALREADY_USED, "這回合你已經發送過吶喊了");
         }
 
         Long interactionId = createTurnSendCheerPendingInteraction(matchId, userId);
@@ -1003,6 +1130,9 @@ public class MatchActionService {
         String targetZone = normalizeZone(request == null ? null : request.getTargetZone());
         if (!Set.of("CENTER", "COLLAB").contains(targetZone)) {
             throw new IllegalArgumentException("targetZone 只支援 CENTER 或 COLLAB");
+        }
+        if (isStageActionLocked(matchId, userId, context.turnNumber, "MOVE_STAGE", null, null)) {
+            throw new GameRuleException(GameErrorCode.STAGE_ACTION_LOCKED, "目前效果限制：不可移動");
         }
 
         Map<String, Object> currentHolomem = jdbcTemplate.query(
@@ -1117,6 +1247,18 @@ public class MatchActionService {
         }
         if (collabEffectSummary != null) {
             payload.put("collabEffect", collabEffectSummary);
+            Long collabLookTopDeckDecisionId = createLookTopDeckPendingDecisionIfNeeded(
+                matchId,
+                userId,
+                "COLLAB",
+                cardInstanceId,
+                asString(currentHolomem.get("card_id")),
+                "LOOK_TOP_DECK",
+                collabEffectSummary
+            );
+            if (collabLookTopDeckDecisionId != null) {
+                payload.put("pendingLookTopDeckDecisionId", collabLookTopDeckDecisionId);
+            }
         }
         if (collabTriggerSummary != null) {
             payload.put("triggerSummary", collabTriggerSummary);
@@ -1147,6 +1289,325 @@ public class MatchActionService {
             }
             enqueueLifeLossSendCheerInteractions(context.match, matchId, collabEffectSummary, context.turnNumber);
         }
+    }
+
+    @Transactional
+    public void useOshiSkill(Long matchId, Long userId, UseOshiSkillActionRequest request) {
+        ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
+        if (context.blockedByPendingInteraction()) {
+            return;
+        }
+        String requestedSkillType = normalizeZone(request == null ? null : request.getSkillType());
+        if (!Set.of("NORMAL", "SP").contains(requestedSkillType)) {
+            throw new GameRuleException(
+                GameErrorCode.OSHI_SKILL_INVALID_TYPE,
+                "skillType 只支援 NORMAL 或 SP"
+            );
+        }
+        MatchPlayerEntity player = matchPlayerRepository.findByMatchIdAndUserId(matchId, userId)
+            .orElseThrow(() -> new IllegalArgumentException("你不在此房間中"));
+        if (player.isSkillUsedThisTurn()) {
+            throw new GameRuleException(
+                GameErrorCode.OSHI_SKILL_ALREADY_USED_THIS_TURN,
+                "本回合已使用過 OSHI 技能"
+            );
+        }
+        if ("SP".equals(requestedSkillType) && player.isSpSkillUsed()) {
+            throw new GameRuleException(
+                GameErrorCode.OSHI_SKILL_SP_ALREADY_USED,
+                "SP OSHI 技能一場對戰只能使用 1 次"
+            );
+        }
+
+        Map<String, Object> oshiSkill = loadOwnedOshiSkill(matchId, userId, requestedSkillType);
+        if (oshiSkill == null) {
+            throw new GameRuleException(
+                GameErrorCode.OSHI_SKILL_NOT_FOUND,
+                "找不到可使用的 OSHI 技能: " + requestedSkillType
+            );
+        }
+        String effectJson = asString(oshiSkill.get("effect_json_text"));
+        String effectType = resolvePrimaryEffectType(effectJson);
+        String targetType = resolveEffectTargetType(effectJson);
+        int holopowerCost = Math.max(asInt(oshiSkill.get("holopower_cost")), 0);
+        Map<String, Object> holopowerPayment = consumeHolopowerCostToArchive(matchId, userId, holopowerCost);
+
+        List<Long> selectedCardInstanceIds = request == null ? null : request.getSelectedCardInstanceIds();
+        Long targetHolomemCardInstanceId = request == null ? null : request.getTargetHolomemCardInstanceId();
+        MatchEffectService.SupportDecisionPlan decisionPlan = null;
+        if (selectedCardInstanceIds == null || selectedCardInstanceIds.isEmpty()) {
+            decisionPlan = matchEffectService.buildSupportDecisionPlan(
+                matchId,
+                userId,
+                effectType,
+                effectJson
+            );
+        }
+
+        player.setSkillUsedThisTurn(true);
+        if ("SP".equals(requestedSkillType)) {
+            player.setSpSkillUsed(true);
+        }
+        player.setUpdatedAt(LocalDateTime.now());
+        matchPlayerRepository.save(player);
+
+        Long oshiCardInstanceId = asLong(oshiSkill.get("oshi_card_instance_id"));
+        String oshiCardId = asString(oshiSkill.get("oshi_card_id"));
+        String skillName = asString(oshiSkill.get("skill_name"));
+        if (decisionPlan != null) {
+            Long decisionId = createCardSelectionPendingDecision(
+                context.match.getId(),
+                userId,
+                ACTION_TYPE_USE_OSHI_SKILL,
+                oshiCardInstanceId,
+                oshiCardId,
+                effectType,
+                effectJson,
+                targetType,
+                targetHolomemCardInstanceId,
+                decisionPlan,
+                false
+            );
+            if (decisionId == null) {
+                throw new IllegalStateException("建立 OSHI 技能決策失敗");
+            }
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("decisionId", decisionId);
+            payload.put("decisionType", SUPPORT_DECISION_TYPE_CARD_SELECTION);
+            payload.put("skillType", requestedSkillType);
+            payload.put("skillName", skillName);
+            payload.put("oshiCardInstanceId", oshiCardInstanceId);
+            payload.put("oshiCardId", oshiCardId);
+            payload.put("effectType", decisionPlan.effectType());
+            payload.put("holopowerCost", holopowerCost);
+            payload.put("holopowerPayment", holopowerPayment);
+            payload.put("candidateCount", decisionPlan.candidates().size());
+            payload.put("minSelect", decisionPlan.minSelect());
+            payload.put("maxSelect", decisionPlan.maxSelect());
+            appendAction(
+                context.match,
+                userId,
+                "OSHI_SKILL_DECISION_PENDING",
+                toJson(payload),
+                context.turnNumber
+            );
+            return;
+        }
+
+        Map<String, Object> effectSummary = matchEffectService.applySupportEffect(
+            matchId,
+            userId,
+            effectType,
+            effectJson,
+            targetType,
+            selectedCardInstanceIds,
+            targetHolomemCardInstanceId
+        );
+        context.match.setCurrentPhase(MatchPhase.MAIN.name());
+        touchUpdatedAt(context.match);
+        matchRepository.saveAndFlush(context.match);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("skillType", requestedSkillType);
+        payload.put("skillName", skillName);
+        payload.put("oshiCardInstanceId", oshiCardInstanceId);
+        payload.put("oshiCardId", oshiCardId);
+        payload.put("holopowerCost", holopowerCost);
+        payload.put("holopowerPayment", holopowerPayment);
+        payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
+        payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
+        payload.put("effect", effectSummary);
+        Long lookTopDeckDecisionId = createLookTopDeckPendingDecisionIfNeeded(
+            matchId,
+            userId,
+            ACTION_TYPE_USE_OSHI_SKILL,
+            oshiCardInstanceId,
+            oshiCardId,
+            effectType,
+            effectSummary
+        );
+        if (lookTopDeckDecisionId != null) {
+            payload.put("pendingLookTopDeckDecisionId", lookTopDeckDecisionId);
+        }
+        appendAction(
+            context.match,
+            userId,
+            ACTION_TYPE_USE_OSHI_SKILL,
+            toJson(payload),
+            context.turnNumber
+        );
+        if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, effectSummary)) {
+            touchUpdatedAt(context.match);
+            matchRepository.saveAndFlush(context.match);
+        } else if (hasLifeReduced(effectSummary) && evaluateLifeDefeat(context.match, userId, context.turnNumber)) {
+            touchUpdatedAt(context.match);
+            matchRepository.saveAndFlush(context.match);
+        } else if (hasHolomemDowned(effectSummary) && evaluateNoHolomemDefeat(context.match, userId, context.turnNumber)) {
+            touchUpdatedAt(context.match);
+            matchRepository.saveAndFlush(context.match);
+        }
+        enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummary, context.turnNumber);
+    }
+
+    @Transactional
+    public void batonTouch(Long matchId, Long userId, BatonTouchActionRequest request) {
+        ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
+        if (context.blockedByPendingInteraction()) {
+            return;
+        }
+        if (hasUsedBatonTouchThisTurn(matchId, userId, context.turnNumber)) {
+            throw new GameRuleException(GameErrorCode.BATON_TOUCH_ALREADY_USED_THIS_TURN, "本回合已使用過バトンタッチ");
+        }
+        Long sourceHolomemCardInstanceId = requirePositiveId(
+            request == null ? null : request.getSourceHolomemCardInstanceId(),
+            "sourceHolomemCardInstanceId"
+        );
+        Long targetBackHolomemCardInstanceId = requirePositiveId(
+            request == null ? null : request.getTargetBackHolomemCardInstanceId(),
+            "targetBackHolomemCardInstanceId"
+        );
+
+        Map<String, Object> source = jdbcTemplate.query(
+            """
+            SELECT id, zone, card_id, is_rested
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id"));
+                row.put("zone", rs.getString("zone"));
+                row.put("card_id", rs.getString("card_id"));
+                row.put("is_rested", rs.getObject("is_rested"));
+                return row;
+            },
+            matchId,
+            userId,
+            sourceHolomemCardInstanceId
+        );
+        if (source == null) {
+            throw new IllegalArgumentException("找不到要執行バトンタッチ的 Holomem");
+        }
+        String sourceZone = normalizeZone(source.get("zone"));
+        if (!Set.of("CENTER", "COLLAB").contains(sourceZone)) {
+            throw new IllegalStateException("バトンタッチ 來源必須是 CENTER 或 COLLAB");
+        }
+        Long sourceHolomemId = asLong(source.get("id"));
+        if (sourceHolomemId == null) {
+            throw new IllegalStateException("來源 Holomem 資料異常");
+        }
+        if (isStageActionLocked(matchId, userId, context.turnNumber, "BATON_TOUCH", sourceZone, sourceHolomemId)) {
+            throw new GameRuleException(GameErrorCode.STAGE_ACTION_LOCKED, "目前效果限制：不可バトンタッチ");
+        }
+
+        Map<String, Object> target = jdbcTemplate.query(
+            """
+            SELECT id, zone, card_id, is_rested
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id"));
+                row.put("zone", rs.getString("zone"));
+                row.put("card_id", rs.getString("card_id"));
+                row.put("is_rested", rs.getObject("is_rested"));
+                return row;
+            },
+            matchId,
+            userId,
+            targetBackHolomemCardInstanceId
+        );
+        if (target == null) {
+            throw new IllegalArgumentException("找不到要交換上場的 BACK Holomem");
+        }
+        String targetZone = normalizeZone(target.get("zone"));
+        if (!"BACK".equals(targetZone)) {
+            throw new IllegalStateException("バトンタッチ 目標必須是 BACK Holomem");
+        }
+        if (toBoolean(target.get("is_rested"))) {
+            throw new IllegalStateException("バトンタッチ 目標必須是非休息狀態的 BACK Holomem");
+        }
+        Long targetHolomemId = asLong(target.get("id"));
+        if (targetHolomemId == null) {
+            throw new IllegalStateException("目標 Holomem 資料異常");
+        }
+
+        int currentTurn = context.turnNumber;
+        int batonTouchModifier = resolveBatonTouchColorlessModifier(matchId, userId, sourceHolomemId, currentTurn);
+        int requiredColorless = Math.max(1 + batonTouchModifier, 0);
+        Map<String, Object> costSummary = payBatonTouchCost(
+            matchId,
+            userId,
+            sourceHolomemId,
+            requiredColorless
+        );
+
+        int moveSource = jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET zone = 'BACK',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            sourceHolomemId,
+            matchId,
+            userId
+        );
+        int moveTarget = jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET zone = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            sourceZone,
+            targetHolomemId,
+            matchId,
+            userId
+        );
+        if (moveSource != 1 || moveTarget != 1) {
+            throw new IllegalStateException("バトンタッチ 移動失敗，請重新整理後重試");
+        }
+
+        context.match.setCurrentPhase(MatchPhase.MAIN.name());
+        touchUpdatedAt(context.match);
+        matchRepository.saveAndFlush(context.match);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("sourceHolomemCardInstanceId", sourceHolomemCardInstanceId);
+        payload.put("sourceCardId", asString(source.get("card_id")));
+        payload.put("sourceFromZone", sourceZone);
+        payload.put("targetHolomemCardInstanceId", targetBackHolomemCardInstanceId);
+        payload.put("targetCardId", asString(target.get("card_id")));
+        payload.put("targetToZone", sourceZone);
+        payload.put("requiredColorless", requiredColorless);
+        payload.put("modifierColorless", batonTouchModifier);
+        payload.put("cost", costSummary);
+
+        appendAction(
+            context.match,
+            userId,
+            ACTION_TYPE_BATON_TOUCH,
+            toJson(payload),
+            context.turnNumber
+        );
     }
 
     @Transactional
@@ -1445,7 +1906,8 @@ public class MatchActionService {
             missingActions.add("發送吶喊");
         }
         if (!missingActions.isEmpty()) {
-            throw new IllegalStateException(
+            throw new GameRuleException(
+                GameErrorCode.TURN_ACTIONS_INCOMPLETE,
                 "回合尚未完成：" + String.join("、", missingActions) + "。請先完成後再結束回合"
             );
         }
@@ -1462,12 +1924,25 @@ public class MatchActionService {
             matchId,
             context.opponentUserId
         );
+        Map<String, Object> centerReplenishSummary = resolveEndTurnCenterReplenishCycle(matchId, userId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET skill_used_this_turn = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            matchId,
+            context.opponentUserId
+        );
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("fromUserId", userId);
         payload.put("toUserId", context.opponentUserId);
         payload.put("clearedExpiredTurnEffects", clearedEffectCount);
         payload.put("resetRestedCount", resetRestedCount);
+        payload.put("centerReplenish", centerReplenishSummary);
 
         int nextTurnNumber = context.turnNumber + 1;
         payload.put("nextTurnNumber", nextTurnNumber);
@@ -1479,6 +1954,11 @@ public class MatchActionService {
             toJson(payload),
             context.turnNumber
         );
+        if (evaluateNoHolomemDefeat(context.match, userId, context.turnNumber)) {
+            touchUpdatedAt(context.match);
+            matchRepository.saveAndFlush(context.match);
+            return;
+        }
 
         context.match.setCurrentTurnPlayerId(context.opponentUserId);
         context.match.setTurnNumber(nextTurnNumber);
@@ -1545,7 +2025,7 @@ public class MatchActionService {
             throw new IllegalArgumentException("你不在此房間中");
         }
         if (match.getCurrentTurnPlayerId() == null || !match.getCurrentTurnPlayerId().equals(userId)) {
-            throw new IllegalStateException("現在不是你的回合");
+            throw new GameRuleException(GameErrorCode.NOT_YOUR_TURN, "現在不是你的回合");
         }
 
         MatchPhase phase = parsePhase(match.getCurrentPhase());
@@ -1557,12 +2037,16 @@ public class MatchActionService {
                 throw new IllegalStateException("對戰已結束");
             }
             if (match.getCurrentTurnPlayerId() == null || !match.getCurrentTurnPlayerId().equals(userId)) {
-                throw new IllegalStateException("現在不是你的回合");
+                throw new GameRuleException(GameErrorCode.NOT_YOUR_TURN, "現在不是你的回合");
             }
             phase = parsePhase(match.getCurrentPhase());
         }
         if (!allowedPhases.contains(phase)) {
-            throw new IllegalStateException("目前 phase=" + phase + "，無法執行此操作");
+            throw new GameRuleException(
+                GameErrorCode.PHASE_ACTION_NOT_ALLOWED,
+                "目前 phase=" + phase + "，無法執行此操作",
+                Map.of("phase", phase.name())
+            );
         }
         int turnNumber = match.getTurnNumber() == null ? 1 : match.getTurnNumber();
         Long opponentUserId = resolveOpponent(match, userId);
@@ -1570,7 +2054,7 @@ public class MatchActionService {
             if (autoResolvedOpeningReset) {
                 return new ActionContext(match, phase, turnNumber, opponentUserId, true);
             }
-            throw new IllegalStateException("你有待處理的互動，請先完成確認");
+            throw new GameRuleException(GameErrorCode.PENDING_INTERACTION_BLOCKED, "你有待處理的互動，請先完成確認");
         }
 
         return new ActionContext(match, phase, turnNumber, opponentUserId, false);
@@ -1663,6 +2147,151 @@ public class MatchActionService {
         return count != null && count > 0;
     }
 
+    private Map<String, Object> resolveEndTurnCenterReplenishCycle(Long matchId, Long userId) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("applied", false);
+        if (matchId == null || userId == null) {
+            summary.put("reason", "INVALID_ARGUMENTS");
+            summary.put("settled", false);
+            summary.put("iterations", List.of());
+            return summary;
+        }
+        List<Map<String, Object>> iterations = new ArrayList<>();
+        boolean settled = false;
+        boolean appliedAny = false;
+        String reason = "CENTER_EXISTS";
+        final int maxIterations = 8;
+        for (int i = 0; i < maxIterations; i++) {
+            if (hasCenterHolomem(matchId, userId)) {
+                settled = true;
+                reason = "CENTER_EXISTS";
+                break;
+            }
+            Map<String, Object> step = autoReplenishCenterFromBackOnce(matchId, userId);
+            iterations.add(step);
+            if (toBoolean(step.get("applied"))) {
+                appliedAny = true;
+            }
+            if (!toBoolean(step.get("applied"))) {
+                reason = asString(step.get("reason"));
+                settled = false;
+                break;
+            }
+            reason = asString(step.get("reason"));
+        }
+        if (hasCenterHolomem(matchId, userId)) {
+            settled = true;
+            if (!appliedAny) {
+                reason = "CENTER_EXISTS";
+            }
+        }
+        summary.put("applied", appliedAny);
+        summary.put("reason", reason);
+        summary.put("settled", settled);
+        summary.put("iterationCount", iterations.size());
+        summary.put("iterations", iterations);
+        return summary;
+    }
+
+    private Map<String, Object> autoReplenishCenterFromBackOnce(Long matchId, Long userId) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("applied", false);
+        if (matchId == null || userId == null) {
+            summary.put("reason", "INVALID_ARGUMENTS");
+            return summary;
+        }
+        Integer centerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'CENTER'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        if (centerCount != null && centerCount > 0) {
+            summary.put("reason", "CENTER_EXISTS");
+            return summary;
+        }
+        Map<String, Object> preferredBack = jdbcTemplate.query(
+            """
+            SELECT id, match_card_id, card_id, is_rested
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'BACK'
+            ORDER BY CASE WHEN is_rested = FALSE THEN 0 ELSE 1 END, id
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id"));
+                row.put("match_card_id", rs.getLong("match_card_id"));
+                row.put("card_id", rs.getString("card_id"));
+                row.put("is_rested", rs.getObject("is_rested"));
+                return row;
+            },
+            matchId,
+            userId
+        );
+        if (preferredBack == null) {
+            summary.put("reason", "NO_BACK_HOLOMEM");
+            return summary;
+        }
+        Long holomemId = asLong(preferredBack.get("id"));
+        if (holomemId == null) {
+            summary.put("reason", "BACK_HOLOMEM_INVALID");
+            return summary;
+        }
+        int moved = jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET zone = 'CENTER',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'BACK'
+            """,
+            holomemId,
+            matchId,
+            userId
+        );
+        if (moved != 1) {
+            summary.put("reason", "MOVE_FAILED");
+            return summary;
+        }
+        summary.put("applied", true);
+        summary.put("reason", "CENTER_REPLENISHED");
+        summary.put("targetHolomemId", holomemId);
+        summary.put("targetHolomemCardInstanceId", asLong(preferredBack.get("match_card_id")));
+        summary.put("targetCardId", asString(preferredBack.get("card_id")));
+        summary.put("fromRested", toBoolean(preferredBack.get("is_rested")));
+        return summary;
+    }
+
+    private boolean hasCenterHolomem(Long matchId, Long userId) {
+        Integer centerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'CENTER'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        return centerCount != null && centerCount > 0;
+    }
+
     private boolean hasTurnCheerAction(Long matchId, Long userId, int turnNumber) {
         if (matchId == null || userId == null || turnNumber <= 0) {
             return false;
@@ -1740,6 +2369,103 @@ public class MatchActionService {
         return count != null && count > 0;
     }
 
+    private boolean hasUsedBatonTouchThisTurn(Long matchId, Long userId, int turnNumber) {
+        if (matchId == null || userId == null || turnNumber <= 0) {
+            return false;
+        }
+        Integer count = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = ?
+            """,
+            Integer.class,
+            matchId,
+            userId,
+            turnNumber,
+            ACTION_TYPE_BATON_TOUCH
+        );
+        return count != null && count > 0;
+    }
+
+    private Long findExtraBloomAllowanceId(Long matchId, Long userId, int turnNumber, Long targetHolomemId) {
+        if (matchId == null || userId == null || turnNumber <= 0 || targetHolomemId == null) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'ALLOW_EXTRA_BLOOM'
+              AND expires_turn >= ?
+              AND (payload ->> 'targetHolomemId') = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            userId,
+            turnNumber,
+            targetHolomemId.toString()
+        );
+    }
+
+    private void consumeExtraBloomAllowance(Long allowanceId, Long matchId, Long userId) {
+        if (allowanceId == null || matchId == null || userId == null) {
+            return;
+        }
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_turn_effects
+            WHERE id = ?
+              AND match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'ALLOW_EXTRA_BLOOM'
+            """,
+            allowanceId,
+            matchId,
+            userId
+        );
+    }
+
+    private void moveDeckCardToBottom(Long matchId, Long userId, Long cardInstanceId) {
+        if (matchId == null || userId == null || cardInstanceId == null || cardInstanceId <= 0) {
+            return;
+        }
+        Integer nextOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(MAX(order_index), 0) + 1
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'DECK'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET order_index = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'DECK'
+            """,
+            nextOrder == null ? 1 : nextOrder,
+            cardInstanceId,
+            matchId,
+            userId
+        );
+    }
+
     private Long moveTopDeckCardToHolopower(Long matchId, Long userId) {
         Long deckCardInstanceId = jdbcTemplate.query(
             """
@@ -1788,6 +2514,156 @@ public class MatchActionService {
             userId
         );
         return moved == 1 ? deckCardInstanceId : null;
+    }
+
+    private Map<String, Object> loadOwnedOshiSkill(Long matchId, Long userId, String requestedSkillType) {
+        return jdbcTemplate.query(
+            """
+            SELECT os.skill_type,
+                   os.skill_name,
+                   os.holopower_cost,
+                   os.effect_json::text AS effect_json_text,
+                   mp.oshi_card_id,
+                   mc.id AS oshi_card_instance_id
+            FROM match_players mp
+            JOIN oshi_skills os
+              ON os.oshi_card_id = mp.oshi_card_id
+            LEFT JOIN match_cards mc
+              ON mc.match_id = mp.match_id
+             AND mc.owner_user_id = mp.user_id
+             AND mc.zone = 'OSHI'
+             AND mc.card_id = mp.oshi_card_id
+            WHERE mp.match_id = ?
+              AND mp.user_id = ?
+              AND UPPER(os.skill_type) = ?
+            ORDER BY os.id
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("skill_type", normalizeZone(rs.getString("skill_type")));
+                row.put("skill_name", rs.getString("skill_name"));
+                row.put("holopower_cost", rs.getObject("holopower_cost"));
+                row.put("effect_json_text", rs.getString("effect_json_text"));
+                row.put("oshi_card_id", rs.getString("oshi_card_id"));
+                row.put("oshi_card_instance_id", rs.getObject("oshi_card_instance_id"));
+                return row;
+            },
+            matchId,
+            userId,
+            requestedSkillType
+        );
+    }
+
+    private String resolvePrimaryEffectType(String effectJson) {
+        JsonNode node = parseJson(effectJson);
+        if (node != null && node.isObject()) {
+            JsonNode type = node.get("type");
+            if (type != null && type.isTextual() && StringUtils.hasText(type.asText())) {
+                return normalizeZone(type.asText());
+            }
+        }
+        return "UNIMPLEMENTED";
+    }
+
+    private String resolveEffectTargetType(String effectJson) {
+        JsonNode node = parseJson(effectJson);
+        if (node == null || !node.isObject()) {
+            return "";
+        }
+        JsonNode targetType = node.get("targetType");
+        if (targetType != null && targetType.isTextual() && StringUtils.hasText(targetType.asText())) {
+            return normalizeZone(targetType.asText());
+        }
+        JsonNode targetTypeSnake = node.get("target_type");
+        if (targetTypeSnake != null && targetTypeSnake.isTextual() && StringUtils.hasText(targetTypeSnake.asText())) {
+            return normalizeZone(targetTypeSnake.asText());
+        }
+        return "";
+    }
+
+    private Map<String, Object> consumeHolopowerCostToArchive(Long matchId, Long userId, int holopowerCost) {
+        int required = Math.max(holopowerCost, 0);
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("required", required);
+        if (required <= 0) {
+            summary.put("paid", 0);
+            summary.put("archivedCardInstanceIds", List.of());
+            summary.put("archivedCardIds", List.of());
+            return summary;
+        }
+        List<Map<String, Object>> holopowerCards = jdbcTemplate.queryForList(
+            """
+            SELECT id, card_id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HOLOPOWER'
+            ORDER BY order_index NULLS LAST, id
+            LIMIT ?
+            """,
+            matchId,
+            userId,
+            required
+        );
+        if (holopowerCards.size() < required) {
+            throw new GameRuleException(
+                GameErrorCode.OSHI_SKILL_HOLOPOWER_INSUFFICIENT,
+                "Holopower 不足，無法發動 OSHI 技能",
+                Map.of("required", required, "available", holopowerCards.size())
+            );
+        }
+        Integer nextArchiveOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(MAX(order_index), 0) + 1
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'ARCHIVE'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        int archiveOrder = nextArchiveOrder == null ? 1 : nextArchiveOrder;
+        List<Long> archivedCardInstanceIds = new ArrayList<>();
+        List<String> archivedCardIds = new ArrayList<>();
+        for (Map<String, Object> row : holopowerCards) {
+            Long cardInstanceId = asLong(row.get("id"));
+            String cardId = asString(row.get("card_id"));
+            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
+                continue;
+            }
+            int moved = jdbcTemplate.update(
+                """
+                UPDATE match_cards
+                SET zone = 'ARCHIVE',
+                    order_index = ?,
+                    is_face_down = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'HOLOPOWER'
+                """,
+                archiveOrder++,
+                cardInstanceId,
+                matchId,
+                userId
+            );
+            if (moved != 1) {
+                throw new IllegalStateException("Holopower 支付失敗，請重新整理後重試");
+            }
+            archivedCardInstanceIds.add(cardInstanceId);
+            archivedCardIds.add(cardId);
+        }
+        summary.put("paid", archivedCardInstanceIds.size());
+        summary.put("archivedCardInstanceIds", archivedCardInstanceIds);
+        summary.put("archivedCardIds", archivedCardIds);
+        return summary;
     }
 
     private void returnCollabToBackAsRested(Long matchId, Long userId) {
@@ -2416,13 +3292,13 @@ public class MatchActionService {
         return "SPOT".equals(normalized);
     }
 
-    private boolean isBloomLevelHigher(String targetLevel, String bloomLevel) {
+    private boolean isBloomLevelNextStep(String targetLevel, String bloomLevel) {
         int targetRank = resolveBloomLevelRank(targetLevel);
         int bloomRank = resolveBloomLevelRank(bloomLevel);
         if (targetRank < 0 || bloomRank < 0) {
             return false;
         }
-        return bloomRank > targetRank;
+        return bloomRank == targetRank + 1;
     }
 
     private int resolveBloomLevelRank(String levelType) {
@@ -2886,16 +3762,18 @@ public class MatchActionService {
         );
     }
 
-    private Long createSupportPendingDecision(
+    private Long createCardSelectionPendingDecision(
         Long matchId,
         Long userId,
+        String sourceActionType,
         Long sourceCardInstanceId,
         String sourceCardId,
         String effectType,
         String effectJson,
         String targetType,
         Long targetHolomemCardInstanceId,
-        MatchEffectService.SupportDecisionPlan decisionPlan
+        MatchEffectService.SupportDecisionPlan decisionPlan,
+        boolean limited
     ) {
         if (hasBlockingPendingDecision(matchId, userId)) {
             throw new IllegalStateException("你有待處理的效果選擇，請先完成決策");
@@ -2924,7 +3802,7 @@ public class MatchActionService {
         context.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
         context.put("candidateCardInstanceIds", candidateCardInstanceIds);
         context.put("candidateCards", candidateCards);
-        context.put("limited", hasSupportDefinitionLimitedFlag(sourceCardId));
+        context.put("limited", limited);
 
         return jdbcTemplate.query(
             """
@@ -2940,13 +3818,14 @@ public class MatchActionService {
                 max_select,
                 status,
                 context_json
-            ) VALUES (?, ?, ?, 'PLAY_SUPPORT', ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
             RETURNING id
             """,
             rs -> rs.next() ? rs.getLong("id") : null,
             matchId,
             userId,
             SUPPORT_DECISION_TYPE_CARD_SELECTION,
+            sourceActionType,
             sourceCardInstanceId,
             sourceCardId,
             decisionPlan.effectType(),
@@ -2955,6 +3834,167 @@ public class MatchActionService {
             PENDING_STATUS,
             toJson(context)
         );
+    }
+
+    private Long createLookTopDeckPendingDecisionIfNeeded(
+        Long matchId,
+        Long userId,
+        String sourceActionType,
+        Long sourceCardInstanceId,
+        String sourceCardId,
+        String effectType,
+        Map<String, Object> effectSummary
+    ) {
+        LookTopDeckDecisionContext lookTopDeck = extractLookTopDeckDecisionContext(effectSummary);
+        if (lookTopDeck == null || lookTopDeck.cardInstanceId() == null || !StringUtils.hasText(lookTopDeck.cardId())) {
+            return null;
+        }
+        if (hasBlockingPendingDecision(matchId, userId)) {
+            throw new IllegalStateException("你有待處理的互動，請先完成確認");
+        }
+
+        Map<String, Object> candidate = loadCardCandidateForDecision(
+            matchId,
+            userId,
+            lookTopDeck.cardInstanceId(),
+            "DECK",
+            lookTopDeck.cardId()
+        );
+        List<Long> candidateCardInstanceIds = List.of(lookTopDeck.cardInstanceId());
+        List<Map<String, Object>> candidateCards = List.of(candidate);
+
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("interactionType", DECISION_TYPE_LOOK_TOP_DECK);
+        context.put("title", "查看牌庫頂");
+        context.put("message", "選擇保留在牌庫頂的卡片；若不選擇則放到底部。");
+        context.put("cards", candidateCards);
+        context.put("placementOptions", List.of("TOP", "BOTTOM"));
+        context.put("effectType", effectType);
+        context.put("candidateCardInstanceIds", candidateCardInstanceIds);
+        context.put("candidateCards", candidateCards);
+        context.put("lookedCardInstanceId", lookTopDeck.cardInstanceId());
+        context.put("lookedCardId", lookTopDeck.cardId());
+
+        return jdbcTemplate.query(
+            """
+            INSERT INTO match_pending_decisions (
+                match_id,
+                user_id,
+                decision_type,
+                source_action_type,
+                source_card_instance_id,
+                source_card_id,
+                effect_type,
+                min_select,
+                max_select,
+                status,
+                context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, ?, CAST(? AS jsonb))
+            RETURNING id
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            userId,
+            DECISION_TYPE_LOOK_TOP_DECK,
+            sourceActionType,
+            sourceCardInstanceId,
+            sourceCardId,
+            effectType,
+            PENDING_STATUS,
+            toJson(context)
+        );
+    }
+
+    private Map<String, Object> loadCardCandidateForDecision(
+        Long matchId,
+        Long userId,
+        Long cardInstanceId,
+        String fallbackZone,
+        String fallbackCardId
+    ) {
+        Map<String, Object> row = jdbcTemplate.query(
+            """
+            SELECT mc.id AS card_instance_id,
+                   mc.card_id,
+                   mc.zone,
+                   c.name,
+                   c.card_type,
+                   c.image_url,
+                   m.level_type
+            FROM match_cards mc
+            LEFT JOIN cards c ON c.card_id = mc.card_id
+            LEFT JOIN member_cards m ON m.card_id = mc.card_id
+            WHERE mc.match_id = ?
+              AND mc.owner_user_id = ?
+              AND mc.id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> value = new LinkedHashMap<>();
+                value.put("cardInstanceId", rs.getLong("card_instance_id"));
+                value.put("cardId", rs.getString("card_id"));
+                value.put("zone", normalizeZone(rs.getString("zone")));
+                value.put("name", rs.getString("name"));
+                value.put("cardType", rs.getString("card_type"));
+                value.put("imageUrl", rs.getString("image_url"));
+                value.put("levelType", rs.getString("level_type"));
+                return value;
+            },
+            matchId,
+            userId,
+            cardInstanceId
+        );
+        if (row != null) {
+            return row;
+        }
+        Map<String, Object> fallback = new LinkedHashMap<>();
+        fallback.put("cardInstanceId", cardInstanceId);
+        fallback.put("cardId", fallbackCardId);
+        fallback.put("zone", normalizeZone(fallbackZone));
+        fallback.put("name", null);
+        fallback.put("cardType", null);
+        fallback.put("imageUrl", null);
+        fallback.put("levelType", null);
+        return fallback;
+    }
+
+    private String normalizeDecisionPlacement(String placement) {
+        if (!StringUtils.hasText(placement)) {
+            return null;
+        }
+        return placement.trim().toUpperCase(Locale.ROOT);
+    }
+
+    @SuppressWarnings("unchecked")
+    private LookTopDeckDecisionContext extractLookTopDeckDecisionContext(Map<String, Object> effectSummary) {
+        if (effectSummary == null || effectSummary.isEmpty()) {
+            return null;
+        }
+        Object executedEffects = effectSummary.get("executedEffects");
+        if (!(executedEffects instanceof List<?> list)) {
+            return null;
+        }
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> effectRow)) {
+                continue;
+            }
+            String resolvedType = normalizeZone(effectRow.get("effectType"));
+            if (!DECISION_TYPE_LOOK_TOP_DECK.equals(resolvedType)) {
+                continue;
+            }
+            if (!toBoolean(effectRow.get("applied"))) {
+                continue;
+            }
+            Long lookedCardInstanceId = asLong(effectRow.get("lookedCardInstanceId"));
+            String lookedCardId = asString(effectRow.get("lookedCardId"));
+            if (lookedCardInstanceId != null && StringUtils.hasText(lookedCardId)) {
+                return new LookTopDeckDecisionContext(lookedCardInstanceId, lookedCardId);
+            }
+        }
+        return null;
     }
 
     private PendingDecision loadPendingDecisionForUpdate(Long matchId, Long userId, Long decisionId) {
@@ -2982,6 +4022,8 @@ public class MatchActionService {
                 }
                 String contextText = rs.getString("context_text");
                 JsonNode contextNode = parseJson(contextText);
+                int minSelect = Math.max(rs.getInt("min_select"), 0);
+                int maxSelect = Math.max(rs.getInt("max_select"), minSelect);
                 return new PendingDecision(
                     rs.getLong("id"),
                     normalizeZone(rs.getString("decision_type")),
@@ -2989,8 +4031,8 @@ public class MatchActionService {
                     rs.getLong("source_card_instance_id"),
                     rs.getString("source_card_id"),
                     normalizeZone(rs.getString("effect_type")),
-                    Math.max(rs.getInt("min_select"), 1),
-                    Math.max(rs.getInt("max_select"), 1),
+                    minSelect,
+                    maxSelect,
                     extractJsonLong(contextNode, "targetHolomemCardInstanceId"),
                     extractJsonText(contextNode, "targetType"),
                     extractJsonText(contextNode, "effectJson"),
@@ -3493,6 +4535,191 @@ public class MatchActionService {
         return summary;
     }
 
+    private int resolveBatonTouchColorlessModifier(Long matchId, Long ownerUserId, Long sourceHolomemId, int currentTurn) {
+        if (matchId == null || ownerUserId == null || sourceHolomemId == null || currentTurn <= 0) {
+            return 0;
+        }
+        Integer modifier = jdbcTemplate.query(
+            """
+            SELECT COALESCE(SUM(modifier_value), 0) AS total
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'BATON_TOUCH_COLORLESS_MODIFIER'
+              AND expires_turn >= ?
+              AND payload ->> 'targetHolomemId' = ?
+            """,
+            rs -> rs.next() ? rs.getInt("total") : 0,
+            matchId,
+            ownerUserId,
+            currentTurn,
+            sourceHolomemId.toString()
+        );
+        return modifier == null ? 0 : modifier;
+    }
+
+    private boolean isStageActionLocked(
+        Long matchId,
+        Long userId,
+        int currentTurn,
+        String actionKey,
+        String zone,
+        Long holomemId
+    ) {
+        if (matchId == null || userId == null || currentTurn <= 0 || !StringUtils.hasText(actionKey)) {
+            return false;
+        }
+        List<String> payloads = jdbcTemplate.query(
+            """
+            SELECT payload::text AS payload_text
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'ACTION_LOCK'
+              AND expires_turn >= ?
+            ORDER BY id DESC
+            """,
+            (rs, rowNum) -> rs.getString("payload_text"),
+            matchId,
+            userId,
+            currentTurn
+        );
+        if (payloads.isEmpty()) {
+            return false;
+        }
+        String normalizedAction = normalizeZone(actionKey);
+        String normalizedZone = normalizeZone(zone);
+        for (String payloadText : payloads) {
+            JsonNode payload = parseJson(payloadText);
+            if (payload == null || payload.isNull()) {
+                continue;
+            }
+            if (!matchesLockAction(payload, normalizedAction)) {
+                continue;
+            }
+            if (!matchesLockZone(payload, normalizedZone)) {
+                continue;
+            }
+            if (!matchesLockTargetHolomem(payload, holomemId)) {
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private boolean matchesLockAction(JsonNode payload, String actionKey) {
+        JsonNode actions = payload.get("actions");
+        if (actions == null || !actions.isArray() || actions.isEmpty()) {
+            return true;
+        }
+        for (JsonNode actionNode : actions) {
+            if (normalizeZone(actionNode.asText()).equals(actionKey)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesLockZone(JsonNode payload, String zone) {
+        JsonNode zones = payload.get("zones");
+        if (zones == null || !zones.isArray() || zones.isEmpty()) {
+            return true;
+        }
+        for (JsonNode zoneNode : zones) {
+            if (normalizeZone(zoneNode.asText()).equals(zone)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesLockTargetHolomem(JsonNode payload, Long holomemId) {
+        JsonNode targetHolomemId = payload.get("targetHolomemId");
+        if (targetHolomemId == null || targetHolomemId.isNull()) {
+            return true;
+        }
+        Long expected = asLong(targetHolomemId.asText());
+        if (expected == null || expected <= 0) {
+            return true;
+        }
+        return holomemId != null && holomemId.equals(expected);
+    }
+
+    private Map<String, Object> payBatonTouchCost(
+        Long matchId,
+        Long ownerUserId,
+        Long sourceHolomemId,
+        int requiredColorless
+    ) {
+        int required = Math.max(requiredColorless, 0);
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("requiredColorless", required);
+        if (required <= 0) {
+            summary.put("paidTotal", 0);
+            summary.put("paidCheerCardIds", List.of());
+            summary.put("paidCheerCardInstanceIds", List.of());
+            summary.put("paidColors", List.of());
+            summary.put("consumed", true);
+            return summary;
+        }
+
+        List<Map<String, Object>> attachedRows = jdbcTemplate.queryForList(
+            """
+            SELECT mhc.id AS cheer_row_id,
+                   mhc.cheer_card_id,
+                   cc.color
+            FROM match_holomem_cheers mhc
+            JOIN cheer_cards cc ON cc.card_id = mhc.cheer_card_id
+            WHERE mhc.match_holomem_id = ?
+            ORDER BY mhc.id
+            """,
+            sourceHolomemId
+        );
+        if (attachedRows.size() < required) {
+            throw new IllegalStateException("バトンタッチ費用不足：需要無色 Cheer x" + required);
+        }
+
+        List<String> paidCheerCardIds = new ArrayList<>();
+        List<Long> paidCheerCardInstanceIds = new ArrayList<>();
+        List<String> paidColors = new ArrayList<>();
+        for (int i = 0; i < required; i++) {
+            Map<String, Object> row = attachedRows.get(i);
+            Long cheerRowId = asLong(row.get("cheer_row_id"));
+            String cheerCardId = asString(row.get("cheer_card_id"));
+            String color = normalizeZone(row.get("color"));
+            if (cheerRowId == null || !StringUtils.hasText(cheerCardId)) {
+                continue;
+            }
+            int deleted = jdbcTemplate.update(
+                "DELETE FROM match_holomem_cheers WHERE id = ? AND match_holomem_id = ?",
+                cheerRowId,
+                sourceHolomemId
+            );
+            if (deleted != 1) {
+                continue;
+            }
+            Long archivedCardInstanceId = archiveStageCheerCard(matchId, ownerUserId, cheerCardId);
+            paidCheerCardIds.add(cheerCardId);
+            if (archivedCardInstanceId != null) {
+                paidCheerCardInstanceIds.add(archivedCardInstanceId);
+            }
+            if (StringUtils.hasText(color)) {
+                paidColors.add(color);
+            }
+        }
+
+        if (paidCheerCardIds.size() < required) {
+            throw new IllegalStateException("バトンタッチ費用結算失敗：實際支付不足");
+        }
+        summary.put("paidTotal", paidCheerCardIds.size());
+        summary.put("paidCheerCardIds", paidCheerCardIds);
+        summary.put("paidCheerCardInstanceIds", paidCheerCardInstanceIds);
+        summary.put("paidColors", paidColors);
+        summary.put("consumed", true);
+        return summary;
+    }
+
     private int findFirstCheerIndexByColor(List<Map<String, Object>> rows, String color) {
         for (int i = 0; i < rows.size(); i++) {
             if (color.equals(normalizeZone(rows.get(i).get("color")))) {
@@ -3770,6 +4997,12 @@ public class MatchActionService {
     }
 
     private record ArtCritical(String color, int bonus) {
+    }
+
+    private record LookTopDeckDecisionContext(
+        Long cardInstanceId,
+        String cardId
+    ) {
     }
 
     private record TargetHolomem(Long holomemId, Long matchCardInstanceId, String mainColor) {

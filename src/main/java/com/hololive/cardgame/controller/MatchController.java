@@ -2,6 +2,7 @@ package com.hololive.cardgame.controller;
 
 import com.hololive.cardgame.dto.AttachCheerActionRequest;
 import com.hololive.cardgame.dto.AttackArtActionRequest;
+import com.hololive.cardgame.dto.BatonTouchActionRequest;
 import com.hololive.cardgame.dto.BloomActionRequest;
 import com.hololive.cardgame.dto.JoinMatchRequest;
 import com.hololive.cardgame.dto.LobbyEvent;
@@ -13,6 +14,7 @@ import com.hololive.cardgame.dto.ResolveDecisionRequest;
 import com.hololive.cardgame.dto.GameStateResponse;
 import com.hololive.cardgame.dto.PlaySupportActionRequest;
 import com.hololive.cardgame.dto.PlayToStageActionRequest;
+import com.hololive.cardgame.dto.UseOshiSkillActionRequest;
 import com.hololive.cardgame.model.LobbyMatch;
 import com.hololive.cardgame.service.AuthUserResolver;
 import com.hololive.cardgame.service.LobbyMatchService;
@@ -251,6 +253,40 @@ public class MatchController {
             matchActionService.moveStageHolomem(matchId, currentUserId(), request);
             LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
             publish(matchId, "MOVE_STAGE_HOLOMEM", response);
+            return response;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    @PostMapping("/{matchId}/actions/use-oshi-skill")
+    public LobbyMatchResponse useOshiSkill(
+        @PathVariable Long matchId,
+        @RequestBody UseOshiSkillActionRequest request
+    ) {
+        try {
+            matchActionService.useOshiSkill(matchId, currentUserId(), request);
+            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+            publish(matchId, "USE_OSHI_SKILL", response);
+            return response;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    @PostMapping("/{matchId}/actions/baton-touch")
+    public LobbyMatchResponse batonTouch(
+        @PathVariable Long matchId,
+        @RequestBody BatonTouchActionRequest request
+    ) {
+        try {
+            matchActionService.batonTouch(matchId, currentUserId(), request);
+            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+            publish(matchId, "BATON_TOUCH", response);
             return response;
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
