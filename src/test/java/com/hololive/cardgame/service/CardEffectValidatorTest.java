@@ -34,6 +34,10 @@ class CardEffectValidatorTest {
             "{\"type\":\"draw\",\"value\":1}",
             "effectJson"
         )).doesNotThrowAnyException();
+        assertThatCode(() -> cardEffectValidator.validateEffectJson(
+            "{\"type\":\"MATCH_RESULT\",\"result\":\"WIN\"}",
+            "effectJson"
+        )).doesNotThrowAnyException();
     }
 
     @Test

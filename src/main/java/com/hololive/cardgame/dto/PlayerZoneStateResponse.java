@@ -17,6 +17,8 @@ public class PlayerZoneStateResponse {
     private Integer cheerDeckCount = 0;
     private Integer lifeCount = 0;
     private Integer handCount = 0;
+    private boolean mulliganUsed = false;
+    private boolean mulliganDone = false;
     private final List<BoardZoneStateResponse> boardZones = new ArrayList<>();
     private final List<ZoneCardInstanceResponse> handCards = new ArrayList<>();
 

@@ -6,6 +6,7 @@ import com.hololive.cardgame.dto.BoardZoneStateResponse;
 import com.hololive.cardgame.dto.GameStateResponse;
 import com.hololive.cardgame.dto.PendingDecisionCandidateResponse;
 import com.hololive.cardgame.dto.PendingDecisionResponse;
+import com.hololive.cardgame.dto.PendingInteractionResponse;
 import com.hololive.cardgame.dto.PlayerZoneStateResponse;
 import com.hololive.cardgame.dto.RecentMatchActionResponse;
 import com.hololive.cardgame.dto.ZoneCardInstanceResponse;
@@ -19,9 +20,12 @@ import java.util.ArrayList;
 import com.hololive.cardgame.repository.MatchPlayerRepository;
 import com.hololive.cardgame.repository.MatchRepository;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -49,17 +53,20 @@ public class MatchGameStateService {
     private final MatchPlayerRepository matchPlayerRepository;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
+    private final MatchEffectService matchEffectService;
 
     public MatchGameStateService(
         MatchRepository matchRepository,
         MatchPlayerRepository matchPlayerRepository,
         JdbcTemplate jdbcTemplate,
-        ObjectMapper objectMapper
+        ObjectMapper objectMapper,
+        MatchEffectService matchEffectService
     ) {
         this.matchRepository = matchRepository;
         this.matchPlayerRepository = matchPlayerRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.matchEffectService = matchEffectService;
     }
 
     @Transactional(readOnly = true)
@@ -69,6 +76,7 @@ public class MatchGameStateService {
         }
         GameStateResponse response = getGameState(matchId);
         response.getPendingDecisions().addAll(loadPendingDecisions(matchId, userId));
+        response.getPendingInteractions().addAll(loadPendingInteractions(matchId, userId));
         return response;
     }
 
@@ -80,7 +88,10 @@ public class MatchGameStateService {
         List<MatchPlayerEntity> matchPlayers = matchPlayerRepository.findByMatchIdOrderByIdAsc(matchId);
         Map<Long, PlayerZoneStateResponse> playerStates = new LinkedHashMap<>();
         for (MatchPlayerEntity player : matchPlayers) {
-            playerStates.put(player.getUserId(), new PlayerZoneStateResponse(player.getUserId()));
+            PlayerZoneStateResponse state = new PlayerZoneStateResponse(player.getUserId());
+            state.setMulliganUsed(player.isMulliganUsed());
+            state.setMulliganDone(player.isMulliganDone());
+            playerStates.put(player.getUserId(), state);
         }
 
         // match_cards 回傳每張卡的實例與位置，前端不需要自行猜測區位資料。
@@ -121,16 +132,35 @@ public class MatchGameStateService {
         List<Map<String, Object>> stageRows = jdbcTemplate.queryForList(
             """
             SELECT
+                h.id AS holomem_id,
                 h.owner_user_id,
                 h.zone,
                 mc.id AS card_instance_id,
                 h.card_id,
                 ROW_NUMBER() OVER (PARTITION BY h.owner_user_id, h.zone ORDER BY h.id) AS position_index,
                 h.is_face_down,
+                h.damage_taken,
+                m.hp AS base_max_hp,
+                COALESCE(cheer_info.cheer_count, 0) AS cheer_count,
+                COALESCE(cheer_info.cheer_color_counts, '{}'::jsonb)::text AS cheer_color_counts_text,
                 COALESCE(stack_info.stack_depth, 1) AS stack_depth,
-                stack_info.stack_card_instance_ids
+                stack_info.stack_card_instance_ids,
+                COALESCE(support_info.attached_support_count, 0) AS attached_support_count
             FROM match_holomems h
             JOIN match_cards mc ON mc.id = h.match_card_id
+            JOIN member_cards m ON m.card_id = h.card_id
+            LEFT JOIN LATERAL (
+                SELECT
+                    COALESCE(SUM(color_counts.count), 0)::int AS cheer_count,
+                    COALESCE(JSONB_OBJECT_AGG(color_counts.color, color_counts.count), '{}'::jsonb) AS cheer_color_counts
+                FROM (
+                    SELECT cc.color, COUNT(*)::int AS count
+                    FROM match_holomem_cheers mhc
+                    JOIN cheer_cards cc ON cc.card_id = mhc.cheer_card_id
+                    WHERE mhc.match_holomem_id = h.id
+                    GROUP BY cc.color
+                ) color_counts
+            ) cheer_info ON TRUE
             LEFT JOIN LATERAL (
                 SELECT
                     COUNT(*)::int AS stack_depth,
@@ -138,6 +168,11 @@ public class MatchGameStateService {
                 FROM match_holomem_stack_cards s
                 WHERE s.match_holomem_id = h.id
             ) stack_info ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::int AS attached_support_count
+                FROM match_holomem_supports hs
+                WHERE hs.match_holomem_id = h.id
+            ) support_info ON TRUE
             WHERE h.match_id = ?
             ORDER BY h.owner_user_id, h.zone, position_index, h.id
             """,
@@ -150,6 +185,12 @@ public class MatchGameStateService {
             if (playerState == null) {
                 continue;
             }
+            Long holomemId = toLong(row.get("holomem_id"));
+            Integer damageTaken = toNullableInt(row.get("damage_taken"));
+            Integer baseMaxHp = toNullableInt(row.get("base_max_hp"));
+            int hpBonus = matchEffectService.resolveAttachedSupportHpBonus(matchId, holomemId);
+            int adjustedMaxHp = Math.max((baseMaxHp == null ? 0 : baseMaxHp) + hpBonus, 0);
+            int adjustedCurrentHp = Math.max(adjustedMaxHp - (damageTaken == null ? 0 : damageTaken), 0);
             ZoneCardInstanceResponse card = new ZoneCardInstanceResponse(
                 toLong(row.get("card_instance_id")),
                 toStringValue(row.get("card_id")),
@@ -158,7 +199,13 @@ public class MatchGameStateService {
                 ownerUserId,
                 toBoolean(row.get("is_face_down")),
                 toInt(row.get("stack_depth")),
-                toLongList(row.get("stack_card_instance_ids"), toLong(row.get("card_instance_id")))
+                toLongList(row.get("stack_card_instance_ids"), toLong(row.get("card_instance_id"))),
+                adjustedCurrentHp,
+                adjustedMaxHp,
+                damageTaken,
+                toNullableInt(row.get("cheer_count")),
+                toColorCountMap(parsePayloadJson(toStringValue(row.get("cheer_color_counts_text")))),
+                toNullableInt(row.get("attached_support_count"))
             );
             addCardToZone(playerState, card);
         }
@@ -224,6 +271,7 @@ public class MatchGameStateService {
             WHERE match_id = ?
               AND user_id = ?
               AND status = 'PENDING'
+              AND decision_type = 'CARD_SELECTION'
             ORDER BY id ASC
             LIMIT 5
             """,
@@ -245,13 +293,13 @@ public class MatchGameStateService {
 
             JsonNode contextNode = parsePayloadJson(toStringValue(row.get("context_text")));
             decision.setTargetHolomemCardInstanceId(toLong(contextNode.path("targetHolomemCardInstanceId").asText(null)));
-            decision.getCandidates().addAll(loadPendingDecisionCandidates(contextNode));
+            decision.getCandidates().addAll(loadPendingDecisionCandidates(matchId, contextNode));
             decisions.add(decision);
         }
         return decisions;
     }
 
-    private List<PendingDecisionCandidateResponse> loadPendingDecisionCandidates(JsonNode contextNode) {
+    private List<PendingDecisionCandidateResponse> loadPendingDecisionCandidates(Long matchId, JsonNode contextNode) {
         if (contextNode == null || contextNode.isNull()) {
             return List.of();
         }
@@ -268,9 +316,209 @@ public class MatchGameStateService {
             candidate.setCardType(toStringValue(node.path("cardType").asText(null)));
             candidate.setLevelType(toStringValue(node.path("levelType").asText(null)));
             candidate.setZone(toStringValue(node.path("zone").asText(null)));
+            candidate.setImageUrl(toStringValue(node.path("imageUrl").asText(null)));
+            candidate.setCurrentHp(toNullableInt(node.path("currentHp").asText(null)));
+            candidate.setMaxHp(toNullableInt(node.path("maxHp").asText(null)));
+            candidate.setDamageTaken(toNullableInt(node.path("damageTaken").asText(null)));
+            candidate.setCheerCount(toNullableInt(node.path("cheerCount").asText(null)));
+            candidate.setCheerColorCounts(toColorCountMap(node.path("cheerColorCounts")));
+            candidate.setAttachedSupportCount(toNullableInt(node.path("attachedSupportCount").asText(null)));
             candidates.add(candidate);
         }
+        enrichPendingCandidateStageStats(matchId, candidates);
         return candidates;
+    }
+
+    private List<PendingInteractionResponse> loadPendingInteractions(Long matchId, Long userId) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+            """
+            SELECT id,
+                   decision_type,
+                   source_action_type,
+                   source_card_instance_id,
+                   source_card_id,
+                   effect_type,
+                   min_select,
+                   max_select,
+                   context_json::text AS context_text,
+                   created_at
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type <> 'CARD_SELECTION'
+            ORDER BY id ASC
+            LIMIT 5
+            """,
+            matchId,
+            userId
+        );
+        List<PendingInteractionResponse> interactions = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            JsonNode contextNode = parsePayloadJson(toStringValue(row.get("context_text")));
+            PendingInteractionResponse interaction = new PendingInteractionResponse();
+            interaction.setInteractionId(toLong(row.get("id")));
+            interaction.setInteractionType(resolveInteractionType(row, contextNode));
+            interaction.setSourceActionType(toStringValue(row.get("source_action_type")));
+            interaction.setSourceCardInstanceId(toLong(row.get("source_card_instance_id")));
+            interaction.setSourceCardId(toStringValue(row.get("source_card_id")));
+            interaction.setEffectType(toStringValue(row.get("effect_type")));
+            interaction.setMinSelect(toInt(row.get("min_select")));
+            interaction.setMaxSelect(toInt(row.get("max_select")));
+            interaction.setTargetHolomemCardInstanceId(toLong(contextNode.path("targetHolomemCardInstanceId").asText(null)));
+            interaction.setTitle(toStringValue(contextNode.path("title").asText(null)));
+            interaction.setMessage(toStringValue(contextNode.path("message").asText(null)));
+            interaction.setCreatedAt(toLocalDateTime(row.get("created_at")));
+            interaction.getCards().addAll(loadPendingInteractionCards(matchId, contextNode));
+            interactions.add(interaction);
+        }
+        return interactions;
+    }
+
+    private String resolveInteractionType(Map<String, Object> row, JsonNode contextNode) {
+        String contextType = toStringValue(contextNode.path("interactionType").asText(null));
+        if (StringUtils.hasText(contextType)) {
+            return contextType.trim().toUpperCase(Locale.ROOT);
+        }
+        return normalizeZone(row.get("decision_type"));
+    }
+
+    private List<PendingDecisionCandidateResponse> loadPendingInteractionCards(Long matchId, JsonNode contextNode) {
+        if (contextNode == null || contextNode.isNull()) {
+            return List.of();
+        }
+        JsonNode cardNodes = contextNode.path("cards");
+        if (!cardNodes.isArray() || cardNodes.isEmpty()) {
+            return loadPendingDecisionCandidates(matchId, contextNode);
+        }
+        List<PendingDecisionCandidateResponse> cards = new ArrayList<>();
+        for (JsonNode node : cardNodes) {
+            PendingDecisionCandidateResponse card = new PendingDecisionCandidateResponse();
+            card.setCardInstanceId(toLong(node.path("cardInstanceId").asText(null)));
+            card.setCardId(toStringValue(node.path("cardId").asText(null)));
+            card.setName(toStringValue(node.path("name").asText(null)));
+            card.setCardType(toStringValue(node.path("cardType").asText(null)));
+            card.setLevelType(toStringValue(node.path("levelType").asText(null)));
+            card.setZone(toStringValue(node.path("zone").asText(null)));
+            card.setImageUrl(toStringValue(node.path("imageUrl").asText(null)));
+            card.setCurrentHp(toNullableInt(node.path("currentHp").asText(null)));
+            card.setMaxHp(toNullableInt(node.path("maxHp").asText(null)));
+            card.setDamageTaken(toNullableInt(node.path("damageTaken").asText(null)));
+            card.setCheerCount(toNullableInt(node.path("cheerCount").asText(null)));
+            card.setCheerColorCounts(toColorCountMap(node.path("cheerColorCounts")));
+            card.setAttachedSupportCount(toNullableInt(node.path("attachedSupportCount").asText(null)));
+            cards.add(card);
+        }
+        enrichPendingCandidateStageStats(matchId, cards);
+        return cards;
+    }
+
+    private void enrichPendingCandidateStageStats(Long matchId, List<PendingDecisionCandidateResponse> candidates) {
+        if (matchId == null || candidates == null || candidates.isEmpty()) {
+            return;
+        }
+        Set<Long> cardInstanceIds = candidates.stream()
+            .map(PendingDecisionCandidateResponse::getCardInstanceId)
+            .filter(id -> id != null && id > 0)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (cardInstanceIds.isEmpty()) {
+            return;
+        }
+
+        String placeholders = cardInstanceIds.stream().map(id -> "?").collect(Collectors.joining(", "));
+        List<Object> params = new ArrayList<>();
+        params.add(matchId);
+        params.addAll(cardInstanceIds);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+            """
+            SELECT h.match_card_id AS card_instance_id,
+                   h.id AS holomem_id,
+                   h.damage_taken,
+                   m.hp AS base_max_hp,
+                   COALESCE(cheer_info.cheer_count, 0) AS cheer_count,
+                   COALESCE(cheer_info.cheer_color_counts, '{}'::jsonb)::text AS cheer_color_counts_text,
+                   COALESCE(support_info.attached_support_count, 0) AS attached_support_count
+            FROM match_holomems h
+            JOIN member_cards m ON m.card_id = h.card_id
+            LEFT JOIN LATERAL (
+                SELECT
+                    COALESCE(SUM(color_counts.count), 0)::int AS cheer_count,
+                    COALESCE(JSONB_OBJECT_AGG(color_counts.color, color_counts.count), '{}'::jsonb) AS cheer_color_counts
+                FROM (
+                    SELECT cc.color, COUNT(*)::int AS count
+                    FROM match_holomem_cheers mhc
+                    JOIN cheer_cards cc ON cc.card_id = mhc.cheer_card_id
+                    WHERE mhc.match_holomem_id = h.id
+                    GROUP BY cc.color
+                ) color_counts
+            ) cheer_info ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::int AS attached_support_count
+                FROM match_holomem_supports hs
+                WHERE hs.match_holomem_id = h.id
+            ) support_info ON TRUE
+            WHERE h.match_id = ?
+              AND h.match_card_id IN (%s)
+            """.formatted(placeholders),
+            params.toArray()
+        );
+        if (rows.isEmpty()) {
+            return;
+        }
+
+        Map<Long, Map<String, Object>> statsByCardInstance = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            Long cardInstanceId = toLong(row.get("card_instance_id"));
+            if (cardInstanceId == null || cardInstanceId <= 0) {
+                continue;
+            }
+            statsByCardInstance.put(cardInstanceId, row);
+        }
+        if (statsByCardInstance.isEmpty()) {
+            return;
+        }
+
+        for (PendingDecisionCandidateResponse candidate : candidates) {
+            if (candidate == null || candidate.getCardInstanceId() == null) {
+                continue;
+            }
+            Map<String, Object> stats = statsByCardInstance.get(candidate.getCardInstanceId());
+            if (stats == null) {
+                continue;
+            }
+            Long holomemId = toLong(stats.get("holomem_id"));
+            Integer damageTaken = toNullableInt(stats.get("damage_taken"));
+            Integer baseMaxHp = toNullableInt(stats.get("base_max_hp"));
+            int hpBonus = matchEffectService.resolveAttachedSupportHpBonus(matchId, holomemId);
+            int adjustedMaxHp = Math.max((baseMaxHp == null ? 0 : baseMaxHp) + hpBonus, 0);
+            int adjustedCurrentHp = Math.max(adjustedMaxHp - (damageTaken == null ? 0 : damageTaken), 0);
+            candidate.setCurrentHp(adjustedCurrentHp);
+            candidate.setMaxHp(adjustedMaxHp);
+            candidate.setDamageTaken(damageTaken);
+            candidate.setCheerCount(toNullableInt(stats.get("cheer_count")));
+            JsonNode colorCountsNode = parsePayloadJson(toStringValue(stats.get("cheer_color_counts_text")));
+            candidate.setCheerColorCounts(toColorCountMap(colorCountsNode));
+            candidate.setAttachedSupportCount(toNullableInt(stats.get("attached_support_count")));
+        }
+    }
+
+    private Map<String, Integer> toColorCountMap(JsonNode node) {
+        if (node == null || node.isNull() || !node.isObject()) {
+            return Map.of();
+        }
+        Map<String, Integer> result = new LinkedHashMap<>();
+        node.fields().forEachRemaining(entry -> {
+            String color = normalizeZone(entry.getKey());
+            if (!StringUtils.hasText(color)) {
+                return;
+            }
+            Integer count = toNullableInt(entry.getValue().asText(null));
+            if (count == null || count <= 0) {
+                return;
+            }
+            result.put(color, count);
+        });
+        return result.isEmpty() ? Map.of() : result;
     }
 
     private boolean isMatchCardSupportedZone(String zone) {
@@ -343,6 +591,20 @@ public class MatchGameStateService {
             return number.intValue();
         }
         return 0;
+    }
+
+    private Integer toNullableInt(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value instanceof String text) {
+            try {
+                return Integer.parseInt(text);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private Long toLong(Object value) {

@@ -72,6 +72,31 @@ public class MatchEventHookService {
         return result;
     }
 
+    public Map<String, Object> onHolomemCollab(
+        Long matchId,
+        Long userId,
+        String cardId,
+        Long cardInstanceId
+    ) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("event", "ON_HOLOMEM_COLLAB");
+        result.put("matchId", matchId);
+        result.put("userId", userId);
+        result.put("cardId", cardId);
+        result.put("cardInstanceId", cardInstanceId);
+        result.put("stageZone", "COLLAB");
+
+        Map<String, Object> summary = loadMemberTriggerSummary(cardId);
+        if (summary == null) {
+            result.put("hasPassive", false);
+            result.put("detectedTriggers", List.of());
+            return result;
+        }
+        result.putAll(summary);
+        result.put("note", "目前僅建立事件鉤子與觸發辨識，效果執行將在後續 P2 擴充");
+        return result;
+    }
+
     private Map<String, Object> loadMemberTriggerSummary(String cardId) {
         Map<String, Object> row = jdbcTemplate.query(
             """

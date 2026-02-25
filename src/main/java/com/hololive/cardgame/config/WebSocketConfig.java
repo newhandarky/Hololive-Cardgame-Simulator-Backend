@@ -26,6 +26,6 @@ public class WebSocketConfig implements WebSocketConfigurer {
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(matchSocketHandler, "/ws/matches/{matchId}")
             .addInterceptors(wsAuthHandshakeInterceptor)
-            .setAllowedOrigins("http://localhost:5173", "http://localhost:5174");
+            .setAllowedOriginPatterns("http://localhost:*", "http://127.0.0.1:*");
     }
 }

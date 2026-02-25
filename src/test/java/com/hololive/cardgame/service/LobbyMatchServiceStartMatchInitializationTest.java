@@ -53,20 +53,28 @@ class LobbyMatchServiceStartMatchInitializationTest {
         assertThat(started.getStatus()).isEqualTo(LobbyMatchStatus.STARTED);
         assertThat(started.getCurrentTurnPlayerId()).isEqualTo(host.getId());
         assertThat(started.getTurnNumber()).isEqualTo(1);
+        String startedPhase = jdbcTemplate.queryForObject(
+            "SELECT current_phase FROM matches WHERE id = ?",
+            String.class,
+            created.getId()
+        );
+        assertThat(startedPhase).isEqualTo("RESET");
 
-        assertZoneCount(created.getId(), host.getId(), "HAND", 5);
-        assertZoneCount(created.getId(), host.getId(), "DECK", 45);
+        assertZoneCount(created.getId(), host.getId(), "HAND", 7);
+        assertZoneCount(created.getId(), host.getId(), "DECK", 43);
         assertZoneCount(created.getId(), host.getId(), "LIFE", 5);
         assertZoneCount(created.getId(), host.getId(), "CHEER_DECK", 15);
 
-        assertZoneCount(created.getId(), guest.getId(), "HAND", 5);
-        assertZoneCount(created.getId(), guest.getId(), "DECK", 45);
+        assertZoneCount(created.getId(), guest.getId(), "HAND", 7);
+        assertZoneCount(created.getId(), guest.getId(), "DECK", 43);
         assertZoneCount(created.getId(), guest.getId(), "LIFE", 5);
         assertZoneCount(created.getId(), guest.getId(), "CHEER_DECK", 15);
 
         var hostPlayer = matchPlayerRepository.findByMatchIdAndUserId(created.getId(), host.getId()).orElseThrow();
         assertThat(hostPlayer.getOshiCardId()).isNotBlank();
         assertThat(hostPlayer.getCurrentLife()).isEqualTo(5);
+        assertThat(hostPlayer.isMulliganDone()).isFalse();
+        assertThat(hostPlayer.isMulliganUsed()).isFalse();
     }
 
     @Test

@@ -2,8 +2,10 @@ package com.hololive.cardgame.websocket;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hololive.cardgame.dto.GameStateResponse;
 import com.hololive.cardgame.dto.LobbyEvent;
 import com.hololive.cardgame.service.LobbyMatchService;
+import com.hololive.cardgame.service.MatchGameStateService;
 import java.io.IOException;
 import java.net.URI;
 import java.util.Map;
@@ -21,9 +23,14 @@ public class MatchSocketHandler extends TextWebSocketHandler {
     private final Map<Long, Set<WebSocketSession>> sessionsByMatchId = new ConcurrentHashMap<>();
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final LobbyMatchService lobbyMatchService;
+    private final MatchGameStateService matchGameStateService;
 
-    public MatchSocketHandler(LobbyMatchService lobbyMatchService) {
+    public MatchSocketHandler(
+        LobbyMatchService lobbyMatchService,
+        MatchGameStateService matchGameStateService
+    ) {
         this.lobbyMatchService = lobbyMatchService;
+        this.matchGameStateService = matchGameStateService;
     }
 
     @Override
@@ -55,19 +62,22 @@ public class MatchSocketHandler extends TextWebSocketHandler {
         if (sessions == null || sessions.isEmpty()) {
             return;
         }
-
-        String payload;
-        try {
-            payload = objectMapper.writeValueAsString(event);
-        } catch (JsonProcessingException e) {
-            return;
-        }
-
-        TextMessage message = new TextMessage(payload);
         sessions.removeIf(session -> !session.isOpen());
         for (WebSocketSession session : sessions) {
+            Long userId = parseUserId(session);
+            if (userId == null) {
+                continue;
+            }
             try {
+                GameStateResponse gameState = matchGameStateService.getGameStateForUser(matchId, userId);
+                LobbyEvent personalizedEvent = LobbyEvent.of(event.getType(), event.getMatch(), gameState);
+                String payload = objectMapper.writeValueAsString(personalizedEvent);
+                TextMessage message = new TextMessage(payload);
                 session.sendMessage(message);
+            } catch (IllegalStateException ignored) {
+                // User no longer belongs to match; skip this session.
+            } catch (JsonProcessingException ignored) {
+                // Skip malformed payload serialization for this session.
             } catch (IOException ignored) {
                 try {
                     session.close(CloseStatus.SERVER_ERROR);

@@ -39,6 +39,12 @@ public class MatchPlayerEntity {
     @Column(name = "skill_used_this_turn", nullable = false)
     private boolean skillUsedThisTurn;
 
+    @Column(name = "mulligan_used", nullable = false)
+    private boolean mulliganUsed;
+
+    @Column(name = "mulligan_done", nullable = false)
+    private boolean mulliganDone;
+
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt = LocalDateTime.now();
 

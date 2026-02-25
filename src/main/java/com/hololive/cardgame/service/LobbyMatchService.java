@@ -34,7 +34,7 @@ public class LobbyMatchService {
 
     private static final String ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     private static final int ROOM_CODE_LENGTH = 6;
-    private static final int INITIAL_HAND_SIZE = 5;
+    private static final int INITIAL_HAND_SIZE = 7;
     private static final int REQUIRED_MAIN_DECK_SIZE = 50;
     private static final int REQUIRED_CHEER_DECK_SIZE = 20;
     private static final int DEFAULT_OSHI_LIFE = 5;
@@ -161,7 +161,7 @@ public class LobbyMatchService {
         match.setLobbyStatus(LobbyMatchStatus.STARTED.name());
         match.setCurrentTurnPlayerId(match.getPlayerAId());
         match.setTurnNumber(1);
-        match.setCurrentPhase(MatchPhase.MAIN.name());
+        match.setCurrentPhase(MatchPhase.RESET.name());
         match.setStartedAt(LocalDateTime.now());
         touchUpdatedAt(match);
         matchRepository.save(match);
@@ -266,6 +266,8 @@ public class LobbyMatchService {
         entity.setReady(ready);
         entity.setSpSkillUsed(false);
         entity.setSkillUsedThisTurn(false);
+        entity.setMulliganUsed(false);
+        entity.setMulliganDone(false);
         entity.setCreatedAt(LocalDateTime.now());
         entity.setUpdatedAt(LocalDateTime.now());
         matchPlayerRepository.save(entity);
@@ -365,6 +367,8 @@ public class LobbyMatchService {
 
         matchPlayer.setOshiCardId(oshiCardId);
         matchPlayer.setCurrentLife(oshiLife);
+        matchPlayer.setMulliganUsed(false);
+        matchPlayer.setMulliganDone(false);
         matchPlayer.setUpdatedAt(LocalDateTime.now());
         matchPlayerRepository.save(matchPlayer);
     }

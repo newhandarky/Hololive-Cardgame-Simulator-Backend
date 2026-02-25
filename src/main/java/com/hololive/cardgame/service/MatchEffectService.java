@@ -26,11 +26,19 @@ public class MatchEffectService {
     private static final Pattern CHEER_COUNT_PATTERN = Pattern.compile("エール\\s*(\\d+)\\s*枚");
     private static final Pattern SEARCH_RANGE_PATTERN = Pattern.compile("(\\d+)\\s*[~〜～]\\s*(\\d+)\\s*枚");
     private static final Pattern SEARCH_COUNT_PATTERN = Pattern.compile("(\\d+)\\s*枚");
-    private static final Pattern TAG_PATTERN = Pattern.compile("#[\\p{L}\\p{N}_]+");
+    private static final Pattern TAG_PATTERN = Pattern.compile(
+        "#([\\p{L}\\p{N}_'\\-]+?)(?=(?:を|が|に|で|と|へ|や|も|、|。|\\s|$))"
+    );
     private static final Pattern NAME_TOKEN_PATTERN = Pattern.compile("〈([^〉]+)〉");
     private static final Pattern ARTS_MODIFIER_PATTERN = Pattern.compile("アーツ\\s*([+＋\\-−]\\s*\\d+)");
     private static final Pattern DICE_AT_LEAST_PATTERN = Pattern.compile("(\\d+)\\s*以上の時");
     private static final Pattern DICE_AT_MOST_PATTERN = Pattern.compile("(\\d+)\\s*以下の時");
+    private static final Pattern ATTACHED_SUPPORT_HP_PATTERN = Pattern.compile(
+        "この(?:マスコット|ツール|ファン)が付いているホロメンのHP\\s*([+＋−-]\\s*\\d+)"
+    );
+    private static final Pattern ATTACHED_SUPPORT_ARTS_PATTERN = Pattern.compile(
+        "この(?:マスコット|ツール|ファン)が付いているホロメンのアーツ\\s*([+＋−-]\\s*\\d+)"
+    );
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -152,6 +160,9 @@ public class MatchEffectService {
                         targetType
                     )
                 );
+                case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
+                    executeMatchResultEffect(matchId, userId, type, effectNode)
+                );
                 case "UNIMPLEMENTED" -> executed.add(
                     executeNoOpEffect(type, effectNode, "尚未落地，先保留 action 並不中斷流程")
                 );
@@ -218,14 +229,22 @@ public class MatchEffectService {
         );
     }
 
+    public int resolveAttachedSupportHpBonus(Long matchId, Long matchHolomemId) {
+        return resolveAttachedSupportStatBonus(matchId, matchHolomemId, ATTACHED_SUPPORT_HP_PATTERN);
+    }
+
+    public int resolveAttachedSupportArtBonus(Long matchId, Long matchHolomemId) {
+        return resolveAttachedSupportStatBonus(matchId, matchHolomemId, ATTACHED_SUPPORT_ARTS_PATTERN);
+    }
+
     public Map<String, Object> applyBloomTriggeredEffects(
         Long matchId,
         Long userId,
         String bloomCardId,
         Long selfHolomemCardInstanceId
     ) {
-        String bloomText = loadBloomEffectText(bloomCardId);
-        if (!StringUtils.hasText(bloomText)) {
+        BloomEffectPlan bloomPlan = resolveBloomEffectPlan(bloomCardId);
+        if (!bloomPlan.hasBloomEffect()) {
             Map<String, Object> summary = new LinkedHashMap<>();
             summary.put("hasBloomEffect", false);
             summary.put("requestedEffects", List.of());
@@ -235,18 +254,11 @@ public class MatchEffectService {
             return summary;
         }
 
-        List<String> effectTypes = inferBloomEffectTypes(bloomText);
+        List<String> effectTypes = bloomPlan.effectTypes();
         List<Map<String, Object>> executed = new ArrayList<>();
         List<String> unsupported = new ArrayList<>();
-        Integer diceRoll = resolveBloomDiceRoll(bloomText);
-        Map<String, Object> bloomEffectPayload = new LinkedHashMap<>();
-        bloomEffectPayload.put("type", "UNIMPLEMENTED");
-        bloomEffectPayload.put("effects", effectTypes);
-        bloomEffectPayload.put("rawText", bloomText);
-        if (diceRoll != null) {
-            bloomEffectPayload.put("diceRoll", diceRoll);
-        }
-        JsonNode bloomEffectNode = objectMapper.valueToTree(bloomEffectPayload);
+        Integer diceRoll = bloomPlan.diceRoll();
+        JsonNode bloomEffectNode = bloomPlan.effectNode();
 
         for (String effectType : effectTypes) {
             String targetType = inferBloomTargetType(effectType);
@@ -335,6 +347,9 @@ public class MatchEffectService {
                         targetType
                     )
                 );
+                case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
+                    executeMatchResultEffect(matchId, userId, effectType, bloomEffectNode)
+                );
                 case "UNIMPLEMENTED" -> executed.add(
                     executeNoOpEffect(effectType, bloomEffectNode, "尚未支援的 BLOOM 效果")
                 );
@@ -347,7 +362,139 @@ public class MatchEffectService {
         summary.put("requestedEffects", effectTypes);
         summary.put("executedEffects", executed);
         summary.put("unsupportedEffects", unsupported);
-        summary.put("rawText", bloomText);
+        summary.put("rawText", bloomPlan.rawText());
+        if (diceRoll != null) {
+            summary.put("diceRoll", diceRoll);
+        }
+        return summary;
+    }
+
+    public Map<String, Object> applyCollabTriggeredEffects(
+        Long matchId,
+        Long userId,
+        String collabCardId,
+        Long selfHolomemCardInstanceId
+    ) {
+        BloomEffectPlan collabPlan = resolveCollabEffectPlan(collabCardId);
+        if (!collabPlan.hasBloomEffect()) {
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("hasCollabEffect", false);
+            summary.put("requestedEffects", List.of());
+            summary.put("executedEffects", List.of());
+            summary.put("unsupportedEffects", List.of());
+            summary.put("rawText", null);
+            return summary;
+        }
+
+        List<String> effectTypes = collabPlan.effectTypes();
+        List<Map<String, Object>> executed = new ArrayList<>();
+        List<String> unsupported = new ArrayList<>();
+        Integer diceRoll = collabPlan.diceRoll();
+        JsonNode collabEffectNode = collabPlan.effectNode();
+
+        for (String effectType : effectTypes) {
+            String targetType = inferBloomTargetType(effectType);
+            switch (effectType) {
+                case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, collabEffectNode));
+                case "SEARCH" -> executed.add(
+                    executeSearchEffect(matchId, userId, effectType, collabEffectNode, null)
+                );
+                case "RETURN_TO_HAND" -> executed.add(
+                    executeReturnToHandEffect(matchId, userId, effectType, collabEffectNode, null)
+                );
+                case "RETURN_TO_DECK_TOP" -> executed.add(
+                    executeReturnToDeckTopEffect(matchId, userId, effectType, collabEffectNode, null)
+                );
+                case "ADD_CHEER" -> executed.add(
+                    executeAddCheerEffect(
+                        matchId,
+                        userId,
+                        effectType,
+                        collabEffectNode,
+                        targetType,
+                        selfHolomemCardInstanceId
+                    )
+                );
+                case "DAMAGE" -> executed.add(
+                    executeDamageEffect(
+                        matchId,
+                        userId,
+                        effectType,
+                        collabEffectNode,
+                        targetType,
+                        null
+                    )
+                );
+                case "REATTACH" -> executed.add(
+                    executeReattachEffect(
+                        matchId,
+                        userId,
+                        effectType,
+                        collabEffectNode,
+                        targetType,
+                        selfHolomemCardInstanceId
+                    )
+                );
+                case "SUMMON_TO_STAGE" -> executed.add(
+                    executeSummonToStageEffect(matchId, userId, effectType, collabEffectNode)
+                );
+                case "REVEAL_TO_ARCHIVE" -> executed.add(
+                    executeRevealToArchiveEffect(matchId, userId, effectType, collabEffectNode)
+                );
+                case "BLOOM_FROM_ARCHIVE" -> executed.add(
+                    executeBloomFromArchiveEffect(matchId, userId, effectType, collabEffectNode)
+                );
+                case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
+                    executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, collabEffectNode)
+                );
+                case "MOVE_ZONE" -> executed.add(
+                    executeMoveZoneEffect(
+                        matchId,
+                        userId,
+                        effectType,
+                        collabEffectNode,
+                        targetType,
+                        null
+                    )
+                );
+                case "SWAP_WITH_COLLAB" -> executed.add(
+                    executeSwapWithCollabEffect(matchId, userId, effectType, collabEffectNode, selfHolomemCardInstanceId)
+                );
+                case "HEAL" -> executed.add(
+                    executeHealEffect(
+                        matchId,
+                        userId,
+                        effectType,
+                        collabEffectNode,
+                        targetType,
+                        selfHolomemCardInstanceId
+                    )
+                );
+                case "BUFF", "DEBUFF" -> executed.add(
+                    executeBuffDebuffEffect(
+                        matchId,
+                        userId,
+                        effectType,
+                        collabEffectNode,
+                        targetType
+                    )
+                );
+                case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
+                    executeMatchResultEffect(matchId, userId, effectType, collabEffectNode)
+                );
+                case "UNIMPLEMENTED" -> executed.add(
+                    executeNoOpEffect(effectType, collabEffectNode, "尚未支援的 COLLAB 效果")
+                );
+                default -> unsupported.add(effectType);
+            }
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("hasCollabEffect", true);
+        summary.put("requestedEffects", effectTypes);
+        summary.put("executedEffects", executed);
+        summary.put("unsupportedEffects", unsupported);
+        summary.put("rawText", collabPlan.rawText());
         if (diceRoll != null) {
             summary.put("diceRoll", diceRoll);
         }
@@ -1626,22 +1773,26 @@ public class MatchEffectService {
         }
 
         String targetCardId = asText(holomemState.get("card_id"));
-        int hp = jdbcTemplate.query(
+        int baseHp = jdbcTemplate.query(
             "SELECT hp FROM member_cards WHERE card_id = ?",
             rs -> rs.next() ? rs.getInt("hp") : 0,
             targetCardId
         );
+        int attachedSupportHpBonus = resolveAttachedSupportHpBonus(matchId, targetHolomemId);
+        int hp = Math.max(baseHp + attachedSupportHpBonus, 0);
         int damageTaken = asInt(holomemState.get("damage_taken"));
 
         boolean downed = hp > 0 && damageTaken >= hp;
         boolean lifeReduced = false;
         Long lostLifeCardInstanceId = null;
         List<Long> archivedCheerCardInstanceIds = new ArrayList<>();
+        List<Long> archivedSupportCardInstanceIds = new ArrayList<>();
         List<Long> archivedHolomemCardInstanceIds = new ArrayList<>();
         if (downed) {
             Long targetCardInstanceId = asLong(holomemState.get("match_card_id"));
             String targetZone = normalize(holomemState.get("zone"));
             archivedCheerCardInstanceIds = archiveAttachedCheerCards(matchId, targetHolomemId, targetOwnerUserId);
+            archivedSupportCardInstanceIds = archiveAttachedSupportCards(matchId, targetHolomemId, targetOwnerUserId);
             archivedHolomemCardInstanceIds = archiveHolomemStackCards(matchId, targetHolomemId, targetOwnerUserId);
 
             jdbcTemplate.update(
@@ -1683,10 +1834,13 @@ public class MatchEffectService {
         summary.put("damageApplied", damage);
         summary.put("baseDamage", baseDamage);
         summary.put("damageModifierApplied", damageModifier);
+        summary.put("targetBaseHp", baseHp);
+        summary.put("targetAttachedSupportHpBonus", attachedSupportHpBonus);
         summary.put("targetHp", hp);
         summary.put("targetDamageTaken", damageTaken);
         summary.put("downed", downed);
         summary.put("archivedCheerCardInstanceIds", archivedCheerCardInstanceIds);
+        summary.put("archivedSupportCardInstanceIds", archivedSupportCardInstanceIds);
         summary.put("archivedHolomemCardInstanceIds", archivedHolomemCardInstanceIds);
         summary.put("lifeReduced", lifeReduced);
         summary.put("lostLifeCardInstanceId", lostLifeCardInstanceId);
@@ -2139,6 +2293,124 @@ public class MatchEffectService {
         return summary;
     }
 
+    private Map<String, Object> executeMatchResultEffect(
+        Long matchId,
+        Long userId,
+        String effectType,
+        JsonNode effectNode
+    ) {
+        Long opponentUserId = resolveOpponentUserId(matchId, userId);
+        MatchResultDecision decision = resolveMatchResultDecision(effectType, effectNode, userId, opponentUserId);
+        if (decision == null) {
+            return executeNoOpEffect(effectType, effectNode, "MATCH_RESULT 無法解析出勝負結果");
+        }
+
+        Map<String, Object> matchResult = new LinkedHashMap<>();
+        matchResult.put("draw", decision.draw());
+        matchResult.put("winnerUserId", decision.winnerUserId());
+        matchResult.put("loserUserId", decision.loserUserId());
+        matchResult.put("reason", decision.reason());
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", normalizeEffectType(effectType));
+        summary.put("applied", true);
+        summary.put("matchResult", matchResult);
+        return summary;
+    }
+
+    private MatchResultDecision resolveMatchResultDecision(
+        String effectType,
+        JsonNode effectNode,
+        Long actorUserId,
+        Long opponentUserId
+    ) {
+        String explicitResult = normalizeEffectType(readText(effectNode, "result", "outcome", "matchResult"));
+        String normalizedEffectType = normalizeEffectType(effectType);
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
+
+        String resolvedReason = readText(effectNode, "reason");
+        if (!StringUtils.hasText(resolvedReason)) {
+            resolvedReason = "CARD_EFFECT_MATCH_RESULT";
+        }
+
+        String winnerToken = normalizeEffectType(readText(effectNode, "winner", "winnerSide", "winnerUser"));
+        String loserToken = normalizeEffectType(readText(effectNode, "loser", "loserSide", "loserUser"));
+
+        if ("WIN".equals(normalizedEffectType) || "LOSE".equals(normalizedEffectType) || "DRAW".equals(normalizedEffectType)) {
+            explicitResult = normalizedEffectType;
+        }
+
+        if ("DRAW".equals(explicitResult)) {
+            return new MatchResultDecision(true, null, null, "CARD_EFFECT_DRAW");
+        }
+        if ("WIN".equals(explicitResult)) {
+            if (opponentUserId == null) {
+                return null;
+            }
+            return new MatchResultDecision(false, actorUserId, opponentUserId, "CARD_EFFECT_WIN");
+        }
+        if ("LOSE".equals(explicitResult)) {
+            if (opponentUserId == null) {
+                return null;
+            }
+            return new MatchResultDecision(false, opponentUserId, actorUserId, "CARD_EFFECT_LOSE");
+        }
+
+        if (isBothToken(winnerToken) || isBothToken(loserToken)) {
+            return new MatchResultDecision(true, null, null, "CARD_EFFECT_DRAW");
+        }
+
+        Long winnerUserId = resolveSideUserId(winnerToken, actorUserId, opponentUserId);
+        Long loserUserId = resolveSideUserId(loserToken, actorUserId, opponentUserId);
+        if (winnerUserId != null && loserUserId == null) {
+            loserUserId = winnerUserId.equals(actorUserId) ? opponentUserId : actorUserId;
+        } else if (winnerUserId == null && loserUserId != null) {
+            winnerUserId = loserUserId.equals(actorUserId) ? opponentUserId : actorUserId;
+        }
+        if (winnerUserId != null && loserUserId != null && !winnerUserId.equals(loserUserId)) {
+            return new MatchResultDecision(false, winnerUserId, loserUserId, resolvedReason);
+        }
+
+        if (StringUtils.hasText(rawText)) {
+            if (rawText.contains("引き分け")) {
+                return new MatchResultDecision(true, null, null, "CARD_EFFECT_DRAW");
+            }
+            if (rawText.contains("あなた") && rawText.contains("勝利")) {
+                if (opponentUserId == null) {
+                    return null;
+                }
+                return new MatchResultDecision(false, actorUserId, opponentUserId, "CARD_EFFECT_WIN");
+            }
+            if (rawText.contains("相手") && rawText.contains("敗北")) {
+                if (opponentUserId == null) {
+                    return null;
+                }
+                return new MatchResultDecision(false, actorUserId, opponentUserId, "CARD_EFFECT_WIN");
+            }
+            if (rawText.contains("あなた") && rawText.contains("敗北")) {
+                if (opponentUserId == null) {
+                    return null;
+                }
+                return new MatchResultDecision(false, opponentUserId, actorUserId, "CARD_EFFECT_LOSE");
+            }
+        }
+        return null;
+    }
+
+    private boolean isBothToken(String token) {
+        String normalized = normalizeEffectType(token);
+        return "BOTH".equals(normalized) || "ALL".equals(normalized);
+    }
+
+    private Long resolveSideUserId(String sideToken, Long actorUserId, Long opponentUserId) {
+        String normalized = normalizeEffectType(sideToken);
+        return switch (normalized) {
+            case "SELF", "YOU", "ME", "ACTOR", "CURRENT" -> actorUserId;
+            case "OPPONENT", "ENEMY", "OTHER" -> opponentUserId;
+            default -> null;
+        };
+    }
+
     private SelectionProbe probeSelectionCandidates(
         Long matchId,
         Long userId,
@@ -2243,11 +2515,11 @@ public class MatchEffectService {
         return candidates;
     }
 
-    private String loadBloomEffectText(String bloomCardId) {
+    private String loadPassiveEffectText(String bloomCardId) {
         if (!StringUtils.hasText(bloomCardId)) {
             return null;
         }
-        String passiveText = jdbcTemplate.query(
+        return jdbcTemplate.query(
             """
             SELECT passive_effect_json::text AS passive_text
             FROM member_cards
@@ -2257,10 +2529,188 @@ public class MatchEffectService {
             rs -> rs.next() ? rs.getString("passive_text") : null,
             bloomCardId
         );
+    }
+
+    private BloomEffectPlan resolveBloomEffectPlan(String bloomCardId) {
+        String passiveText = loadPassiveEffectText(bloomCardId);
+        if (!StringUtils.hasText(passiveText)) {
+            return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
+        }
+        JsonNode passiveNode = parseEffectJson(passiveText);
+        BloomEffectPlan structured = resolveStructuredBloomEffectPlan(passiveNode);
+        if (structured != null && structured.hasBloomEffect()) {
+            return structured;
+        }
+
+        String bloomText = loadBloomEffectText(passiveText);
+        if (!StringUtils.hasText(bloomText)) {
+            return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
+        }
+        List<String> effectTypes = inferBloomEffectTypes(bloomText);
+        Integer diceRoll = resolveBloomDiceRoll(bloomText);
+        Map<String, Object> bloomEffectPayload = new LinkedHashMap<>();
+        bloomEffectPayload.put("type", "UNIMPLEMENTED");
+        bloomEffectPayload.put("effects", effectTypes);
+        bloomEffectPayload.put("rawText", bloomText);
+        if (diceRoll != null) {
+            bloomEffectPayload.put("diceRoll", diceRoll);
+        }
+        return new BloomEffectPlan(
+            true,
+            effectTypes,
+            objectMapper.valueToTree(bloomEffectPayload),
+            bloomText,
+            diceRoll
+        );
+    }
+
+    private BloomEffectPlan resolveCollabEffectPlan(String collabCardId) {
+        String passiveText = loadPassiveEffectText(collabCardId);
+        if (!StringUtils.hasText(passiveText)) {
+            return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
+        }
+        JsonNode passiveNode = parseEffectJson(passiveText);
+        BloomEffectPlan structured = resolveStructuredCollabEffectPlan(passiveNode);
+        if (structured != null && structured.hasBloomEffect()) {
+            return structured;
+        }
+
+        String collabText = loadCollabEffectText(passiveText);
+        if (!StringUtils.hasText(collabText)) {
+            return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
+        }
+        List<String> effectTypes = inferBloomEffectTypes(collabText);
+        Integer diceRoll = resolveBloomDiceRoll(collabText);
+        Map<String, Object> collabEffectPayload = new LinkedHashMap<>();
+        collabEffectPayload.put("type", "UNIMPLEMENTED");
+        collabEffectPayload.put("effects", effectTypes);
+        collabEffectPayload.put("rawText", collabText);
+        if (diceRoll != null) {
+            collabEffectPayload.put("diceRoll", diceRoll);
+        }
+        return new BloomEffectPlan(
+            true,
+            effectTypes,
+            objectMapper.valueToTree(collabEffectPayload),
+            collabText,
+            diceRoll
+        );
+    }
+
+    private BloomEffectPlan resolveStructuredBloomEffectPlan(JsonNode passiveNode) {
+        if (passiveNode == null || passiveNode.isNull() || !passiveNode.isObject()) {
+            return null;
+        }
+        JsonNode bloomNode = passiveNode.get("bloomEffect");
+        if (bloomNode == null || bloomNode.isNull() || !bloomNode.isObject()) {
+            return null;
+        }
+
+        List<String> effectTypes = resolveEffectTypes(readText(bloomNode, "type"), bloomNode);
+        String rawText = readText(bloomNode, "rawText", "rawEffect", "text");
+        if (effectTypes.isEmpty() && StringUtils.hasText(rawText)) {
+            effectTypes = inferBloomEffectTypes(rawText);
+        }
+        if (effectTypes.isEmpty()) {
+            effectTypes = List.of("UNIMPLEMENTED");
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", normalizeEffectType(readText(bloomNode, "type")));
+        payload.put("effects", effectTypes);
+        if (StringUtils.hasText(rawText)) {
+            payload.put("rawText", rawText);
+        }
+        if (bloomNode.has("searchCriteria")) {
+            payload.put("searchCriteria", bloomNode.get("searchCriteria"));
+        }
+        if (bloomNode.has("value")) {
+            payload.put("value", bloomNode.get("value").asInt());
+        }
+        if (bloomNode.has("cards")) {
+            payload.put("cards", bloomNode.get("cards").asInt());
+        }
+        if (bloomNode.has("amount")) {
+            payload.put("amount", bloomNode.get("amount").asInt());
+        }
+        if (bloomNode.has("diceCondition")) {
+            payload.put("diceCondition", readText(bloomNode, "diceCondition"));
+        }
+        if (bloomNode.has("effectDiceConditions")) {
+            payload.put("effectDiceConditions", bloomNode.get("effectDiceConditions"));
+        }
+
+        Integer diceRoll = null;
+        if (bloomNode.has("diceCondition") || bloomNode.has("effectDiceConditions")) {
+            diceRoll = resolveDiceRoll(bloomNode);
+            payload.put("diceRoll", diceRoll);
+        }
+        return new BloomEffectPlan(true, effectTypes, objectMapper.valueToTree(payload), rawText, diceRoll);
+    }
+
+    private BloomEffectPlan resolveStructuredCollabEffectPlan(JsonNode passiveNode) {
+        if (passiveNode == null || passiveNode.isNull() || !passiveNode.isObject()) {
+            return null;
+        }
+        JsonNode collabNode = passiveNode.get("collabEffect");
+        if (collabNode == null || collabNode.isNull() || !collabNode.isObject()) {
+            return null;
+        }
+
+        List<String> effectTypes = resolveEffectTypes(readText(collabNode, "type"), collabNode);
+        String rawText = readText(collabNode, "rawText", "rawEffect", "text");
+        if (effectTypes.isEmpty() && StringUtils.hasText(rawText)) {
+            effectTypes = inferBloomEffectTypes(rawText);
+        }
+        if (effectTypes.isEmpty()) {
+            effectTypes = List.of("UNIMPLEMENTED");
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", normalizeEffectType(readText(collabNode, "type")));
+        payload.put("effects", effectTypes);
+        if (StringUtils.hasText(rawText)) {
+            payload.put("rawText", rawText);
+        }
+        if (collabNode.has("searchCriteria")) {
+            payload.put("searchCriteria", collabNode.get("searchCriteria"));
+        }
+        if (collabNode.has("value")) {
+            payload.put("value", collabNode.get("value").asInt());
+        }
+        if (collabNode.has("cards")) {
+            payload.put("cards", collabNode.get("cards").asInt());
+        }
+        if (collabNode.has("amount")) {
+            payload.put("amount", collabNode.get("amount").asInt());
+        }
+        if (collabNode.has("diceCondition")) {
+            payload.put("diceCondition", readText(collabNode, "diceCondition"));
+        }
+        if (collabNode.has("effectDiceConditions")) {
+            payload.put("effectDiceConditions", collabNode.get("effectDiceConditions"));
+        }
+
+        Integer diceRoll = null;
+        if (collabNode.has("diceCondition") || collabNode.has("effectDiceConditions")) {
+            diceRoll = resolveDiceRoll(collabNode);
+            payload.put("diceRoll", diceRoll);
+        }
+        return new BloomEffectPlan(true, effectTypes, objectMapper.valueToTree(payload), rawText, diceRoll);
+    }
+
+    private String loadBloomEffectText(String passiveText) {
         if (!StringUtils.hasText(passiveText) || !passiveText.contains("ブルームエフェクト")) {
             return null;
         }
         return normalizeBloomText(passiveText);
+    }
+
+    private String loadCollabEffectText(String passiveText) {
+        if (!StringUtils.hasText(passiveText) || !passiveText.contains("コラボエフェクト")) {
+            return null;
+        }
+        return normalizeCollabText(passiveText);
     }
 
     private String normalizeBloomText(String passiveText) {
@@ -2283,6 +2733,33 @@ public class MatchEffectService {
         int end = trimmed.length();
         for (String token : stopTokens) {
             int tokenIdx = trimmed.indexOf(token, "ブルームエフェクト".length());
+            if (tokenIdx > 0 && tokenIdx < end) {
+                end = tokenIdx;
+            }
+        }
+        return trimmed.substring(0, end).trim();
+    }
+
+    private String normalizeCollabText(String passiveText) {
+        if (!StringUtils.hasText(passiveText)) {
+            return "";
+        }
+        String normalized = passiveText
+            .replace("\\n", "\n")
+            .replace("\\r", "\n")
+            .replace("{", " ")
+            .replace("}", " ")
+            .replace("\"", " ")
+            .replace(":", " ");
+        int idx = normalized.indexOf("コラボエフェクト");
+        if (idx < 0) {
+            return normalized.trim();
+        }
+        String trimmed = normalized.substring(idx).trim();
+        String[] stopTokens = { "ブルームエフェクト", "ギフト", "エクストラ" };
+        int end = trimmed.length();
+        for (String token : stopTokens) {
+            int tokenIdx = trimmed.indexOf(token, "コラボエフェクト".length());
             if (tokenIdx > 0 && tokenIdx < end) {
                 end = tokenIdx;
             }
@@ -2344,6 +2821,9 @@ public class MatchEffectService {
         }
         if (text.contains("ダメージ")) {
             effectTypes.add("DAMAGE");
+        }
+        if (text.contains("勝利") || text.contains("敗北") || text.contains("引き分け")) {
+            effectTypes.add("MATCH_RESULT");
         }
         if (text.contains("アーツ")) {
             if (text.contains("-")) {
@@ -2469,6 +2949,14 @@ public class MatchEffectService {
     }
 
     private boolean shouldApplyByDice(String rawText, JsonNode effectNode, String effectType) {
+        String explicitCondition = resolveExplicitDiceCondition(effectNode, effectType);
+        if (StringUtils.hasText(explicitCondition)) {
+            int diceRoll = resolveDiceRoll(effectNode);
+            if (diceRoll <= 0) {
+                return true;
+            }
+            return evaluateDiceCondition(explicitCondition, diceRoll);
+        }
         String text = normalizeDigits(rawText);
         if (!StringUtils.hasText(text) || !text.contains("サイコロ")) {
             return true;
@@ -2499,6 +2987,54 @@ public class MatchEffectService {
                 return diceRoll <= Integer.parseInt(atMostMatcher.group(1));
             } catch (NumberFormatException ignored) {
                 // ignore
+            }
+        }
+        return true;
+    }
+
+    private String resolveExplicitDiceCondition(JsonNode effectNode, String effectType) {
+        if (effectNode == null || effectNode.isNull()) {
+            return null;
+        }
+        JsonNode perEffect = effectNode.get("effectDiceConditions");
+        String normalizedEffectType = normalizeEffectType(effectType);
+        if (perEffect != null && perEffect.isObject()) {
+            JsonNode conditionNode = perEffect.get(normalizedEffectType);
+            if (conditionNode == null) {
+                conditionNode = perEffect.get(effectType);
+            }
+            if (conditionNode != null && conditionNode.isTextual()) {
+                return normalizeEffectType(conditionNode.asText());
+            }
+        }
+        return normalizeEffectType(readText(effectNode, "diceCondition", "dice_condition"));
+    }
+
+    private boolean evaluateDiceCondition(String condition, int diceRoll) {
+        if (!StringUtils.hasText(condition)) {
+            return true;
+        }
+        String normalized = normalizeEffectType(condition);
+        if ("ODD".equals(normalized)) {
+            return diceRoll % 2 == 1;
+        }
+        if ("EVEN".equals(normalized)) {
+            return diceRoll % 2 == 0;
+        }
+        if (normalized.startsWith("AT_LEAST_")) {
+            try {
+                int threshold = Integer.parseInt(normalized.substring("AT_LEAST_".length()));
+                return diceRoll >= threshold;
+            } catch (NumberFormatException ignored) {
+                return true;
+            }
+        }
+        if (normalized.startsWith("AT_MOST_")) {
+            try {
+                int threshold = Integer.parseInt(normalized.substring("AT_MOST_".length()));
+                return diceRoll <= threshold;
+            } catch (NumberFormatException ignored) {
+                return true;
             }
         }
         return true;
@@ -2549,9 +3085,12 @@ public class MatchEffectService {
             }
         }
         if (!StringUtils.hasText(tag)) {
+            tag = resolveTagFromKnownTags(rawText);
+        }
+        if (!StringUtils.hasText(tag)) {
             Matcher matcher = TAG_PATTERN.matcher(rawText);
             if (matcher.find()) {
-                tag = matcher.group();
+                tag = "#" + matcher.group(1);
             }
         }
         if (!StringUtils.hasText(nameContains)) {
@@ -2561,6 +3100,28 @@ public class MatchEffectService {
             }
         }
         return new SearchCriteria(cardType, levelType, tag, nameContains);
+    }
+
+    private String resolveTagFromKnownTags(String rawText) {
+        if (!StringUtils.hasText(rawText) || !rawText.contains("#")) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT t.tag
+            FROM (
+                SELECT DISTINCT jsonb_array_elements_text(COALESCE(tags_json, '[]'::jsonb)) AS tag
+                FROM cards
+                WHERE tags_json IS NOT NULL
+            ) t
+            WHERE ? LIKE '%' || t.tag || '%'
+            ORDER BY POSITION(t.tag IN ?), LENGTH(t.tag) DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("tag") : null,
+            rawText,
+            rawText
+        );
     }
 
     private List<Map<String, Object>> loadSearchCandidates(
@@ -2926,6 +3487,73 @@ public class MatchEffectService {
         return modifier == null ? 0 : modifier;
     }
 
+    private int resolveAttachedSupportStatBonus(Long matchId, Long matchHolomemId, Pattern pattern) {
+        if (matchId == null || matchHolomemId == null || pattern == null) {
+            return 0;
+        }
+        List<String> effectJsonTexts = jdbcTemplate.query(
+            """
+            SELECT sc.effect_json::text AS effect_json_text
+            FROM match_holomem_supports hs
+            JOIN support_cards sc ON sc.card_id = hs.support_card_id
+            JOIN match_holomems h ON h.id = hs.match_holomem_id
+            WHERE hs.match_holomem_id = ?
+              AND h.match_id = ?
+            ORDER BY hs.id
+            """,
+            (rs, rowNum) -> rs.getString("effect_json_text"),
+            matchHolomemId,
+            matchId
+        );
+        if (effectJsonTexts.isEmpty()) {
+            return 0;
+        }
+        int total = 0;
+        for (String effectJsonText : effectJsonTexts) {
+            total += extractAttachedSupportStatBonus(effectJsonText, pattern);
+        }
+        return total;
+    }
+
+    private int extractAttachedSupportStatBonus(String effectJsonText, Pattern pattern) {
+        if (!StringUtils.hasText(effectJsonText) || pattern == null) {
+            return 0;
+        }
+        String rawText = extractAttachedSupportRawText(effectJsonText);
+        if (!StringUtils.hasText(rawText)) {
+            return 0;
+        }
+        int conditionalIndex = rawText.indexOf('◆');
+        String baseSegment = conditionalIndex >= 0 ? rawText.substring(0, conditionalIndex) : rawText;
+        Matcher matcher = pattern.matcher(baseSegment);
+        int total = 0;
+        while (matcher.find()) {
+            total += parseSignedNumber(matcher.group(1));
+        }
+        return total;
+    }
+
+    private String extractAttachedSupportRawText(String effectJsonText) {
+        try {
+            JsonNode node = objectMapper.readTree(effectJsonText);
+            return normalizeDigits(extractText(node, "rawText", "rawEffect", "rawHeader"));
+        } catch (Exception ignored) {
+            return normalizeDigits(effectJsonText);
+        }
+    }
+
+    private int parseSignedNumber(String token) {
+        if (!StringUtils.hasText(token)) {
+            return 0;
+        }
+        String normalized = token.replace("＋", "+").replace("−", "-").replaceAll("\\s+", "");
+        try {
+            return Integer.parseInt(normalized);
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+
     private int resolveCheerCount(JsonNode effectNode, int defaultValue) {
         int fromFields = extractInt(effectNode, 0, "value", "cards", "amount");
         if (fromFields > 0) {
@@ -3026,6 +3654,33 @@ public class MatchEffectService {
         List<Long> archived = new ArrayList<>();
         for (String cheerCardId : cheerCardIds) {
             Long archivedCardInstanceId = moveCheerCardInstanceToArchive(matchId, ownerUserId, cheerCardId);
+            if (archivedCardInstanceId != null) {
+                archived.add(archivedCardInstanceId);
+            }
+        }
+        return archived;
+    }
+
+    private List<Long> archiveAttachedSupportCards(Long matchId, Long matchHolomemId, Long ownerUserId) {
+        if (matchHolomemId == null || ownerUserId == null) {
+            return List.of();
+        }
+        List<Long> supportCardInstanceIds = jdbcTemplate.query(
+            """
+            SELECT match_card_id
+            FROM match_holomem_supports
+            WHERE match_holomem_id = ?
+            ORDER BY id
+            """,
+            (rs, rowNum) -> rs.getLong("match_card_id"),
+            matchHolomemId
+        );
+        if (supportCardInstanceIds.isEmpty()) {
+            return List.of();
+        }
+        List<Long> archived = new ArrayList<>();
+        for (Long supportCardInstanceId : supportCardInstanceIds) {
+            Long archivedCardInstanceId = moveSupportCardInstanceToArchive(matchId, ownerUserId, supportCardInstanceId);
             if (archivedCardInstanceId != null) {
                 archived.add(archivedCardInstanceId);
             }
@@ -3148,6 +3803,31 @@ public class MatchEffectService {
             ownerUserId
         );
         return updated == 1 ? cheerCardInstanceId : null;
+    }
+
+    private Long moveSupportCardInstanceToArchive(Long matchId, Long ownerUserId, Long supportCardInstanceId) {
+        if (supportCardInstanceId == null || supportCardInstanceId <= 0) {
+            return null;
+        }
+        int archiveOrder = nextZoneOrder(matchId, ownerUserId, "ARCHIVE");
+        int updated = jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = ?,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'STAGE'
+            """,
+            archiveOrder,
+            supportCardInstanceId,
+            matchId,
+            ownerUserId
+        );
+        return updated == 1 ? supportCardInstanceId : null;
     }
 
     private Long resolveTargetHolomemId(Long matchId, Long userId, Long targetHolomemCardInstanceId) {
@@ -3588,5 +4268,20 @@ public class MatchEffectService {
     private record SelectionProbe(
         int requestedCount,
         List<DecisionCandidate> candidates
+    ) {}
+
+    private record BloomEffectPlan(
+        boolean hasBloomEffect,
+        List<String> effectTypes,
+        JsonNode effectNode,
+        String rawText,
+        Integer diceRoll
+    ) {}
+
+    private record MatchResultDecision(
+        boolean draw,
+        Long winnerUserId,
+        Long loserUserId,
+        String reason
     ) {}
 }

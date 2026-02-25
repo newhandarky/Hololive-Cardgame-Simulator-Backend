@@ -22,7 +22,8 @@
     "SWAP_POSITIONS",
     "PREVENT_DAMAGE",
     "SEARCH_AND_DEPLOY",
-    "BUFF_ARTS"
+    "BUFF_ARTS",
+    "MATCH_RESULT"
   ],
   "placeholderType": "UNIMPLEMENTED",
   "placeholderRequiredAny": [
