@@ -49,6 +49,9 @@ public class MatchActionService {
     private static final String INTERACTION_TYPE_DRAW_REVEAL = "DRAW_REVEAL";
     private static final String INTERACTION_TYPE_SEND_CHEER = "SEND_CHEER";
     private static final String DECISION_TYPE_LOOK_TOP_DECK = "LOOK_TOP_DECK";
+    private static final String DECISION_TYPE_LOOK_OPPONENT_HAND = "LOOK_OPPONENT_HAND";
+    private static final String DECISION_TYPE_LOOK_HOLOPOWER = "LOOK_HOLOPOWER";
+    private static final String DECISION_TYPE_REORDER_DECK_BOTTOM = "REORDER_DECK_BOTTOM";
     private static final String ACTION_TYPE_DRAW_TURN = "DRAW_TURN";
     private static final String ACTION_TYPE_TURN_CHEER = "TURN_CHEER";
     private static final String ACTION_TYPE_USE_OSHI_SKILL = "USE_OSHI_SKILL";
@@ -381,18 +384,16 @@ public class MatchActionService {
                 triggerSummary
             )
         );
-        Long bloomLookTopDeckDecisionId = createLookTopDeckPendingDecisionIfNeeded(
+        FollowupInteractionDecision bloomFollowupDecision = createFollowupInteractionPendingDecisionIfNeeded(
             matchId,
             userId,
             "BLOOM",
             bloomCardInstanceId,
             bloomCardId,
-            "LOOK_TOP_DECK",
+            "BLOOM_EFFECT",
             bloomEffectSummary
         );
-        if (bloomLookTopDeckDecisionId != null) {
-            payload.put("pendingLookTopDeckDecisionId", bloomLookTopDeckDecisionId);
-        }
+        putFollowupDecisionPayload(payload, bloomFollowupDecision);
 
         appendAction(
             context.match,
@@ -661,7 +662,7 @@ public class MatchActionService {
         payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
         payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
         payload.put("effect", effectSummary);
-        Long lookTopDeckDecisionId = createLookTopDeckPendingDecisionIfNeeded(
+        FollowupInteractionDecision followupDecision = createFollowupInteractionPendingDecisionIfNeeded(
             matchId,
             userId,
             "PLAY_SUPPORT",
@@ -670,9 +671,7 @@ public class MatchActionService {
             asString(supportRow.get("effect_type")),
             effectSummary
         );
-        if (lookTopDeckDecisionId != null) {
-            payload.put("pendingLookTopDeckDecisionId", lookTopDeckDecisionId);
-        }
+        putFollowupDecisionPayload(payload, followupDecision);
         appendAction(
             context.match,
             userId,
@@ -905,6 +904,59 @@ public class MatchActionService {
             );
             return;
         }
+        if (DECISION_TYPE_LOOK_OPPONENT_HAND.equals(decisionType) || DECISION_TYPE_LOOK_HOLOPOWER.equals(decisionType)) {
+            markDecisionResolved(pending.decisionId());
+
+            context.match.setCurrentPhase(MatchPhase.MAIN.name());
+            touchUpdatedAt(context.match);
+            matchRepository.saveAndFlush(context.match);
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("decisionId", pending.decisionId());
+            payload.put("decisionType", decisionType);
+            payload.put("sourceActionType", pending.sourceActionType());
+            payload.put("lookedCardCount", pending.candidateCardInstanceIds().size());
+            appendAction(
+                context.match,
+                userId,
+                "INTERACTION_CONFIRMED",
+                toJson(payload),
+                context.turnNumber
+            );
+            return;
+        }
+        if (DECISION_TYPE_REORDER_DECK_BOTTOM.equals(decisionType)) {
+            List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
+                request == null ? null : request.getSelectedCardInstanceIds()
+            );
+            List<Long> candidateCardInstanceIds = pending.candidateCardInstanceIds();
+            List<Long> orderedCardInstanceIds = selectedCardInstanceIds.isEmpty()
+                ? candidateCardInstanceIds
+                : selectedCardInstanceIds;
+            validateDeckBottomReorderSelection(orderedCardInstanceIds, candidateCardInstanceIds);
+            for (Long cardInstanceId : orderedCardInstanceIds) {
+                moveDeckCardToBottom(matchId, userId, cardInstanceId);
+            }
+
+            markDecisionResolved(pending.decisionId());
+            context.match.setCurrentPhase(MatchPhase.MAIN.name());
+            touchUpdatedAt(context.match);
+            matchRepository.saveAndFlush(context.match);
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("decisionId", pending.decisionId());
+            payload.put("decisionType", DECISION_TYPE_REORDER_DECK_BOTTOM);
+            payload.put("sourceActionType", pending.sourceActionType());
+            payload.put("orderedCardInstanceIds", orderedCardInstanceIds);
+            appendAction(
+                context.match,
+                userId,
+                "INTERACTION_CONFIRMED",
+                toJson(payload),
+                context.turnNumber
+            );
+            return;
+        }
         if (!SUPPORT_DECISION_TYPE_CARD_SELECTION.equals(decisionType)) {
             throw new IllegalStateException("目前不支援此類型決策: " + decisionType);
         }
@@ -953,7 +1005,7 @@ public class MatchActionService {
             payload.put("cardId", pending.sourceCardId());
             payload.put("limited", pending.limited());
         }
-        Long lookTopDeckDecisionId = createLookTopDeckPendingDecisionIfNeeded(
+        FollowupInteractionDecision followupDecision = createFollowupInteractionPendingDecisionIfNeeded(
             matchId,
             userId,
             sourceActionType,
@@ -962,9 +1014,7 @@ public class MatchActionService {
             pending.effectType(),
             effectSummary
         );
-        if (lookTopDeckDecisionId != null) {
-            payload.put("pendingLookTopDeckDecisionId", lookTopDeckDecisionId);
-        }
+        putFollowupDecisionPayload(payload, followupDecision);
         appendAction(
             context.match,
             userId,
@@ -1262,18 +1312,16 @@ public class MatchActionService {
         }
         if (collabEffectSummary != null) {
             payload.put("collabEffect", collabEffectSummary);
-            Long collabLookTopDeckDecisionId = createLookTopDeckPendingDecisionIfNeeded(
+            FollowupInteractionDecision collabFollowupDecision = createFollowupInteractionPendingDecisionIfNeeded(
                 matchId,
                 userId,
                 "COLLAB",
                 cardInstanceId,
                 asString(currentHolomem.get("card_id")),
-                "LOOK_TOP_DECK",
+                "COLLAB_EFFECT",
                 collabEffectSummary
             );
-            if (collabLookTopDeckDecisionId != null) {
-                payload.put("pendingLookTopDeckDecisionId", collabLookTopDeckDecisionId);
-            }
+            putFollowupDecisionPayload(payload, collabFollowupDecision);
         }
         if (collabTriggerSummary != null) {
             payload.put("triggerSummary", collabTriggerSummary);
@@ -1443,7 +1491,7 @@ public class MatchActionService {
         payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
         payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
         payload.put("effect", effectSummary);
-        Long lookTopDeckDecisionId = createLookTopDeckPendingDecisionIfNeeded(
+        FollowupInteractionDecision followupDecision = createFollowupInteractionPendingDecisionIfNeeded(
             matchId,
             userId,
             ACTION_TYPE_USE_OSHI_SKILL,
@@ -1452,9 +1500,7 @@ public class MatchActionService {
             effectType,
             effectSummary
         );
-        if (lookTopDeckDecisionId != null) {
-            payload.put("pendingLookTopDeckDecisionId", lookTopDeckDecisionId);
-        }
+        putFollowupDecisionPayload(payload, followupDecision);
         appendAction(
             context.match,
             userId,
@@ -1792,6 +1838,7 @@ public class MatchActionService {
             matchId,
             asLong(attacker.get("id"))
         );
+        int turnArtDamageModifier = resolveTurnArtDamageModifier(matchId, userId, context.turnNumber);
         Map<String, Integer> requiredCheerCost = resolveArtCheerCost(asString(art.get("cost_cheer_json_text")));
         Map<String, Object> costSummary = payArtCost(
             matchId,
@@ -1817,6 +1864,14 @@ public class MatchActionService {
             if (targetHolomem == null) {
                 throw new IllegalStateException("DAMAGE 找不到可攻擊的對手 Holomen");
             }
+            DamageRedirectTarget redirectTarget = resolveDamageRedirectTarget(
+                matchId,
+                context.opponentUserId,
+                context.turnNumber
+            );
+            if (redirectTarget != null) {
+                targetHolomem = redirectTarget.target();
+            }
         }
         Long effectiveTargetCardInstanceId = targetHolomem == null ? targetCardInstanceId : targetHolomem.matchCardInstanceId();
         ArtCritical artCritical = resolveArtCritical(asString(art.get("effect_json_text")));
@@ -1829,7 +1884,13 @@ public class MatchActionService {
                 criticalBonus = artCritical.bonus();
             }
         }
-        int totalDamage = Math.max(baseDamage + attachedSupportArtBonus + criticalBonus, 0);
+        int incomingDamageReduction = hasOpponentHolomem
+            ? resolveIncomingDamageReduction(matchId, context.opponentUserId, context.turnNumber)
+            : 0;
+        int totalDamage = Math.max(
+            baseDamage + attachedSupportArtBonus + turnArtDamageModifier + criticalBonus - incomingDamageReduction,
+            0
+        );
         if (totalDamage <= 0) {
             throw new IllegalStateException("此藝能目前未解析出可造成的傷害");
         }
@@ -1900,6 +1961,8 @@ public class MatchActionService {
         payload.put("attackerCardId", attackerCardId);
         payload.put("attackerZone", attackerZone);
         payload.put("targetCardInstanceId", effectiveTargetCardInstanceId);
+        payload.put("damageRedirectApplied", hasOpponentHolomem && targetCardInstanceId != null
+            && !targetCardInstanceId.equals(effectiveTargetCardInstanceId));
         payload.put("targetMainColor", targetHolomem == null ? null : targetHolomem.mainColor());
         payload.put("artName", asString(art.get("name")));
         payload.put("artOrderIndex", art.get("order_index"));
@@ -1907,9 +1970,11 @@ public class MatchActionService {
         payload.put("costPayment", costSummary);
         payload.put("artBaseDamage", baseDamage);
         payload.put("attachedSupportArtBonus", attachedSupportArtBonus);
+        payload.put("turnArtDamageModifier", turnArtDamageModifier);
         payload.put("criticalColor", artCritical == null ? null : artCritical.color());
         payload.put("criticalBonus", criticalBonus);
         payload.put("criticalApplied", criticalApplied);
+        payload.put("incomingDamageReduction", incomingDamageReduction);
         payload.put("artTotalDamage", totalDamage);
         payload.put("effect", artSummary);
         payload.put("giftEffects", giftTriggeredEffects);
@@ -1938,6 +2003,126 @@ public class MatchActionService {
         enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummaryForChecks, context.turnNumber);
     }
 
+    private DamageRedirectTarget resolveDamageRedirectTarget(Long matchId, Long affectedUserId, int currentTurn) {
+        if (matchId == null || affectedUserId == null || currentTurn <= 0) {
+            return null;
+        }
+        List<Map<String, Object>> candidates = jdbcTemplate.queryForList(
+            """
+            SELECT id, payload::text AS payload_text
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'ACTION_LOCK'
+              AND expires_turn >= ?
+            ORDER BY id DESC
+            """,
+            matchId,
+            affectedUserId,
+            currentTurn
+        );
+        for (Map<String, Object> row : candidates) {
+            Long effectId = asLong(row.get("id"));
+            String payloadText = asString(row.get("payload_text"));
+            JsonNode payload = parseJson(payloadText);
+            if (!matchesLockAction(payload, "DAMAGE_REDIRECT")) {
+                continue;
+            }
+            Long targetHolomemId = extractJsonLong(payload, "targetHolomemId");
+            if (targetHolomemId == null || targetHolomemId <= 0) {
+                continue;
+            }
+            TargetHolomem redirectTarget = loadTargetHolomemById(matchId, affectedUserId, targetHolomemId);
+            if (redirectTarget == null) {
+                continue;
+            }
+            if (effectId != null && effectId > 0) {
+                jdbcTemplate.update(
+                    "DELETE FROM match_turn_effects WHERE id = ? AND match_id = ?",
+                    effectId,
+                    matchId
+                );
+            }
+            return new DamageRedirectTarget(effectId, redirectTarget);
+        }
+        return null;
+    }
+
+    private TargetHolomem loadTargetHolomemById(Long matchId, Long ownerUserId, Long holomemId) {
+        if (matchId == null || ownerUserId == null || holomemId == null || holomemId <= 0) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT h.id, h.match_card_id, m.main_color
+            FROM match_holomems h
+            JOIN member_cards m ON m.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next()
+                ? new TargetHolomem(
+                    rs.getLong("id"),
+                    rs.getLong("match_card_id"),
+                    normalizeZone(rs.getString("main_color"))
+                )
+                : null,
+            matchId,
+            ownerUserId,
+            holomemId
+        );
+    }
+
+    private int resolveTurnArtDamageModifier(Long matchId, Long userId, int currentTurn) {
+        if (matchId == null || userId == null || currentTurn <= 0) {
+            return 0;
+        }
+        Integer modifier = jdbcTemplate.query(
+            """
+            SELECT COALESCE(SUM(modifier_value), 0) AS total
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'DAMAGE_MODIFIER'
+              AND expires_turn >= ?
+              AND COALESCE(payload ->> 'rawText', '') NOT LIKE '%受けるダメージ%'
+              AND COALESCE(payload ->> 'rawText', '') NOT LIKE '%ダメージを受ける%'
+            """,
+            rs -> rs.next() ? rs.getInt("total") : 0,
+            matchId,
+            userId,
+            currentTurn
+        );
+        return modifier == null ? 0 : modifier;
+    }
+
+    private int resolveIncomingDamageReduction(Long matchId, Long targetUserId, int currentTurn) {
+        if (matchId == null || targetUserId == null || currentTurn <= 0) {
+            return 0;
+        }
+        Integer reduction = jdbcTemplate.query(
+            """
+            SELECT COALESCE(SUM(ABS(modifier_value)), 0) AS total
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'DAMAGE_MODIFIER'
+              AND expires_turn >= ?
+              AND (
+                COALESCE(payload ->> 'rawText', '') LIKE '%受けるダメージ%'
+                OR COALESCE(payload ->> 'rawText', '') LIKE '%ダメージを受ける%'
+              )
+            """,
+            rs -> rs.next() ? rs.getInt("total") : 0,
+            matchId,
+            targetUserId,
+            currentTurn
+        );
+        return reduction == null ? 0 : reduction;
+    }
+
     @Transactional
     public void endTurn(Long matchId, Long userId) {
         ActionContext context = loadActionContext(
@@ -1962,17 +2147,10 @@ public class MatchActionService {
             );
         }
         int clearedEffectCount = matchEffectService.clearExpiredTurnEffects(matchId, context.turnNumber);
-        int resetRestedCount = jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET is_rested = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND is_rested = TRUE
-            """,
+        int resetRestedCount = resetRestedHolomemsForTurnStart(
             matchId,
-            context.opponentUserId
+            context.opponentUserId,
+            context.turnNumber
         );
         Map<String, Object> centerReplenishSummary = resolveEndTurnCenterReplenishCycle(matchId, userId);
         jdbcTemplate.update(
@@ -2030,6 +2208,50 @@ public class MatchActionService {
                 nextTurnNumber
             );
         }
+    }
+
+    private int resetRestedHolomemsForTurnStart(Long matchId, Long userId, int currentTurn) {
+        if (matchId == null || userId == null || currentTurn <= 0) {
+            return 0;
+        }
+        List<Map<String, Object>> restedRows = jdbcTemplate.queryForList(
+            """
+            SELECT id, zone
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND is_rested = TRUE
+            """,
+            matchId,
+            userId
+        );
+        int resetCount = 0;
+        for (Map<String, Object> row : restedRows) {
+            Long holomemId = asLong(row.get("id"));
+            String zone = asString(row.get("zone"));
+            if (holomemId == null) {
+                continue;
+            }
+            if (isStageActionLocked(matchId, userId, currentTurn, "UNREST", zone, holomemId)) {
+                continue;
+            }
+            int updated = jdbcTemplate.update(
+                """
+                UPDATE match_holomems
+                SET is_rested = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND match_id = ?
+                  AND owner_user_id = ?
+                  AND is_rested = TRUE
+                """,
+                holomemId,
+                matchId,
+                userId
+            );
+            resetCount += updated;
+        }
+        return resetCount;
     }
 
     @Transactional
@@ -2514,6 +2736,22 @@ public class MatchActionService {
             matchId,
             userId
         );
+    }
+
+    private void validateDeckBottomReorderSelection(List<Long> orderedCardInstanceIds, List<Long> candidateCardInstanceIds) {
+        List<Long> ordered = orderedCardInstanceIds == null ? List.of() : orderedCardInstanceIds;
+        List<Long> candidates = candidateCardInstanceIds == null ? List.of() : candidateCardInstanceIds;
+        if (ordered.size() != candidates.size()) {
+            throw new IllegalArgumentException("排序卡片數量不符，需包含全部候選卡");
+        }
+        Set<Long> candidateSet = new LinkedHashSet<>(candidates);
+        Set<Long> orderedSet = new LinkedHashSet<>(ordered);
+        if (orderedSet.size() != ordered.size()) {
+            throw new IllegalArgumentException("排序卡片包含重複 cardInstanceId");
+        }
+        if (!orderedSet.equals(candidateSet)) {
+            throw new IllegalArgumentException("排序卡片必須完整且僅包含候選卡");
+        }
     }
 
     private Long moveTopDeckCardToHolopower(Long matchId, Long userId) {
@@ -3933,7 +4171,7 @@ public class MatchActionService {
         );
     }
 
-    private Long createLookTopDeckPendingDecisionIfNeeded(
+    private FollowupInteractionDecision createFollowupInteractionPendingDecisionIfNeeded(
         Long matchId,
         Long userId,
         String sourceActionType,
@@ -3942,37 +4180,33 @@ public class MatchActionService {
         String effectType,
         Map<String, Object> effectSummary
     ) {
-        LookTopDeckDecisionContext lookTopDeck = extractLookTopDeckDecisionContext(effectSummary);
-        if (lookTopDeck == null || lookTopDeck.cardInstanceId() == null || !StringUtils.hasText(lookTopDeck.cardId())) {
+        FollowupInteractionContext interaction = extractFollowupInteractionDecisionContext(matchId, userId, effectSummary);
+        if (interaction == null) {
             return null;
         }
         if (hasBlockingPendingDecision(matchId, userId)) {
             throw new IllegalStateException("你有待處理的互動，請先完成確認");
         }
 
-        Map<String, Object> candidate = loadCardCandidateForDecision(
-            matchId,
-            userId,
-            lookTopDeck.cardInstanceId(),
-            "DECK",
-            lookTopDeck.cardId()
-        );
-        List<Long> candidateCardInstanceIds = List.of(lookTopDeck.cardInstanceId());
-        List<Map<String, Object>> candidateCards = List.of(candidate);
-
         Map<String, Object> context = new LinkedHashMap<>();
-        context.put("interactionType", DECISION_TYPE_LOOK_TOP_DECK);
-        context.put("title", "查看牌庫頂");
-        context.put("message", "選擇保留在牌庫頂的卡片；若不選擇則放到底部。");
-        context.put("cards", candidateCards);
-        context.put("placementOptions", List.of("TOP", "BOTTOM"));
+        context.put("interactionType", interaction.decisionType());
+        context.put("title", interaction.title());
+        context.put("message", interaction.message());
+        context.put("cards", interaction.cards());
+        if (interaction.placementOptions() != null && !interaction.placementOptions().isEmpty()) {
+            context.put("placementOptions", interaction.placementOptions());
+        }
         context.put("effectType", effectType);
-        context.put("candidateCardInstanceIds", candidateCardInstanceIds);
-        context.put("candidateCards", candidateCards);
-        context.put("lookedCardInstanceId", lookTopDeck.cardInstanceId());
-        context.put("lookedCardId", lookTopDeck.cardId());
+        context.put("candidateCardInstanceIds", interaction.candidateCardInstanceIds());
+        context.put("candidateCards", interaction.cards());
+        if (interaction.lookedCardInstanceId() != null) {
+            context.put("lookedCardInstanceId", interaction.lookedCardInstanceId());
+        }
+        if (StringUtils.hasText(interaction.lookedCardId())) {
+            context.put("lookedCardId", interaction.lookedCardId());
+        }
 
-        return jdbcTemplate.query(
+        Long decisionId = jdbcTemplate.query(
             """
             INSERT INTO match_pending_decisions (
                 match_id,
@@ -3986,25 +4220,32 @@ public class MatchActionService {
                 max_select,
                 status,
                 context_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, ?, CAST(? AS jsonb))
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
             RETURNING id
             """,
             rs -> rs.next() ? rs.getLong("id") : null,
             matchId,
             userId,
-            DECISION_TYPE_LOOK_TOP_DECK,
+            interaction.decisionType(),
             sourceActionType,
             sourceCardInstanceId,
             sourceCardId,
             effectType,
+            interaction.minSelect(),
+            interaction.maxSelect(),
             PENDING_STATUS,
             toJson(context)
         );
+        if (decisionId == null) {
+            return null;
+        }
+        return new FollowupInteractionDecision(decisionId, interaction.decisionType());
     }
 
     private Map<String, Object> loadCardCandidateForDecision(
         Long matchId,
-        Long userId,
+        Long viewerUserId,
+        Long ownerUserId,
         Long cardInstanceId,
         String fallbackZone,
         String fallbackCardId
@@ -4041,10 +4282,13 @@ public class MatchActionService {
                 return value;
             },
             matchId,
-            userId,
+            ownerUserId,
             cardInstanceId
         );
         if (row != null) {
+            if (!viewerUserId.equals(ownerUserId)) {
+                row.put("zone", null);
+            }
             return row;
         }
         Map<String, Object> fallback = new LinkedHashMap<>();
@@ -4065,8 +4309,11 @@ public class MatchActionService {
         return placement.trim().toUpperCase(Locale.ROOT);
     }
 
-    @SuppressWarnings("unchecked")
-    private LookTopDeckDecisionContext extractLookTopDeckDecisionContext(Map<String, Object> effectSummary) {
+    private FollowupInteractionContext extractFollowupInteractionDecisionContext(
+        Long matchId,
+        Long userId,
+        Map<String, Object> effectSummary
+    ) {
         if (effectSummary == null || effectSummary.isEmpty()) {
             return null;
         }
@@ -4079,19 +4326,146 @@ public class MatchActionService {
                 continue;
             }
             String resolvedType = normalizeZone(effectRow.get("effectType"));
-            if (!DECISION_TYPE_LOOK_TOP_DECK.equals(resolvedType)) {
-                continue;
-            }
             if (!toBoolean(effectRow.get("applied"))) {
                 continue;
             }
-            Long lookedCardInstanceId = asLong(effectRow.get("lookedCardInstanceId"));
-            String lookedCardId = asString(effectRow.get("lookedCardId"));
-            if (lookedCardInstanceId != null && StringUtils.hasText(lookedCardId)) {
-                return new LookTopDeckDecisionContext(lookedCardInstanceId, lookedCardId);
+            if (DECISION_TYPE_LOOK_TOP_DECK.equals(resolvedType)) {
+                Long lookedCardInstanceId = asLong(effectRow.get("lookedCardInstanceId"));
+                String lookedCardId = asString(effectRow.get("lookedCardId"));
+                if (lookedCardInstanceId == null || !StringUtils.hasText(lookedCardId)) {
+                    continue;
+                }
+                Map<String, Object> candidate = loadCardCandidateForDecision(
+                    matchId,
+                    userId,
+                    userId,
+                    lookedCardInstanceId,
+                    "DECK",
+                    lookedCardId
+                );
+                return new FollowupInteractionContext(
+                    DECISION_TYPE_LOOK_TOP_DECK,
+                    "查看牌庫頂",
+                    "選擇保留在牌庫頂的卡片；若不選擇則放到底部。",
+                    0,
+                    1,
+                    List.of(candidate),
+                    List.of(lookedCardInstanceId),
+                    List.of("TOP", "BOTTOM"),
+                    lookedCardInstanceId,
+                    lookedCardId
+                );
+            }
+            if (DECISION_TYPE_LOOK_OPPONENT_HAND.equals(resolvedType) || DECISION_TYPE_LOOK_HOLOPOWER.equals(resolvedType)) {
+                Long lookedUserId = asLong(effectRow.get("lookedUserId"));
+                String lookedZone = DECISION_TYPE_LOOK_OPPONENT_HAND.equals(resolvedType) ? "HAND" : "HOLOPOWER";
+                List<Map<String, Object>> cards = buildLookZoneCandidateCards(
+                    matchId,
+                    userId,
+                    lookedUserId == null ? userId : lookedUserId,
+                    effectRow.get("lookedCards"),
+                    lookedZone
+                );
+                List<Long> candidateCardInstanceIds = cards.stream()
+                    .map(card -> asLong(card.get("cardInstanceId")))
+                    .filter(id -> id != null && id > 0)
+                    .toList();
+                String title = DECISION_TYPE_LOOK_OPPONENT_HAND.equals(resolvedType) ? "查看對手手牌" : "查看 Holopower";
+                String message = DECISION_TYPE_LOOK_OPPONENT_HAND.equals(resolvedType)
+                    ? "以下為本次效果可查看的對手手牌。"
+                    : "以下為本次效果可查看的 Holopower。";
+                return new FollowupInteractionContext(
+                    resolvedType,
+                    title,
+                    message,
+                    0,
+                    0,
+                    cards,
+                    candidateCardInstanceIds,
+                    List.of(),
+                    null,
+                    null
+                );
+            }
+            if (DECISION_TYPE_REORDER_DECK_BOTTOM.equals(resolvedType) || "SEARCH".equals(resolvedType)) {
+                if (!toBoolean(effectRow.get("requiresDeckBottomReorder"))) {
+                    continue;
+                }
+                Long lookedUserId = userId;
+                List<Map<String, Object>> cards = buildLookZoneCandidateCards(
+                    matchId,
+                    userId,
+                    lookedUserId,
+                    effectRow.get("deckBottomReorderCandidates"),
+                    "DECK"
+                );
+                List<Long> candidateCardInstanceIds = cards.stream()
+                    .map(card -> asLong(card.get("cardInstanceId")))
+                    .filter(id -> id != null && id > 0)
+                    .toList();
+                if (candidateCardInstanceIds.size() <= 1) {
+                    continue;
+                }
+                return new FollowupInteractionContext(
+                    DECISION_TYPE_REORDER_DECK_BOTTOM,
+                    "排序牌庫底",
+                    "請依你要的順序確認，將剩餘卡片放到牌庫底。",
+                    candidateCardInstanceIds.size(),
+                    candidateCardInstanceIds.size(),
+                    cards,
+                    candidateCardInstanceIds,
+                    List.of(),
+                    null,
+                    null
+                );
             }
         }
         return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> buildLookZoneCandidateCards(
+        Long matchId,
+        Long viewerUserId,
+        Long ownerUserId,
+        Object lookedCardsObject,
+        String fallbackZone
+    ) {
+        if (!(lookedCardsObject instanceof List<?> list) || list.isEmpty()) {
+            return List.of();
+        }
+        List<Map<String, Object>> cards = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> rawCard)) {
+                continue;
+            }
+            Long cardInstanceId = asLong(rawCard.get("cardInstanceId"));
+            String cardId = asString(rawCard.get("cardId"));
+            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
+                continue;
+            }
+            Map<String, Object> card = loadCardCandidateForDecision(
+                matchId,
+                viewerUserId,
+                ownerUserId,
+                cardInstanceId,
+                fallbackZone,
+                cardId
+            );
+            cards.add(card);
+        }
+        return cards;
+    }
+
+    private void putFollowupDecisionPayload(Map<String, Object> payload, FollowupInteractionDecision followupDecision) {
+        if (payload == null || followupDecision == null || followupDecision.decisionId() == null) {
+            return;
+        }
+        payload.put("pendingInteractionDecisionId", followupDecision.decisionId());
+        payload.put("pendingInteractionDecisionType", followupDecision.decisionType());
+        if (DECISION_TYPE_LOOK_TOP_DECK.equals(followupDecision.decisionType())) {
+            payload.put("pendingLookTopDeckDecisionId", followupDecision.decisionId());
+        }
     }
 
     private PendingDecision loadPendingDecisionForUpdate(Long matchId, Long userId, Long decisionId) {
@@ -5159,13 +5533,30 @@ public class MatchActionService {
     private record ArtCritical(String color, int bonus) {
     }
 
-    private record LookTopDeckDecisionContext(
-        Long cardInstanceId,
-        String cardId
+    private record FollowupInteractionDecision(
+        Long decisionId,
+        String decisionType
+    ) {
+    }
+
+    private record FollowupInteractionContext(
+        String decisionType,
+        String title,
+        String message,
+        int minSelect,
+        int maxSelect,
+        List<Map<String, Object>> cards,
+        List<Long> candidateCardInstanceIds,
+        List<String> placementOptions,
+        Long lookedCardInstanceId,
+        String lookedCardId
     ) {
     }
 
     private record TargetHolomem(Long holomemId, Long matchCardInstanceId, String mainColor) {
+    }
+
+    private record DamageRedirectTarget(Long effectId, TargetHolomem target) {
     }
 
     private record BloomTarget(

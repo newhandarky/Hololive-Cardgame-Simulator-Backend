@@ -2,6 +2,7 @@ package com.hololive.cardgame.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
@@ -33,6 +34,8 @@ public class MatchEffectService {
     private static final Pattern ARTS_MODIFIER_PATTERN = Pattern.compile("アーツ\\s*([+＋\\-−]\\s*\\d+)");
     private static final Pattern DICE_AT_LEAST_PATTERN = Pattern.compile("(\\d+)\\s*以上の時");
     private static final Pattern DICE_AT_MOST_PATTERN = Pattern.compile("(\\d+)\\s*以下の時");
+    private static final Pattern DICE_ROLL_COUNT_PATTERN = Pattern.compile("サイコロ\\D*(\\d+)\\s*回");
+    private static final Pattern SEARCH_LOOK_TOP_COUNT_PATTERN = Pattern.compile("デッキの上から\\s*(\\d+)\\s*枚を見る");
     private static final Pattern ATTACHED_SUPPORT_HP_PATTERN = Pattern.compile(
         "この(?:マスコット|ツール|ファン)が付いているホロメンのHP\\s*([+＋−-]\\s*\\d+)"
     );
@@ -181,6 +184,12 @@ public class MatchEffectService {
                     );
                     case "LOOK_TOP_DECK" -> executed.add(
                         executeLookTopDeckEffect(matchId, userId, type, effectNode)
+                    );
+                    case "LOOK_OPPONENT_HAND" -> executed.add(
+                        executeLookOpponentHandEffect(matchId, userId, type, effectNode)
+                    );
+                    case "LOOK_HOLOPOWER" -> executed.add(
+                        executeLookHolopowerEffect(matchId, userId, type, effectNode)
                     );
                     case "SWAP_WITH_COLLAB" -> executed.add(
                         executeSwapWithCollabEffect(matchId, userId, type, effectNode, targetHolomemCardInstanceId)
@@ -403,6 +412,12 @@ public class MatchEffectService {
                         case "LOOK_TOP_DECK" -> executed.add(
                             executeLookTopDeckEffect(matchId, userId, effectType, giftNode)
                         );
+                        case "LOOK_OPPONENT_HAND" -> executed.add(
+                            executeLookOpponentHandEffect(matchId, userId, effectType, giftNode)
+                        );
+                        case "LOOK_HOLOPOWER" -> executed.add(
+                            executeLookHolopowerEffect(matchId, userId, effectType, giftNode)
+                        );
                         case "SWAP_WITH_COLLAB" -> executed.add(
                             executeSwapWithCollabEffect(matchId, userId, effectType, giftNode, holderCardInstanceId)
                         );
@@ -587,6 +602,12 @@ public class MatchEffectService {
                     );
                     case "LOOK_TOP_DECK" -> executed.add(
                         executeLookTopDeckEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "LOOK_OPPONENT_HAND" -> executed.add(
+                        executeLookOpponentHandEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "LOOK_HOLOPOWER" -> executed.add(
+                        executeLookHolopowerEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "MOVE_ZONE" -> executed.add(
                         executeMoveZoneEffect(
@@ -785,6 +806,12 @@ public class MatchEffectService {
                     case "LOOK_TOP_DECK" -> executed.add(
                         executeLookTopDeckEffect(matchId, userId, effectType, collabEffectNode)
                     );
+                    case "LOOK_OPPONENT_HAND" -> executed.add(
+                        executeLookOpponentHandEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "LOOK_HOLOPOWER" -> executed.add(
+                        executeLookHolopowerEffect(matchId, userId, effectType, collabEffectNode)
+                    );
                     case "MOVE_ZONE" -> executed.add(
                         executeMoveZoneEffect(
                             matchId,
@@ -857,6 +884,10 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        if (!shouldApplyByDice(rawText, effectNode, effectType)) {
+            return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
+        }
         int requestedCount = resolveDrawCount(effectNode);
         int drawCount = Math.max(requestedCount, 1);
 
@@ -916,11 +947,19 @@ public class MatchEffectService {
         JsonNode effectNode,
         List<Long> selectedCardInstanceIds
     ) {
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
         int requestedCount = resolveSearchCount(effectNode);
         int searchCount = Math.max(requestedCount, 1);
         SearchCriteria criteria = resolveSearchCriteria(effectNode);
+        int lookTopCount = resolveSearchLookTopCount(effectNode, rawText);
+        boolean requiresDeckBottomReorder = lookTopCount > 0 && rawText.contains("好きな順でデッキの下に戻す");
 
-        List<Map<String, Object>> candidates = loadSearchCandidates(matchId, userId, criteria);
+        List<Map<String, Object>> searchPool = lookTopCount > 0
+            ? loadTopDeckWindow(matchId, userId, lookTopCount)
+            : loadSearchCandidates(matchId, userId, criteria);
+        List<Map<String, Object>> candidates = lookTopCount > 0
+            ? filterCandidatesByCriteria(searchPool, criteria)
+            : searchPool;
 
         List<Map<String, Object>> selected = selectSearchCards(candidates, selectedCardInstanceIds, searchCount);
         List<Long> movedCardInstanceIds = new ArrayList<>();
@@ -956,16 +995,91 @@ public class MatchEffectService {
             movedCardIds.add(cardId);
         }
 
+        List<Map<String, Object>> reorderCandidates = new ArrayList<>();
+        if (requiresDeckBottomReorder) {
+            Set<Long> selectedIds = new LinkedHashSet<>();
+            for (Map<String, Object> row : selected) {
+                Long id = asLong(row.get("id"));
+                if (id != null && id > 0) {
+                    selectedIds.add(id);
+                }
+            }
+            for (Map<String, Object> row : searchPool) {
+                Long id = asLong(row.get("id"));
+                if (id == null || selectedIds.contains(id)) {
+                    continue;
+                }
+                Map<String, Object> candidate = new LinkedHashMap<>();
+                candidate.put("cardInstanceId", id);
+                candidate.put("cardId", asText(row.get("card_id")));
+                candidate.put("name", asText(row.get("name")));
+                candidate.put("cardType", normalize(asText(row.get("card_type"))));
+                candidate.put("levelType", normalizeLevelType(asText(row.get("level_type"))));
+                candidate.put("zone", "DECK");
+                reorderCandidates.add(candidate);
+            }
+            if (reorderCandidates.size() == 1) {
+                Long onlyCardInstanceId = asLong(reorderCandidates.get(0).get("cardInstanceId"));
+                moveDeckCardToBottom(matchId, userId, onlyCardInstanceId);
+                reorderCandidates.clear();
+            }
+        }
+
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
+        summary.put("applied", true);
         summary.put("searchRequested", searchCount);
         summary.put("candidateCount", candidates.size());
+        summary.put("searchPoolCount", searchPool.size());
+        summary.put("lookTopCount", lookTopCount);
         summary.put("searchApplied", movedCardInstanceIds.size());
         summary.put("selectedByClient", selectedCardInstanceIds != null && !selectedCardInstanceIds.isEmpty());
         summary.put("searchedCardInstanceIds", movedCardInstanceIds);
         summary.put("searchedCardIds", movedCardIds);
+        summary.put("requiresDeckBottomReorder", !reorderCandidates.isEmpty());
+        summary.put(
+            "deckBottomReorderCandidateCardInstanceIds",
+            reorderCandidates.stream()
+                .map(row -> asLong(row.get("cardInstanceId")))
+                .filter(id -> id != null && id > 0)
+                .toList()
+        );
+        summary.put("deckBottomReorderCandidates", reorderCandidates);
         summary.put("criteria", buildCriteriaSummary(criteria));
         return summary;
+    }
+
+    private void moveDeckCardToBottom(Long matchId, Long userId, Long cardInstanceId) {
+        if (matchId == null || userId == null || cardInstanceId == null || cardInstanceId <= 0) {
+            return;
+        }
+        Integer nextOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(MAX(order_index), 0) + 1
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'DECK'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET order_index = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'DECK'
+            """,
+            nextOrder == null ? 1 : nextOrder,
+            cardInstanceId,
+            matchId,
+            userId
+        );
     }
 
     private Map<String, Object> executeReturnToHandEffect(
@@ -2025,6 +2139,10 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        if (!shouldApplyByDice(rawText, effectNode, effectType)) {
+            return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
+        }
         int requestedCount = resolveActionCount(effectNode, "ホロパワー", 1);
         int moveCount = Math.max(requestedCount, 1);
 
@@ -2437,6 +2555,9 @@ public class MatchEffectService {
         if ((rawText.contains("Bloom") || rawText.contains("ブルーム")) && rawText.contains("できない")) {
             actions.add("BLOOM");
         }
+        if (rawText.contains("アクティブにならない")) {
+            actions.add("UNREST");
+        }
         if (actions.isEmpty()) {
             return executeNoOpEffect(effectType, effectNode, "無可套用的行動封鎖條件");
         }
@@ -2454,7 +2575,7 @@ public class MatchEffectService {
             return executeNoOpEffect(effectType, effectNode, "找不到封鎖效果目標玩家");
         }
         int currentTurn = resolveCurrentTurnNumber(matchId);
-        int expiresTurn = rawText.contains("次の相手のターン") ? currentTurn + 1 : currentTurn;
+        int expiresTurn = rawText.contains("次の相手の") ? currentTurn + 1 : currentTurn;
         Long targetHolomemId = null;
         boolean lockSpecificHolomem = rawText.contains("このホロメン")
             || rawText.contains("このカード")
@@ -2572,6 +2693,85 @@ public class MatchEffectService {
         summary.put("reordered", false);
         summary.put("reason", "目前預設維持牌庫頂部順序");
         return summary;
+    }
+
+    private Map<String, Object> executeLookOpponentHandEffect(
+        Long matchId,
+        Long userId,
+        String effectType,
+        JsonNode effectNode
+    ) {
+        Long opponentUserId = resolveOpponentUserId(matchId, userId);
+        if (opponentUserId == null || opponentUserId <= 0) {
+            return executeNoOpEffect(effectType, effectNode, "找不到可查看手牌的對手");
+        }
+        List<Map<String, Object>> lookedCards = loadCardsForLookDecision(matchId, opponentUserId, "HAND");
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", effectType);
+        summary.put("applied", true);
+        summary.put("lookedUserId", opponentUserId);
+        summary.put("lookedZone", "HAND");
+        summary.put("lookedCardCount", lookedCards.size());
+        summary.put("lookedCards", lookedCards);
+        return summary;
+    }
+
+    private Map<String, Object> executeLookHolopowerEffect(
+        Long matchId,
+        Long userId,
+        String effectType,
+        JsonNode effectNode
+    ) {
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        boolean lookOpponent = rawText.contains("相手");
+        Long lookedUserId = lookOpponent ? resolveOpponentUserId(matchId, userId) : userId;
+        if (lookedUserId == null || lookedUserId <= 0) {
+            return executeNoOpEffect(effectType, effectNode, "找不到可查看 HOLOPOWER 的玩家");
+        }
+        List<Map<String, Object>> lookedCards = loadCardsForLookDecision(matchId, lookedUserId, "HOLOPOWER");
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", effectType);
+        summary.put("applied", true);
+        summary.put("lookedUserId", lookedUserId);
+        summary.put("lookedZone", "HOLOPOWER");
+        summary.put("lookedCardCount", lookedCards.size());
+        summary.put("lookedCards", lookedCards);
+        return summary;
+    }
+
+    private List<Map<String, Object>> loadCardsForLookDecision(Long matchId, Long ownerUserId, String zone) {
+        return jdbcTemplate.query(
+            """
+            SELECT mc.id AS card_instance_id,
+                   mc.card_id,
+                   mc.zone,
+                   c.name,
+                   c.card_type,
+                   c.image_url,
+                   m.level_type
+            FROM match_cards mc
+            LEFT JOIN cards c ON c.card_id = mc.card_id
+            LEFT JOIN member_cards m ON m.card_id = mc.card_id
+            WHERE mc.match_id = ?
+              AND mc.owner_user_id = ?
+              AND mc.zone = ?
+            ORDER BY mc.order_index NULLS LAST, mc.id
+            """,
+            (rs, rowNum) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("cardInstanceId", rs.getLong("card_instance_id"));
+                row.put("cardId", rs.getString("card_id"));
+                row.put("zone", normalize(rs.getString("zone")));
+                row.put("name", rs.getString("name"));
+                row.put("cardType", rs.getString("card_type"));
+                row.put("imageUrl", rs.getString("image_url"));
+                row.put("levelType", rs.getString("level_type"));
+                return row;
+            },
+            matchId,
+            ownerUserId,
+            zone
+        );
     }
 
     private Map<String, Object> executeSwapWithCollabEffect(
@@ -2792,6 +2992,18 @@ public class MatchEffectService {
         String targetType,
         Long targetHolomemCardInstanceId
     ) {
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
+        if (rawText.contains("かわりに受ける")) {
+            return executeDamageRedirectPreparationEffect(
+                matchId,
+                userId,
+                effectType,
+                effectNode,
+                targetType,
+                targetHolomemCardInstanceId,
+                rawText
+            );
+        }
         Long targetHolomemId = resolveEffectTargetHolomemId(
             matchId,
             userId,
@@ -2953,6 +3165,68 @@ public class MatchEffectService {
         summary.put("archivedHolomemCardInstanceIds", archivedHolomemCardInstanceIds);
         summary.put("lifeReduced", lifeReduced);
         summary.put("lostLifeCardInstanceId", lostLifeCardInstanceId);
+        return summary;
+    }
+
+    private Map<String, Object> executeDamageRedirectPreparationEffect(
+        Long matchId,
+        Long userId,
+        String effectType,
+        JsonNode effectNode,
+        String targetType,
+        Long targetHolomemCardInstanceId,
+        String rawText
+    ) {
+        Long targetHolomemId = resolveEffectTargetHolomemId(
+            matchId,
+            userId,
+            targetType,
+            targetHolomemCardInstanceId,
+            true
+        );
+        if (targetHolomemId == null) {
+            return executeNoOpEffect(effectType, effectNode, "DAMAGE_REDIRECT 找不到可替代承傷的 Holomen");
+        }
+        Long affectedUserId = resolveHolomemOwner(matchId, targetHolomemId);
+        if (affectedUserId == null || affectedUserId <= 0) {
+            return executeNoOpEffect(effectType, effectNode, "DAMAGE_REDIRECT 找不到目標擁有者");
+        }
+        int currentTurn = resolveCurrentTurnNumber(matchId);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("actions", List.of("DAMAGE_REDIRECT"));
+        payload.put("targetHolomemId", targetHolomemId);
+        payload.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
+        payload.put("rawText", rawText);
+
+        int inserted = jdbcTemplate.update(
+            """
+            INSERT INTO match_turn_effects (
+                match_id,
+                source_user_id,
+                affected_user_id,
+                effect_type,
+                stat_type,
+                modifier_value,
+                expires_turn,
+                payload
+            ) VALUES (?, ?, ?, ?, 'ACTION_LOCK', 1, ?, CAST(? AS jsonb))
+            """,
+            matchId,
+            userId,
+            affectedUserId,
+            "DEBUFF",
+            currentTurn,
+            toJsonString(payload)
+        );
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", effectType);
+        summary.put("applied", inserted == 1);
+        summary.put("redirectPrepared", inserted == 1);
+        summary.put("targetHolomemId", targetHolomemId);
+        summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
+        summary.put("affectedUserId", affectedUserId);
+        summary.put("expiresTurn", currentTurn);
         return summary;
     }
 
@@ -3550,8 +3824,12 @@ public class MatchEffectService {
 
     private SelectionProbe probeSearchCandidates(Long matchId, Long userId, JsonNode effectNode) {
         int requestedCount = Math.max(resolveSearchCount(effectNode), 1);
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        int lookTopCount = resolveSearchLookTopCount(effectNode, rawText);
         SearchCriteria criteria = resolveSearchCriteria(effectNode);
-        List<Map<String, Object>> rows = loadSearchCandidates(matchId, userId, criteria);
+        List<Map<String, Object>> rows = lookTopCount > 0
+            ? filterCandidatesByCriteria(loadTopDeckWindow(matchId, userId, lookTopCount), criteria)
+            : loadSearchCandidates(matchId, userId, criteria);
         return new SelectionProbe(
             requestedCount,
             mapDecisionCandidates(rows, "DECK")
@@ -3993,6 +4271,19 @@ public class MatchEffectService {
         if (text.contains("デッキの上から1枚を見る")) {
             effectTypes.add("LOOK_TOP_DECK");
         }
+        if (
+            text.contains("相手")
+                && text.contains("手札")
+                && (text.contains("見る") || text.contains("見"))
+        ) {
+            effectTypes.add("LOOK_OPPONENT_HAND");
+        }
+        if (
+            text.contains("ホロパワー")
+                && (text.contains("見る") || text.contains("見"))
+        ) {
+            effectTypes.add("LOOK_HOLOPOWER");
+        }
         if (text.contains("交代できる")) {
             effectTypes.add("SWAP_WITH_COLLAB");
         }
@@ -4105,6 +4396,23 @@ public class MatchEffectService {
             return count;
         }
         return text.contains("手札に加える") ? 1 : 0;
+    }
+
+    private int resolveSearchLookTopCount(JsonNode effectNode, String rawText) {
+        int fromFields = extractInt(effectNode, 0, "lookTopCount", "lookCount", "peekCount");
+        if (fromFields > 0) {
+            return fromFields;
+        }
+        String text = normalizeDigits(rawText);
+        Matcher matcher = SEARCH_LOOK_TOP_COUNT_PATTERN.matcher(text);
+        if (matcher.find()) {
+            try {
+                return Integer.parseInt(matcher.group(1));
+            } catch (NumberFormatException ignored) {
+                return 0;
+            }
+        }
+        return 0;
     }
 
     private int resolveActionCount(JsonNode effectNode, String fallbackToken, int defaultValue) {
@@ -4228,6 +4536,27 @@ public class MatchEffectService {
                 return true;
             }
         }
+        if (normalized.startsWith("EXACT_")) {
+            try {
+                int target = Integer.parseInt(normalized.substring("EXACT_".length()));
+                return diceRoll == target;
+            } catch (NumberFormatException ignored) {
+                return true;
+            }
+        }
+        if (normalized.startsWith("BETWEEN_")) {
+            String range = normalized.substring("BETWEEN_".length());
+            String[] parts = range.split("_");
+            if (parts.length == 2) {
+                try {
+                    int min = Integer.parseInt(parts[0]);
+                    int max = Integer.parseInt(parts[1]);
+                    return diceRoll >= min && diceRoll <= max;
+                } catch (NumberFormatException ignored) {
+                    return true;
+                }
+            }
+        }
         return true;
     }
 
@@ -4236,7 +4565,95 @@ public class MatchEffectService {
         if (fromNode >= 1 && fromNode <= 6) {
             return fromNode;
         }
-        return diceService.rollD6();
+        DiceResolution resolution = resolveDiceResolution(effectNode);
+        if (effectNode instanceof ObjectNode objectNode && resolution.chosenRoll() >= 1 && resolution.chosenRoll() <= 6) {
+            objectNode.put("diceRoll", resolution.chosenRoll());
+            objectNode.set("diceRolls", objectMapper.valueToTree(resolution.rolls()));
+            objectNode.put("diceRollCountApplied", resolution.rolls().size());
+        }
+        return resolution.chosenRoll();
+    }
+
+    private DiceResolution resolveDiceResolution(JsonNode effectNode) {
+        int rollCount = resolveDiceRollCount(effectNode);
+        String strategy = resolveDicePickStrategy(effectNode);
+        Integer fixedDiceValue = resolveFixedDiceValue(effectNode);
+        List<Integer> rolls = new ArrayList<>();
+        for (int i = 0; i < rollCount; i++) {
+            int roll = diceService.rollD6();
+            if (i == 0 && fixedDiceValue != null && fixedDiceValue >= 1 && fixedDiceValue <= 6) {
+                roll = fixedDiceValue;
+            }
+            if (roll < 1 || roll > 6) {
+                roll = 1;
+            }
+            rolls.add(roll);
+        }
+        if (rolls.isEmpty()) {
+            return new DiceResolution(1, List.of(1), "FIRST", false);
+        }
+        int chosen = switch (strategy) {
+            case "MAX", "HIGHEST" -> rolls.stream().mapToInt(Integer::intValue).max().orElse(rolls.get(0));
+            case "MIN", "LOWEST" -> rolls.stream().mapToInt(Integer::intValue).min().orElse(rolls.get(0));
+            case "LAST" -> rolls.get(rolls.size() - 1);
+            default -> rolls.get(0);
+        };
+        return new DiceResolution(chosen, rolls, strategy, fixedDiceValue != null);
+    }
+
+    private int resolveDiceRollCount(JsonNode effectNode) {
+        int fromField = extractInt(effectNode, 0, "diceRollCount", "diceCount", "rollCount");
+        if (fromField > 0) {
+            return Math.min(fromField, 6);
+        }
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        Matcher matcher = DICE_ROLL_COUNT_PATTERN.matcher(rawText);
+        if (matcher.find()) {
+            try {
+                int parsed = Integer.parseInt(matcher.group(1));
+                if (parsed > 0) {
+                    return Math.min(parsed, 6);
+                }
+            } catch (NumberFormatException ignored) {
+                // keep fallback
+            }
+        }
+        return 1;
+    }
+
+    private String resolveDicePickStrategy(JsonNode effectNode) {
+        String explicit = normalizeEffectType(readText(effectNode, "dicePickStrategy", "dicePick", "diceSelect"));
+        if (StringUtils.hasText(explicit)) {
+            return explicit;
+        }
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        if (rawText.contains("大きい方")) {
+            return "MAX";
+        }
+        if (rawText.contains("小さい方")) {
+            return "MIN";
+        }
+        return "FIRST";
+    }
+
+    private Integer resolveFixedDiceValue(JsonNode effectNode) {
+        int fromField = extractInt(effectNode, 0, "fixedDiceValue", "diceFixedValue", "forcedDiceValue");
+        if (fromField >= 1 && fromField <= 6) {
+            return fromField;
+        }
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        Matcher matcher = Pattern.compile("(\\d+)\\s*として扱う").matcher(rawText);
+        if (matcher.find()) {
+            try {
+                int parsed = Integer.parseInt(matcher.group(1));
+                if (parsed >= 1 && parsed <= 6) {
+                    return parsed;
+                }
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private SearchCriteria resolveSearchCriteria(JsonNode effectNode) {
@@ -4372,6 +4789,59 @@ public class MatchEffectService {
         SearchCriteria criteria
     ) {
         return loadCandidatesFromZone(matchId, userId, "DECK", criteria, false);
+    }
+
+    private List<Map<String, Object>> loadTopDeckWindow(Long matchId, Long userId, int count) {
+        if (count <= 0) {
+            return List.of();
+        }
+        int limit = Math.min(count, 20);
+        return jdbcTemplate.query(
+            """
+            SELECT mc.id,
+                   mc.card_id,
+                   c.card_type,
+                   m.level_type,
+                   c.name,
+                   c.tags_json::text AS tags_json,
+                   m.main_color,
+                   m.sub_color,
+                   cc.color AS cheer_color,
+                   h.is_rested,
+                   GREATEST(COALESCE(m.hp, 0) - COALESCE(h.damage_taken, 0), 0) AS remain_hp
+            FROM match_cards mc
+            JOIN cards c ON c.card_id = mc.card_id
+            LEFT JOIN member_cards m ON m.card_id = mc.card_id
+            LEFT JOIN cheer_cards cc ON cc.card_id = mc.card_id
+            LEFT JOIN match_holomems h
+              ON h.match_card_id = mc.id
+             AND h.match_id = mc.match_id
+             AND h.owner_user_id = mc.owner_user_id
+            WHERE mc.match_id = ?
+              AND mc.owner_user_id = ?
+              AND mc.zone = 'DECK'
+            ORDER BY mc.order_index NULLS LAST, mc.id
+            LIMIT ?
+            """,
+            (rs, rowNum) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id"));
+                row.put("card_id", rs.getString("card_id"));
+                row.put("card_type", rs.getString("card_type"));
+                row.put("level_type", rs.getString("level_type"));
+                row.put("name", rs.getString("name"));
+                row.put("tags_json", rs.getString("tags_json"));
+                row.put("main_color", rs.getString("main_color"));
+                row.put("sub_color", rs.getString("sub_color"));
+                row.put("cheer_color", rs.getString("cheer_color"));
+                row.put("is_rested", rs.getObject("is_rested"));
+                row.put("remain_hp", rs.getObject("remain_hp"));
+                return row;
+            },
+            matchId,
+            userId,
+            limit
+        );
     }
 
     private List<Map<String, Object>> loadSearchCandidates(
@@ -5980,5 +6450,12 @@ public class MatchEffectService {
         Long winnerUserId,
         Long loserUserId,
         String reason
+    ) {}
+
+    private record DiceResolution(
+        int chosenRoll,
+        List<Integer> rolls,
+        String strategy,
+        boolean fixedApplied
     ) {}
 }
