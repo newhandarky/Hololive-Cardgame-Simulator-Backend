@@ -19,6 +19,6 @@ jwt:
   secret: ${JWT_SECRET:change-me-jwt-secret-at-least-32-bytes-long-for-dev-only}
   expiration: 86400000
 server:
-  port: 8090
+  port: ${PORT:8080}
   error:
     include-message: always
