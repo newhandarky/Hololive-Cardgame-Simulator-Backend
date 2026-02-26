@@ -53,6 +53,7 @@ public class MatchActionService {
     private static final String ACTION_TYPE_TURN_CHEER = "TURN_CHEER";
     private static final String ACTION_TYPE_USE_OSHI_SKILL = "USE_OSHI_SKILL";
     private static final String ACTION_TYPE_BATON_TOUCH = "BATON_TOUCH";
+    private static final String ACTION_TYPE_RULE_EVENT = "RULE_EVENT";
     private static final String PENDING_STATUS = "PENDING";
     private static final String SUPPORT_TYPE_MASCOT = "MASCOT";
     private static final String SUPPORT_TYPE_TOOL = "TOOL";
@@ -256,6 +257,9 @@ public class MatchActionService {
         if (target == null) {
             throw new GameRuleException(GameErrorCode.BLOOM_NO_TARGET, "找不到要 BLOOM 的目標 Holomem");
         }
+        if (isStageActionLocked(matchId, userId, context.turnNumber, "BLOOM", target.zone(), target.holomemId())) {
+            throw new GameRuleException(GameErrorCode.STAGE_ACTION_LOCKED, "目前效果限制：不可 Bloom");
+        }
         if (isSpecialOrUnbloomableLevel(target.topLevelType())) {
             throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "Spot Holomem 不能作為 BLOOM 目標");
         }
@@ -366,6 +370,17 @@ public class MatchActionService {
         payload.put("stackDepth", stackDepth);
         payload.put("bloomEffect", bloomEffectSummary);
         payload.put("triggerSummary", triggerSummary);
+        payload.put(
+            "triggerResolutionOrder",
+            buildTriggeredResolutionOrder(
+                "BLOOM_EFFECT",
+                100,
+                bloomEffectSummary,
+                "BLOOM_EVENT_HOOK",
+                200,
+                triggerSummary
+            )
+        );
         Long bloomLookTopDeckDecisionId = createLookTopDeckPendingDecisionIfNeeded(
             matchId,
             userId,
@@ -1263,6 +1278,17 @@ public class MatchActionService {
         if (collabTriggerSummary != null) {
             payload.put("triggerSummary", collabTriggerSummary);
         }
+        payload.put(
+            "triggerResolutionOrder",
+            buildTriggeredResolutionOrder(
+                "COLLAB_EFFECT",
+                100,
+                collabEffectSummary,
+                "COLLAB_EVENT_HOOK",
+                200,
+                collabTriggerSummary
+            )
+        );
         appendAction(
             context.match,
             userId,
@@ -1825,6 +1851,26 @@ public class MatchActionService {
             artSummary.put("lifeReduced", true);
             artSummary.put("lostLifeCardInstanceId", lostLifeCardInstanceId);
         }
+        List<Map<String, Object>> giftTriggeredEffects = matchEffectService.applyGiftTriggeredEffectsOnArt(
+            matchId,
+            userId,
+            attackerCardInstanceId,
+            effectiveTargetCardInstanceId,
+            context.turnNumber
+        );
+        for (Map<String, Object> giftEffect : giftTriggeredEffects) {
+            Long giftHolderHolomemId = asLong(giftEffect.get("giftHolderHolomemId"));
+            appendAction(
+                context.match,
+                userId,
+                "GIFT_TRIGGER",
+                toJson(giftEffect),
+                context.turnNumber
+            );
+            if (giftHolderHolomemId != null && giftHolderHolomemId > 0) {
+                giftEffect.put("giftHolderHolomemId", giftHolderHolomemId);
+            }
+        }
 
         int attackerRested = jdbcTemplate.update(
             """
@@ -1866,6 +1912,7 @@ public class MatchActionService {
         payload.put("criticalApplied", criticalApplied);
         payload.put("artTotalDamage", totalDamage);
         payload.put("effect", artSummary);
+        payload.put("giftEffects", giftTriggeredEffects);
         payload.put("lostLifeCardInstanceId", lostLifeCardInstanceId);
 
         appendAction(
@@ -1875,17 +1922,20 @@ public class MatchActionService {
             toJson(payload),
             context.turnNumber
         );
-        if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, artSummary)) {
+        Map<String, Object> effectSummaryForChecks = mergeEffectSummaryForChecks(artSummary, giftTriggeredEffects);
+        if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, effectSummaryForChecks)) {
             touchUpdatedAt(context.match);
             matchRepository.saveAndFlush(context.match);
-        } else if (hasLifeReduced(artSummary) && evaluateLifeDefeat(context.match, userId, context.turnNumber)) {
+        } else if (hasLifeReduced(effectSummaryForChecks) && evaluateLifeDefeat(context.match, userId, context.turnNumber)) {
             touchUpdatedAt(context.match);
             matchRepository.saveAndFlush(context.match);
-        } else if (hasHolomemDowned(artSummary) && evaluateNoHolomemDefeat(context.match, userId, context.turnNumber)) {
+        } else if (
+            hasHolomemDowned(effectSummaryForChecks) && evaluateNoHolomemDefeat(context.match, userId, context.turnNumber)
+        ) {
             touchUpdatedAt(context.match);
             matchRepository.saveAndFlush(context.match);
         }
-        enqueueLifeLossSendCheerInteractions(context.match, matchId, artSummary, context.turnNumber);
+        enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummaryForChecks, context.turnNumber);
     }
 
     @Transactional
@@ -2923,6 +2973,7 @@ public class MatchActionService {
 
     private void finishMatchByDefeat(MatchEntity match, Long loserUserId, String reason, int turnNumber) {
         Long winnerUserId = resolveOpponent(match, loserUserId);
+        String reasonCode = standardizeReasonCode(reason);
         match.setStatus("finished");
         match.setWinnerUserId(winnerUserId);
         match.setFinishedAt(LocalDateTime.now());
@@ -2930,7 +2981,8 @@ public class MatchActionService {
         match.setCurrentPhase(MatchPhase.END.name());
 
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("reason", reason);
+        payload.put("reason", reasonCode);
+        payload.put("reasonCode", reasonCode);
         payload.put("loserUserId", loserUserId);
         payload.put("winnerUserId", winnerUserId);
         appendAction(
@@ -2940,9 +2992,22 @@ public class MatchActionService {
             toJson(payload),
             turnNumber
         );
+        appendRuleEvent(
+            match,
+            loserUserId,
+            turnNumber,
+            "MATCH_FINISHED",
+            reasonCode,
+            Map.of(
+                "winnerUserId", winnerUserId,
+                "loserUserId", loserUserId,
+                "draw", false
+            )
+        );
     }
 
     private void finishMatchAsDraw(MatchEntity match, Long actorUserId, String reason, int turnNumber) {
+        String reasonCode = standardizeReasonCode(reason);
         match.setStatus("finished");
         match.setWinnerUserId(null);
         match.setFinishedAt(LocalDateTime.now());
@@ -2950,7 +3015,8 @@ public class MatchActionService {
         match.setCurrentPhase(MatchPhase.END.name());
 
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("reason", reason);
+        payload.put("reason", reasonCode);
+        payload.put("reasonCode", reasonCode);
         payload.put("draw", true);
         payload.put("playerAId", match.getPlayerAId());
         payload.put("playerBId", match.getPlayerBId());
@@ -2960,6 +3026,18 @@ public class MatchActionService {
             "MATCH_FINISHED",
             toJson(payload),
             turnNumber
+        );
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("winnerUserId", null);
+        details.put("loserUserId", null);
+        details.put("draw", true);
+        appendRuleEvent(
+            match,
+            actorUserId,
+            turnNumber,
+            "MATCH_FINISHED",
+            reasonCode,
+            details
         );
     }
 
@@ -3066,6 +3144,25 @@ public class MatchActionService {
             }
         }
         return false;
+    }
+
+    private Map<String, Object> mergeEffectSummaryForChecks(
+        Map<String, Object> primary,
+        List<Map<String, Object>> additionalEffects
+    ) {
+        if ((additionalEffects == null || additionalEffects.isEmpty()) && primary != null) {
+            return primary;
+        }
+        Map<String, Object> merged = new LinkedHashMap<>();
+        List<Object> executed = new ArrayList<>();
+        if (primary != null) {
+            executed.add(primary);
+        }
+        if (additionalEffects != null) {
+            executed.addAll(additionalEffects);
+        }
+        merged.put("executedEffects", executed);
+        return merged;
     }
 
     private void enqueueLifeLossSendCheerInteractions(
@@ -4963,6 +5060,69 @@ public class MatchActionService {
         } catch (Exception ex) {
             return "{}";
         }
+    }
+
+    private String standardizeReasonCode(String reason) {
+        if (!StringUtils.hasText(reason)) {
+            return "UNKNOWN";
+        }
+        String normalized = reason.trim().toUpperCase(Locale.ROOT);
+        normalized = normalized.replaceAll("[^A-Z0-9_]", "_");
+        normalized = normalized.replaceAll("_+", "_");
+        normalized = normalized.replaceAll("^_+|_+$", "");
+        return StringUtils.hasText(normalized) ? normalized : "UNKNOWN";
+    }
+
+    private void appendRuleEvent(
+        MatchEntity match,
+        Long userId,
+        int turnNumber,
+        String eventType,
+        String reasonCode,
+        Map<String, Object> details
+    ) {
+        if (match == null) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("eventType", StringUtils.hasText(eventType) ? eventType : "UNKNOWN_EVENT");
+        payload.put("reasonCode", standardizeReasonCode(reasonCode));
+        payload.put("matchStatus", asString(match.getStatus()));
+        payload.put("currentPhase", asString(match.getCurrentPhase()));
+        payload.put("turnNumber", turnNumber);
+        if (details != null && !details.isEmpty()) {
+            payload.put("details", details);
+        }
+        appendAction(
+            match,
+            userId,
+            ACTION_TYPE_RULE_EVENT,
+            toJson(payload),
+            turnNumber
+        );
+    }
+
+    private List<Map<String, Object>> buildTriggeredResolutionOrder(
+        String firstStep,
+        int firstPriority,
+        Map<String, Object> firstSummary,
+        String secondStep,
+        int secondPriority,
+        Map<String, Object> secondSummary
+    ) {
+        List<Map<String, Object>> order = new ArrayList<>();
+        Map<String, Object> first = new LinkedHashMap<>();
+        first.put("step", firstStep);
+        first.put("priority", firstPriority);
+        first.put("applied", firstSummary != null);
+        order.add(first);
+
+        Map<String, Object> second = new LinkedHashMap<>();
+        second.put("step", secondStep);
+        second.put("priority", secondPriority);
+        second.put("applied", secondSummary != null);
+        order.add(second);
+        return order;
     }
 
     private void appendAction(

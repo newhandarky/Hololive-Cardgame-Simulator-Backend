@@ -40,6 +40,7 @@ public class MatchEffectService {
         "この(?:マスコット|ツール|ファン)が付いているホロメンのアーツ\\s*([+＋−-]\\s*\\d+)"
     );
     private static final Pattern BATON_TOUCH_COST_MODIFIER_PATTERN = Pattern.compile("バトンタッチに必要な無色\\s*[+＋]\\s*(\\d+)");
+    private static final Pattern DOWN_EXTRA_LIFE_PATTERN = Pattern.compile("ライフを\\s*(\\d+)\\s*つ?減ら");
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -64,149 +65,161 @@ public class MatchEffectService {
         List<String> effectTypes = resolveEffectTypes(effectType, effectNode);
         List<Map<String, Object>> executed = new ArrayList<>();
         List<String> unsupported = new ArrayList<>();
+        List<Map<String, Object>> skippedEffects = new ArrayList<>();
 
         for (String type : effectTypes) {
-            switch (type) {
-                case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, type, effectNode));
-                case "SEARCH" -> executed.add(
-                    executeSearchEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
-                );
-                case "RETURN_TO_HAND" -> executed.add(
-                    executeReturnToHandEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
-                );
-                case "RETURN_TO_DECK_TOP" -> executed.add(
-                    executeReturnToDeckTopEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
-                );
-                case "ADD_CHEER" -> executed.add(
-                    executeAddCheerEffect(
-                        matchId,
-                        userId,
-                        type,
-                        effectNode,
-                        targetType,
-                        targetHolomemCardInstanceId
-                    )
-                );
-                case "DAMAGE" -> executed.add(
-                    executeDamageEffect(
-                        matchId,
-                        userId,
-                        type,
-                        effectNode,
-                        targetType,
-                        targetHolomemCardInstanceId
-                    )
-                );
-                case "HEAL" -> executed.add(
-                    executeHealEffect(
-                        matchId,
-                        userId,
-                        type,
-                        effectNode,
-                        targetType,
-                        targetHolomemCardInstanceId
-                    )
-                );
-                case "REMOVE_CHEER" -> executed.add(
-                    executeRemoveCheerEffect(
-                        matchId,
-                        userId,
-                        type,
-                        effectNode,
-                        targetType,
-                        targetHolomemCardInstanceId
-                    )
-                );
-                case "REATTACH" -> executed.add(
-                    executeReattachEffect(
-                        matchId,
-                        userId,
-                        type,
-                        effectNode,
-                        targetType,
-                        targetHolomemCardInstanceId
-                    )
-                );
-                case "MOVE_ZONE" -> executed.add(
-                    executeMoveZoneEffect(
-                        matchId,
-                        userId,
-                        type,
-                        effectNode,
-                        targetType,
-                        targetHolomemCardInstanceId
-                    )
-                );
-                case "SUMMON_TO_STAGE" -> executed.add(
-                    executeSummonToStageEffect(matchId, userId, type, effectNode)
-                );
-                case "REVEAL_TO_ARCHIVE" -> executed.add(
-                    executeRevealToArchiveEffect(matchId, userId, type, effectNode)
-                );
-                case "BLOOM_FROM_ARCHIVE" -> executed.add(
-                    executeBloomFromArchiveEffect(matchId, userId, type, effectNode)
-                );
-                case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
-                    executeReturnCheerToDeckBottomEffect(matchId, userId, type, effectNode)
-                );
-                case "DISCARD_HAND" -> executed.add(
-                    executeDiscardHandEffect(matchId, userId, type, effectNode)
-                );
-                case "REST" -> executed.add(
-                    executeRestEffect(matchId, userId, type, effectNode, targetType, targetHolomemCardInstanceId)
-                );
-                case "SWAP_CENTER_BACK" -> executed.add(
-                    executeSwapCenterBackEffect(matchId, userId, type, effectNode)
-                );
-                case "MOVE_TO_HOLOPOWER" -> executed.add(
-                    executeMoveToHolopowerEffect(matchId, userId, type, effectNode)
-                );
-                case "DOWN_NO_LIFE" -> executed.add(
-                    executeDownNoLifeEffect(matchId, userId, type, effectNode)
-                );
-                case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
-                    executeBatonTouchCostModifierEffect(matchId, userId, type, effectNode, targetType, targetHolomemCardInstanceId)
-                );
-                case "ACTION_LOCK" -> executed.add(
-                    executeActionLockEffect(matchId, userId, type, effectNode)
-                );
-                case "ALLOW_EXTRA_BLOOM" -> executed.add(
-                    executeAllowExtraBloomEffect(matchId, userId, type, effectNode)
-                );
-                case "LOOK_TOP_DECK" -> executed.add(
-                    executeLookTopDeckEffect(matchId, userId, type, effectNode)
-                );
-                case "SWAP_WITH_COLLAB" -> executed.add(
-                    executeSwapWithCollabEffect(matchId, userId, type, effectNode, targetHolomemCardInstanceId)
-                );
-                case "BUFF", "DEBUFF" -> executed.add(
-                    executeBuffDebuffEffect(
-                        matchId,
-                        userId,
-                        type,
-                        effectNode,
-                        targetType
-                    )
-                );
-                case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
-                    executeMatchResultEffect(matchId, userId, type, effectNode)
-                );
-                case "UNIMPLEMENTED" -> executed.add(
-                    executeNoOpEffect(type, effectNode, "尚未落地，先保留 action 並不中斷流程")
-                );
-                default -> unsupported.add(type);
+            try {
+                switch (type) {
+                    case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, type, effectNode));
+                    case "SEARCH" -> executed.add(
+                        executeSearchEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
+                    );
+                    case "RETURN_TO_HAND" -> executed.add(
+                        executeReturnToHandEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
+                    );
+                    case "RETURN_TO_DECK_TOP" -> executed.add(
+                        executeReturnToDeckTopEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
+                    );
+                    case "ADD_CHEER" -> executed.add(
+                        executeAddCheerEffect(
+                            matchId,
+                            userId,
+                            type,
+                            effectNode,
+                            targetType,
+                            targetHolomemCardInstanceId
+                        )
+                    );
+                    case "DAMAGE" -> executed.add(
+                        executeDamageEffect(
+                            matchId,
+                            userId,
+                            type,
+                            effectNode,
+                            targetType,
+                            targetHolomemCardInstanceId
+                        )
+                    );
+                    case "HEAL" -> executed.add(
+                        executeHealEffect(
+                            matchId,
+                            userId,
+                            type,
+                            effectNode,
+                            targetType,
+                            targetHolomemCardInstanceId
+                        )
+                    );
+                    case "REMOVE_CHEER" -> executed.add(
+                        executeRemoveCheerEffect(
+                            matchId,
+                            userId,
+                            type,
+                            effectNode,
+                            targetType,
+                            targetHolomemCardInstanceId
+                        )
+                    );
+                    case "REATTACH" -> executed.add(
+                        executeReattachEffect(
+                            matchId,
+                            userId,
+                            type,
+                            effectNode,
+                            targetType,
+                            targetHolomemCardInstanceId
+                        )
+                    );
+                    case "MOVE_ZONE" -> executed.add(
+                        executeMoveZoneEffect(
+                            matchId,
+                            userId,
+                            type,
+                            effectNode,
+                            targetType,
+                            targetHolomemCardInstanceId
+                        )
+                    );
+                    case "SUMMON_TO_STAGE" -> executed.add(
+                        executeSummonToStageEffect(matchId, userId, type, effectNode)
+                    );
+                    case "REVEAL_TO_ARCHIVE" -> executed.add(
+                        executeRevealToArchiveEffect(matchId, userId, type, effectNode)
+                    );
+                    case "BLOOM_FROM_ARCHIVE" -> executed.add(
+                        executeBloomFromArchiveEffect(matchId, userId, type, effectNode)
+                    );
+                    case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
+                        executeReturnCheerToDeckBottomEffect(matchId, userId, type, effectNode)
+                    );
+                    case "DISCARD_HAND" -> executed.add(
+                        executeDiscardHandEffect(matchId, userId, type, effectNode)
+                    );
+                    case "REST" -> executed.add(
+                        executeRestEffect(matchId, userId, type, effectNode, targetType, targetHolomemCardInstanceId)
+                    );
+                    case "SWAP_CENTER_BACK" -> executed.add(
+                        executeSwapCenterBackEffect(matchId, userId, type, effectNode)
+                    );
+                    case "MOVE_TO_HOLOPOWER" -> executed.add(
+                        executeMoveToHolopowerEffect(matchId, userId, type, effectNode)
+                    );
+                    case "DOWN_NO_LIFE" -> executed.add(
+                        executeDownNoLifeEffect(matchId, userId, type, effectNode)
+                    );
+                    case "DOWN_EXTRA_LIFE" -> executed.add(
+                        executeDownExtraLifeEffect(matchId, userId, type, effectNode)
+                    );
+                    case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
+                        executeBatonTouchCostModifierEffect(matchId, userId, type, effectNode, targetType, targetHolomemCardInstanceId)
+                    );
+                    case "ACTION_LOCK" -> executed.add(
+                        executeActionLockEffect(matchId, userId, type, effectNode, targetType, targetHolomemCardInstanceId)
+                    );
+                    case "ALLOW_EXTRA_BLOOM" -> executed.add(
+                        executeAllowExtraBloomEffect(matchId, userId, type, effectNode)
+                    );
+                    case "LOOK_TOP_DECK" -> executed.add(
+                        executeLookTopDeckEffect(matchId, userId, type, effectNode)
+                    );
+                    case "SWAP_WITH_COLLAB" -> executed.add(
+                        executeSwapWithCollabEffect(matchId, userId, type, effectNode, targetHolomemCardInstanceId)
+                    );
+                    case "BUFF", "DEBUFF" -> executed.add(
+                        executeBuffDebuffEffect(
+                            matchId,
+                            userId,
+                            type,
+                            effectNode,
+                            targetType
+                        )
+                    );
+                    case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
+                        executeMatchResultEffect(matchId, userId, type, effectNode)
+                    );
+                    case "UNIMPLEMENTED" -> executed.add(
+                        executeNoOpEffect(type, effectNode, "尚未落地，先保留 action 並不中斷流程")
+                    );
+                    default -> {
+                        unsupported.add(type);
+                        Map<String, Object> skipped = buildSkippedEffect(type, "UNSUPPORTED_EFFECT");
+                        executed.add(skipped);
+                        skippedEffects.add(skipped);
+                    }
+                }
+            } catch (RuntimeException ex) {
+                Map<String, Object> skipped = buildSkippedEffect(type, ex.getMessage());
+                executed.add(skipped);
+                skippedEffects.add(skipped);
             }
-        }
-
-        if (executed.isEmpty()) {
-            String unknown = unsupported.isEmpty() ? "(empty)" : String.join(", ", unsupported);
-            throw new IllegalStateException("SUPPORT 效果尚未實作：" + unknown);
         }
 
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("requestedEffects", effectTypes);
         summary.put("executedEffects", executed);
         summary.put("unsupportedEffects", unsupported);
+        summary.put("skippedEffects", skippedEffects);
+        summary.put("partiallyResolved", !skippedEffects.isEmpty() || !unsupported.isEmpty());
         return summary;
     }
 
@@ -257,6 +270,185 @@ public class MatchEffectService {
         );
     }
 
+    public List<Map<String, Object>> applyGiftTriggeredEffectsOnArt(
+        Long matchId,
+        Long userId,
+        Long attackerCardInstanceId,
+        Long attackTargetCardInstanceId,
+        int turnNumber
+    ) {
+        if (matchId == null || userId == null || attackerCardInstanceId == null || turnNumber <= 0) {
+            return List.of();
+        }
+        List<Map<String, Object>> holders = jdbcTemplate.queryForList(
+            """
+            SELECT h.id AS holomem_id,
+                   h.match_card_id,
+                   h.card_id,
+                   h.zone,
+                   h.current_level,
+                   m.passive_effect_json::text AS passive_text
+            FROM match_holomems h
+            JOIN member_cards m ON m.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+            ORDER BY h.id
+            """,
+            matchId,
+            userId
+        );
+        if (holders.isEmpty()) {
+            return List.of();
+        }
+
+        List<Map<String, Object>> triggered = new ArrayList<>();
+        for (Map<String, Object> holder : holders) {
+            Long holderHolomemId = asLong(holder.get("holomem_id"));
+            Long holderCardInstanceId = asLong(holder.get("match_card_id"));
+            String holderZone = normalize(asText(holder.get("zone")));
+            String holderLevel = normalizeLevelType(asText(holder.get("current_level")));
+            String giftText = loadGiftEffectText(asText(holder.get("passive_text")));
+            if (!StringUtils.hasText(giftText)) {
+                continue;
+            }
+            if (!giftText.contains("アーツ") || !giftText.contains("使った時")) {
+                continue;
+            }
+            if (giftText.contains("このホロメンが") && !attackerCardInstanceId.equals(holderCardInstanceId)) {
+                continue;
+            }
+            if (giftText.contains("センターポジション限定") && !"CENTER".equals(holderZone)) {
+                continue;
+            }
+            if (giftText.contains("コラボポジション限定") && !"COLLAB".equals(holderZone)) {
+                continue;
+            }
+            if (giftText.contains("1stホロメンからBloomしているこのホロメン")) {
+                if (!Set.of("SECOND", "BUZZ").contains(holderLevel)) {
+                    continue;
+                }
+            }
+            if (giftText.contains("ターンに1回") && isGiftAlreadyUsedThisTurn(matchId, userId, turnNumber, holderHolomemId)) {
+                continue;
+            }
+
+            JsonNode giftNode = objectMapper.valueToTree(Map.of("rawText", giftText));
+            List<String> effectTypes = inferBloomEffectTypes(giftText);
+            List<Map<String, Object>> executed = new ArrayList<>();
+            List<String> unsupported = new ArrayList<>();
+            List<Map<String, Object>> skippedEffects = new ArrayList<>();
+            for (String effectType : effectTypes) {
+                String targetType = inferBloomTargetType(effectType);
+                try {
+                    switch (effectType) {
+                        case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, giftNode));
+                        case "SEARCH" -> executed.add(executeSearchEffect(matchId, userId, effectType, giftNode, null));
+                        case "RETURN_TO_HAND" -> executed.add(
+                            executeReturnToHandEffect(matchId, userId, effectType, giftNode, null)
+                        );
+                        case "RETURN_TO_DECK_TOP" -> executed.add(
+                            executeReturnToDeckTopEffect(matchId, userId, effectType, giftNode, null)
+                        );
+                        case "ADD_CHEER" -> executed.add(
+                            executeAddCheerEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                        );
+                        case "DAMAGE" -> executed.add(
+                            executeDamageEffect(
+                                matchId,
+                                userId,
+                                effectType,
+                                giftNode,
+                                targetType,
+                                attackTargetCardInstanceId
+                            )
+                        );
+                        case "REATTACH" -> executed.add(
+                            executeReattachEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                        );
+                        case "SUMMON_TO_STAGE" -> executed.add(executeSummonToStageEffect(matchId, userId, effectType, giftNode));
+                        case "REVEAL_TO_ARCHIVE" -> executed.add(
+                            executeRevealToArchiveEffect(matchId, userId, effectType, giftNode)
+                        );
+                        case "BLOOM_FROM_ARCHIVE" -> executed.add(
+                            executeBloomFromArchiveEffect(matchId, userId, effectType, giftNode)
+                        );
+                        case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
+                            executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, giftNode)
+                        );
+                        case "DISCARD_HAND" -> executed.add(executeDiscardHandEffect(matchId, userId, effectType, giftNode));
+                        case "REST" -> executed.add(
+                            executeRestEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                        );
+                        case "SWAP_CENTER_BACK" -> executed.add(
+                            executeSwapCenterBackEffect(matchId, userId, effectType, giftNode)
+                        );
+                        case "MOVE_TO_HOLOPOWER" -> executed.add(
+                            executeMoveToHolopowerEffect(matchId, userId, effectType, giftNode)
+                        );
+                        case "DOWN_NO_LIFE" -> executed.add(
+                            executeDownNoLifeEffect(matchId, userId, effectType, giftNode)
+                        );
+                        case "DOWN_EXTRA_LIFE" -> executed.add(
+                            executeDownExtraLifeEffect(matchId, userId, effectType, giftNode)
+                        );
+                        case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
+                            executeBatonTouchCostModifierEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                        );
+                        case "ACTION_LOCK" -> executed.add(
+                            executeActionLockEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                        );
+                        case "ALLOW_EXTRA_BLOOM" -> executed.add(
+                            executeAllowExtraBloomEffect(matchId, userId, effectType, giftNode)
+                        );
+                        case "LOOK_TOP_DECK" -> executed.add(
+                            executeLookTopDeckEffect(matchId, userId, effectType, giftNode)
+                        );
+                        case "SWAP_WITH_COLLAB" -> executed.add(
+                            executeSwapWithCollabEffect(matchId, userId, effectType, giftNode, holderCardInstanceId)
+                        );
+                        case "HEAL" -> executed.add(
+                            executeHealEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                        );
+                        case "BUFF", "DEBUFF" -> executed.add(
+                            executeBuffDebuffEffect(matchId, userId, effectType, giftNode, targetType)
+                        );
+                        case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
+                            executeMatchResultEffect(matchId, userId, effectType, giftNode)
+                        );
+                        case "UNIMPLEMENTED" -> executed.add(
+                            executeNoOpEffect(effectType, giftNode, "尚未支援的 GIFT 效果")
+                        );
+                        default -> {
+                            unsupported.add(effectType);
+                            Map<String, Object> skipped = buildSkippedEffect(effectType, "UNSUPPORTED_EFFECT");
+                            executed.add(skipped);
+                            skippedEffects.add(skipped);
+                        }
+                    }
+                } catch (RuntimeException ex) {
+                    Map<String, Object> skipped = buildSkippedEffect(effectType, ex.getMessage());
+                    executed.add(skipped);
+                    skippedEffects.add(skipped);
+                }
+            }
+
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("triggerType", "ART_USED");
+            summary.put("giftHolderHolomemId", holderHolomemId);
+            summary.put("giftHolderCardInstanceId", holderCardInstanceId);
+            summary.put("giftHolderCardId", asText(holder.get("card_id")));
+            summary.put("giftHolderZone", holderZone);
+            summary.put("rawText", giftText);
+            summary.put("requestedEffects", effectTypes);
+            summary.put("executedEffects", executed);
+            summary.put("unsupportedEffects", unsupported);
+            summary.put("skippedEffects", skippedEffects);
+            summary.put("partiallyResolved", !skippedEffects.isEmpty() || !unsupported.isEmpty());
+            triggered.add(summary);
+        }
+        return triggered;
+    }
+
     public int resolveAttachedSupportHpBonus(Long matchId, Long matchHolomemId) {
         return resolveAttachedSupportStatBonus(matchId, matchHolomemId, ATTACHED_SUPPORT_HP_PATTERN);
     }
@@ -285,144 +477,166 @@ public class MatchEffectService {
         List<String> effectTypes = bloomPlan.effectTypes();
         List<Map<String, Object>> executed = new ArrayList<>();
         List<String> unsupported = new ArrayList<>();
+        List<Map<String, Object>> skippedEffects = new ArrayList<>();
         Integer diceRoll = bloomPlan.diceRoll();
         JsonNode bloomEffectNode = bloomPlan.effectNode();
 
         for (String effectType : effectTypes) {
             String targetType = inferBloomTargetType(effectType);
-            switch (effectType) {
-                case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, bloomEffectNode));
-                case "SEARCH" -> executed.add(
-                    executeSearchEffect(matchId, userId, effectType, bloomEffectNode, null)
-                );
-                case "RETURN_TO_HAND" -> executed.add(
-                    executeReturnToHandEffect(matchId, userId, effectType, bloomEffectNode, null)
-                );
-                case "RETURN_TO_DECK_TOP" -> executed.add(
-                    executeReturnToDeckTopEffect(matchId, userId, effectType, bloomEffectNode, null)
-                );
-                case "ADD_CHEER" -> executed.add(
-                    executeAddCheerEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        bloomEffectNode,
-                        targetType,
-                        selfHolomemCardInstanceId
-                    )
-                );
-                case "DAMAGE" -> executed.add(
-                    executeDamageEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        bloomEffectNode,
-                        targetType,
-                        null
-                    )
-                );
-                case "REATTACH" -> executed.add(
-                    executeReattachEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        bloomEffectNode,
-                        targetType,
-                        selfHolomemCardInstanceId
-                    )
-                );
-                case "SUMMON_TO_STAGE" -> executed.add(
-                    executeSummonToStageEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "REVEAL_TO_ARCHIVE" -> executed.add(
-                    executeRevealToArchiveEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "BLOOM_FROM_ARCHIVE" -> executed.add(
-                    executeBloomFromArchiveEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
-                    executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "DISCARD_HAND" -> executed.add(
-                    executeDiscardHandEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "REST" -> executed.add(
-                    executeRestEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        bloomEffectNode,
-                        targetType,
-                        selfHolomemCardInstanceId
-                    )
-                );
-                case "SWAP_CENTER_BACK" -> executed.add(
-                    executeSwapCenterBackEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "MOVE_TO_HOLOPOWER" -> executed.add(
-                    executeMoveToHolopowerEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "DOWN_NO_LIFE" -> executed.add(
-                    executeDownNoLifeEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
-                    executeBatonTouchCostModifierEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        bloomEffectNode,
-                        targetType,
-                        selfHolomemCardInstanceId
-                    )
-                );
-                case "ACTION_LOCK" -> executed.add(
-                    executeActionLockEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "ALLOW_EXTRA_BLOOM" -> executed.add(
-                    executeAllowExtraBloomEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "LOOK_TOP_DECK" -> executed.add(
-                    executeLookTopDeckEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "MOVE_ZONE" -> executed.add(
-                    executeMoveZoneEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        bloomEffectNode,
-                        targetType,
-                        null
-                    )
-                );
-                case "SWAP_WITH_COLLAB" -> executed.add(
-                    executeSwapWithCollabEffect(matchId, userId, effectType, bloomEffectNode, selfHolomemCardInstanceId)
-                );
-                case "HEAL" -> executed.add(
-                    executeHealEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        bloomEffectNode,
-                        targetType,
-                        selfHolomemCardInstanceId
-                    )
-                );
-                case "BUFF", "DEBUFF" -> executed.add(
-                    executeBuffDebuffEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        bloomEffectNode,
-                        targetType
-                    )
-                );
-                case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
-                    executeMatchResultEffect(matchId, userId, effectType, bloomEffectNode)
-                );
-                case "UNIMPLEMENTED" -> executed.add(
-                    executeNoOpEffect(effectType, bloomEffectNode, "尚未支援的 BLOOM 效果")
-                );
-                default -> unsupported.add(effectType);
+            try {
+                switch (effectType) {
+                    case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, bloomEffectNode));
+                    case "SEARCH" -> executed.add(
+                        executeSearchEffect(matchId, userId, effectType, bloomEffectNode, null)
+                    );
+                    case "RETURN_TO_HAND" -> executed.add(
+                        executeReturnToHandEffect(matchId, userId, effectType, bloomEffectNode, null)
+                    );
+                    case "RETURN_TO_DECK_TOP" -> executed.add(
+                        executeReturnToDeckTopEffect(matchId, userId, effectType, bloomEffectNode, null)
+                    );
+                    case "ADD_CHEER" -> executed.add(
+                        executeAddCheerEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "DAMAGE" -> executed.add(
+                        executeDamageEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode,
+                            targetType,
+                            null
+                        )
+                    );
+                    case "REATTACH" -> executed.add(
+                        executeReattachEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "SUMMON_TO_STAGE" -> executed.add(
+                        executeSummonToStageEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "REVEAL_TO_ARCHIVE" -> executed.add(
+                        executeRevealToArchiveEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "BLOOM_FROM_ARCHIVE" -> executed.add(
+                        executeBloomFromArchiveEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
+                        executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "DISCARD_HAND" -> executed.add(
+                        executeDiscardHandEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "REST" -> executed.add(
+                        executeRestEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "SWAP_CENTER_BACK" -> executed.add(
+                        executeSwapCenterBackEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "MOVE_TO_HOLOPOWER" -> executed.add(
+                        executeMoveToHolopowerEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "DOWN_NO_LIFE" -> executed.add(
+                        executeDownNoLifeEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "DOWN_EXTRA_LIFE" -> executed.add(
+                        executeDownExtraLifeEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
+                        executeBatonTouchCostModifierEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "ACTION_LOCK" -> executed.add(
+                        executeActionLockEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "ALLOW_EXTRA_BLOOM" -> executed.add(
+                        executeAllowExtraBloomEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "LOOK_TOP_DECK" -> executed.add(
+                        executeLookTopDeckEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "MOVE_ZONE" -> executed.add(
+                        executeMoveZoneEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode,
+                            targetType,
+                            null
+                        )
+                    );
+                    case "SWAP_WITH_COLLAB" -> executed.add(
+                        executeSwapWithCollabEffect(matchId, userId, effectType, bloomEffectNode, selfHolomemCardInstanceId)
+                    );
+                    case "HEAL" -> executed.add(
+                        executeHealEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "BUFF", "DEBUFF" -> executed.add(
+                        executeBuffDebuffEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode,
+                            targetType
+                        )
+                    );
+                    case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
+                        executeMatchResultEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
+                    case "UNIMPLEMENTED" -> executed.add(
+                        executeNoOpEffect(effectType, bloomEffectNode, "尚未支援的 BLOOM 效果")
+                    );
+                    default -> {
+                        unsupported.add(effectType);
+                        Map<String, Object> skipped = buildSkippedEffect(effectType, "UNSUPPORTED_EFFECT");
+                        executed.add(skipped);
+                        skippedEffects.add(skipped);
+                    }
+                }
+            } catch (RuntimeException ex) {
+                Map<String, Object> skipped = buildSkippedEffect(effectType, ex.getMessage());
+                executed.add(skipped);
+                skippedEffects.add(skipped);
             }
         }
 
@@ -431,6 +645,8 @@ public class MatchEffectService {
         summary.put("requestedEffects", effectTypes);
         summary.put("executedEffects", executed);
         summary.put("unsupportedEffects", unsupported);
+        summary.put("skippedEffects", skippedEffects);
+        summary.put("partiallyResolved", !skippedEffects.isEmpty() || !unsupported.isEmpty());
         summary.put("rawText", bloomPlan.rawText());
         if (diceRoll != null) {
             summary.put("diceRoll", diceRoll);
@@ -458,144 +674,166 @@ public class MatchEffectService {
         List<String> effectTypes = collabPlan.effectTypes();
         List<Map<String, Object>> executed = new ArrayList<>();
         List<String> unsupported = new ArrayList<>();
+        List<Map<String, Object>> skippedEffects = new ArrayList<>();
         Integer diceRoll = collabPlan.diceRoll();
         JsonNode collabEffectNode = collabPlan.effectNode();
 
         for (String effectType : effectTypes) {
             String targetType = inferBloomTargetType(effectType);
-            switch (effectType) {
-                case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, collabEffectNode));
-                case "SEARCH" -> executed.add(
-                    executeSearchEffect(matchId, userId, effectType, collabEffectNode, null)
-                );
-                case "RETURN_TO_HAND" -> executed.add(
-                    executeReturnToHandEffect(matchId, userId, effectType, collabEffectNode, null)
-                );
-                case "RETURN_TO_DECK_TOP" -> executed.add(
-                    executeReturnToDeckTopEffect(matchId, userId, effectType, collabEffectNode, null)
-                );
-                case "ADD_CHEER" -> executed.add(
-                    executeAddCheerEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        collabEffectNode,
-                        targetType,
-                        selfHolomemCardInstanceId
-                    )
-                );
-                case "DAMAGE" -> executed.add(
-                    executeDamageEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        collabEffectNode,
-                        targetType,
-                        null
-                    )
-                );
-                case "REATTACH" -> executed.add(
-                    executeReattachEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        collabEffectNode,
-                        targetType,
-                        selfHolomemCardInstanceId
-                    )
-                );
-                case "SUMMON_TO_STAGE" -> executed.add(
-                    executeSummonToStageEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "REVEAL_TO_ARCHIVE" -> executed.add(
-                    executeRevealToArchiveEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "BLOOM_FROM_ARCHIVE" -> executed.add(
-                    executeBloomFromArchiveEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
-                    executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "DISCARD_HAND" -> executed.add(
-                    executeDiscardHandEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "REST" -> executed.add(
-                    executeRestEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        collabEffectNode,
-                        targetType,
-                        selfHolomemCardInstanceId
-                    )
-                );
-                case "SWAP_CENTER_BACK" -> executed.add(
-                    executeSwapCenterBackEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "MOVE_TO_HOLOPOWER" -> executed.add(
-                    executeMoveToHolopowerEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "DOWN_NO_LIFE" -> executed.add(
-                    executeDownNoLifeEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
-                    executeBatonTouchCostModifierEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        collabEffectNode,
-                        targetType,
-                        selfHolomemCardInstanceId
-                    )
-                );
-                case "ACTION_LOCK" -> executed.add(
-                    executeActionLockEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "ALLOW_EXTRA_BLOOM" -> executed.add(
-                    executeAllowExtraBloomEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "LOOK_TOP_DECK" -> executed.add(
-                    executeLookTopDeckEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "MOVE_ZONE" -> executed.add(
-                    executeMoveZoneEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        collabEffectNode,
-                        targetType,
-                        null
-                    )
-                );
-                case "SWAP_WITH_COLLAB" -> executed.add(
-                    executeSwapWithCollabEffect(matchId, userId, effectType, collabEffectNode, selfHolomemCardInstanceId)
-                );
-                case "HEAL" -> executed.add(
-                    executeHealEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        collabEffectNode,
-                        targetType,
-                        selfHolomemCardInstanceId
-                    )
-                );
-                case "BUFF", "DEBUFF" -> executed.add(
-                    executeBuffDebuffEffect(
-                        matchId,
-                        userId,
-                        effectType,
-                        collabEffectNode,
-                        targetType
-                    )
-                );
-                case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
-                    executeMatchResultEffect(matchId, userId, effectType, collabEffectNode)
-                );
-                case "UNIMPLEMENTED" -> executed.add(
-                    executeNoOpEffect(effectType, collabEffectNode, "尚未支援的 COLLAB 效果")
-                );
-                default -> unsupported.add(effectType);
+            try {
+                switch (effectType) {
+                    case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, collabEffectNode));
+                    case "SEARCH" -> executed.add(
+                        executeSearchEffect(matchId, userId, effectType, collabEffectNode, null)
+                    );
+                    case "RETURN_TO_HAND" -> executed.add(
+                        executeReturnToHandEffect(matchId, userId, effectType, collabEffectNode, null)
+                    );
+                    case "RETURN_TO_DECK_TOP" -> executed.add(
+                        executeReturnToDeckTopEffect(matchId, userId, effectType, collabEffectNode, null)
+                    );
+                    case "ADD_CHEER" -> executed.add(
+                        executeAddCheerEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            collabEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "DAMAGE" -> executed.add(
+                        executeDamageEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            collabEffectNode,
+                            targetType,
+                            null
+                        )
+                    );
+                    case "REATTACH" -> executed.add(
+                        executeReattachEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            collabEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "SUMMON_TO_STAGE" -> executed.add(
+                        executeSummonToStageEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "REVEAL_TO_ARCHIVE" -> executed.add(
+                        executeRevealToArchiveEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "BLOOM_FROM_ARCHIVE" -> executed.add(
+                        executeBloomFromArchiveEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
+                        executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "DISCARD_HAND" -> executed.add(
+                        executeDiscardHandEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "REST" -> executed.add(
+                        executeRestEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            collabEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "SWAP_CENTER_BACK" -> executed.add(
+                        executeSwapCenterBackEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "MOVE_TO_HOLOPOWER" -> executed.add(
+                        executeMoveToHolopowerEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "DOWN_NO_LIFE" -> executed.add(
+                        executeDownNoLifeEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "DOWN_EXTRA_LIFE" -> executed.add(
+                        executeDownExtraLifeEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
+                        executeBatonTouchCostModifierEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            collabEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "ACTION_LOCK" -> executed.add(
+                        executeActionLockEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            collabEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "ALLOW_EXTRA_BLOOM" -> executed.add(
+                        executeAllowExtraBloomEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "LOOK_TOP_DECK" -> executed.add(
+                        executeLookTopDeckEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "MOVE_ZONE" -> executed.add(
+                        executeMoveZoneEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            collabEffectNode,
+                            targetType,
+                            null
+                        )
+                    );
+                    case "SWAP_WITH_COLLAB" -> executed.add(
+                        executeSwapWithCollabEffect(matchId, userId, effectType, collabEffectNode, selfHolomemCardInstanceId)
+                    );
+                    case "HEAL" -> executed.add(
+                        executeHealEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            collabEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "BUFF", "DEBUFF" -> executed.add(
+                        executeBuffDebuffEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            collabEffectNode,
+                            targetType
+                        )
+                    );
+                    case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
+                        executeMatchResultEffect(matchId, userId, effectType, collabEffectNode)
+                    );
+                    case "UNIMPLEMENTED" -> executed.add(
+                        executeNoOpEffect(effectType, collabEffectNode, "尚未支援的 COLLAB 效果")
+                    );
+                    default -> {
+                        unsupported.add(effectType);
+                        Map<String, Object> skipped = buildSkippedEffect(effectType, "UNSUPPORTED_EFFECT");
+                        executed.add(skipped);
+                        skippedEffects.add(skipped);
+                    }
+                }
+            } catch (RuntimeException ex) {
+                Map<String, Object> skipped = buildSkippedEffect(effectType, ex.getMessage());
+                executed.add(skipped);
+                skippedEffects.add(skipped);
             }
         }
 
@@ -604,6 +842,8 @@ public class MatchEffectService {
         summary.put("requestedEffects", effectTypes);
         summary.put("executedEffects", executed);
         summary.put("unsupportedEffects", unsupported);
+        summary.put("skippedEffects", skippedEffects);
+        summary.put("partiallyResolved", !skippedEffects.isEmpty() || !unsupported.isEmpty());
         summary.put("rawText", collabPlan.rawText());
         if (diceRoll != null) {
             summary.put("diceRoll", diceRoll);
@@ -680,14 +920,7 @@ public class MatchEffectService {
         int searchCount = Math.max(requestedCount, 1);
         SearchCriteria criteria = resolveSearchCriteria(effectNode);
 
-        List<Map<String, Object>> candidates = loadSearchCandidates(
-            matchId,
-            userId,
-            criteria.cardType(),
-            criteria.levelType(),
-            criteria.tag(),
-            criteria.nameContains()
-        );
+        List<Map<String, Object>> candidates = loadSearchCandidates(matchId, userId, criteria);
 
         List<Map<String, Object>> selected = selectSearchCards(candidates, selectedCardInstanceIds, searchCount);
         List<Long> movedCardInstanceIds = new ArrayList<>();
@@ -723,12 +956,6 @@ public class MatchEffectService {
             movedCardIds.add(cardId);
         }
 
-        Map<String, Object> criteriaSummary = new LinkedHashMap<>();
-        criteriaSummary.put("cardType", criteria.cardType());
-        criteriaSummary.put("levelType", criteria.levelType());
-        criteriaSummary.put("tag", criteria.tag());
-        criteriaSummary.put("nameContains", criteria.nameContains());
-
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
         summary.put("searchRequested", searchCount);
@@ -737,7 +964,7 @@ public class MatchEffectService {
         summary.put("selectedByClient", selectedCardInstanceIds != null && !selectedCardInstanceIds.isEmpty());
         summary.put("searchedCardInstanceIds", movedCardInstanceIds);
         summary.put("searchedCardIds", movedCardIds);
-        summary.put("criteria", criteriaSummary);
+        summary.put("criteria", buildCriteriaSummary(criteria));
         return summary;
     }
 
@@ -761,10 +988,7 @@ public class MatchEffectService {
             matchId,
             userId,
             "ARCHIVE",
-            criteria.cardType(),
-            criteria.levelType(),
-            criteria.tag(),
-            criteria.nameContains(),
+            criteria,
             excludeLimitedSupport
         );
         List<Map<String, Object>> selected = selectSearchCards(candidates, selectedCardInstanceIds, returnCount);
@@ -802,13 +1026,6 @@ public class MatchEffectService {
             movedCardIds.add(cardId);
         }
 
-        Map<String, Object> criteriaSummary = new LinkedHashMap<>();
-        criteriaSummary.put("cardType", criteria.cardType());
-        criteriaSummary.put("levelType", criteria.levelType());
-        criteriaSummary.put("tag", criteria.tag());
-        criteriaSummary.put("nameContains", criteria.nameContains());
-        criteriaSummary.put("excludeLimitedSupport", excludeLimitedSupport);
-
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
         summary.put("returnRequested", returnCount);
@@ -817,6 +1034,8 @@ public class MatchEffectService {
         summary.put("selectedByClient", selectedCardInstanceIds != null && !selectedCardInstanceIds.isEmpty());
         summary.put("returnedCardInstanceIds", movedCardInstanceIds);
         summary.put("returnedCardIds", movedCardIds);
+        Map<String, Object> criteriaSummary = buildCriteriaSummary(criteria);
+        criteriaSummary.put("excludeLimitedSupport", excludeLimitedSupport);
         summary.put("criteria", criteriaSummary);
         return summary;
     }
@@ -836,16 +1055,7 @@ public class MatchEffectService {
         int returnCount = Math.max(requestedCount, 1);
         SearchCriteria criteria = resolveSearchCriteria(effectNode);
 
-        List<Map<String, Object>> candidates = loadCandidatesFromZone(
-            matchId,
-            userId,
-            "ARCHIVE",
-            criteria.cardType(),
-            criteria.levelType(),
-            criteria.tag(),
-            criteria.nameContains(),
-            false
-        );
+        List<Map<String, Object>> candidates = loadCandidatesFromZone(matchId, userId, "ARCHIVE", criteria, false);
         List<Map<String, Object>> selected = selectSearchCards(candidates, selectedCardInstanceIds, returnCount);
 
         List<Long> movedCardInstanceIds = new ArrayList<>();
@@ -893,12 +1103,6 @@ public class MatchEffectService {
             movedCardIds.add(cardId);
         }
 
-        Map<String, Object> criteriaSummary = new LinkedHashMap<>();
-        criteriaSummary.put("cardType", criteria.cardType());
-        criteriaSummary.put("levelType", criteria.levelType());
-        criteriaSummary.put("tag", criteria.tag());
-        criteriaSummary.put("nameContains", criteria.nameContains());
-
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
         summary.put("returnRequested", returnCount);
@@ -907,7 +1111,7 @@ public class MatchEffectService {
         summary.put("selectedByClient", selectedCardInstanceIds != null && !selectedCardInstanceIds.isEmpty());
         summary.put("returnedCardInstanceIds", movedCardInstanceIds);
         summary.put("returnedCardIds", movedCardIds);
-        summary.put("criteria", criteriaSummary);
+        summary.put("criteria", buildCriteriaSummary(criteria));
         return summary;
     }
 
@@ -1136,16 +1340,19 @@ public class MatchEffectService {
             "MEMBER",
             resolved.levelType(),
             resolved.tag(),
-            resolved.nameContains()
+            resolved.nameContains(),
+            resolved.color(),
+            resolved.rested(),
+            resolved.minRemainHp(),
+            resolved.maxRemainHp(),
+            resolved.allOf(),
+            resolved.anyOf()
         );
         List<Map<String, Object>> candidates = loadCandidatesFromZone(
             matchId,
             userId,
             "DECK",
-            criteria.cardType(),
-            criteria.levelType(),
-            criteria.tag(),
-            criteria.nameContains(),
+            criteria,
             false
         );
         List<Map<String, Object>> selected = candidates.subList(0, Math.min(summonCount, candidates.size()));
@@ -1224,12 +1431,6 @@ public class MatchEffectService {
             summonedZones.add(targetZone);
         }
 
-        Map<String, Object> criteriaSummary = new LinkedHashMap<>();
-        criteriaSummary.put("cardType", criteria.cardType());
-        criteriaSummary.put("levelType", criteria.levelType());
-        criteriaSummary.put("tag", criteria.tag());
-        criteriaSummary.put("nameContains", criteria.nameContains());
-
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
         summary.put("summonRequested", summonCount);
@@ -1239,7 +1440,7 @@ public class MatchEffectService {
         summary.put("summonedHolomemIds", summonedHolomemIds);
         summary.put("summonedCardIds", summonedCardIds);
         summary.put("summonedZones", summonedZones);
-        summary.put("criteria", criteriaSummary);
+        summary.put("criteria", buildCriteriaSummary(criteria));
         return summary;
     }
 
@@ -1256,10 +1457,7 @@ public class MatchEffectService {
             matchId,
             userId,
             "DECK",
-            criteria.cardType(),
-            criteria.levelType(),
-            criteria.tag(),
-            criteria.nameContains(),
+            criteria,
             false
         );
         List<Map<String, Object>> selected = candidates.subList(0, Math.min(archiveCount, candidates.size()));
@@ -1297,12 +1495,6 @@ public class MatchEffectService {
             archivedCardIds.add(cardId);
         }
 
-        Map<String, Object> criteriaSummary = new LinkedHashMap<>();
-        criteriaSummary.put("cardType", criteria.cardType());
-        criteriaSummary.put("levelType", criteria.levelType());
-        criteriaSummary.put("tag", criteria.tag());
-        criteriaSummary.put("nameContains", criteria.nameContains());
-
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
         summary.put("archiveRequested", archiveCount);
@@ -1310,7 +1502,7 @@ public class MatchEffectService {
         summary.put("archiveApplied", archivedCardInstanceIds.size());
         summary.put("archivedCardInstanceIds", archivedCardInstanceIds);
         summary.put("archivedCardIds", archivedCardIds);
-        summary.put("criteria", criteriaSummary);
+        summary.put("criteria", buildCriteriaSummary(criteria));
         return summary;
     }
 
@@ -1332,9 +1524,17 @@ public class MatchEffectService {
                    h.current_level,
                    h.damage_taken,
                    h.last_bloom_turn,
-                   c.name
+                   h.is_rested,
+                   'MEMBER' AS card_type,
+                   h.current_level AS level_type,
+                   c.name,
+                   c.tags_json::text AS tags_json,
+                   m.main_color,
+                   m.sub_color,
+                   GREATEST(COALESCE(m.hp, 0) - COALESCE(h.damage_taken, 0), 0) AS remain_hp
             FROM match_holomems h
             JOIN cards c ON c.card_id = h.card_id
+            LEFT JOIN member_cards m ON m.card_id = h.card_id
             WHERE h.match_id = ?
               AND h.owner_user_id = ?
               AND h.zone IN ('CENTER','COLLAB','BACK')
@@ -1359,7 +1559,14 @@ public class MatchEffectService {
                 row.put("current_level", rs.getString("current_level"));
                 row.put("damage_taken", rs.getInt("damage_taken"));
                 row.put("last_bloom_turn", rs.getObject("last_bloom_turn"));
+                row.put("is_rested", rs.getObject("is_rested"));
+                row.put("card_type", rs.getString("card_type"));
+                row.put("level_type", rs.getString("level_type"));
                 row.put("name", rs.getString("name"));
+                row.put("tags_json", rs.getString("tags_json"));
+                row.put("main_color", rs.getString("main_color"));
+                row.put("sub_color", rs.getString("sub_color"));
+                row.put("remain_hp", rs.getObject("remain_hp"));
                 return row;
             },
             matchId,
@@ -1379,6 +1586,7 @@ public class MatchEffectService {
                 }
                 return true;
             })
+            .filter(row -> matchesSearchCriteria(row, criteria))
             .findFirst()
             .orElse(null);
         if (target == null) {
@@ -1956,12 +2164,63 @@ public class MatchEffectService {
         summary.put("effectType", effectType);
         summary.put("applied", true);
         summary.put("targetHolomemId", targetHolomemId);
-        summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
+        summary.put("targetHolomemCardInstanceId", targetCardInstanceId);
+        summary.put("targetOwnerUserId", opponentUserId);
         summary.put("downed", true);
         summary.put("lifeReduced", false);
         summary.put("archivedCheerCardInstanceIds", archivedCheerCardInstanceIds);
         summary.put("archivedSupportCardInstanceIds", archivedSupportCardInstanceIds);
         summary.put("archivedHolomemCardInstanceIds", archivedHolomemCardInstanceIds);
+        return summary;
+    }
+
+    private Map<String, Object> executeDownExtraLifeEffect(
+        Long matchId,
+        Long userId,
+        String effectType,
+        JsonNode effectNode
+    ) {
+        Map<String, Object> summary = executeDownNoLifeEffect(matchId, userId, effectType, effectNode);
+        if (!toBoolean(summary.get("applied")) || !toBoolean(summary.get("downed"))) {
+            return summary;
+        }
+        Long targetOwnerUserId = asLong(summary.get("targetOwnerUserId"));
+        Long targetHolomemCardInstanceId = asLong(summary.get("targetHolomemCardInstanceId"));
+        if ((targetOwnerUserId == null || targetOwnerUserId <= 0) && targetHolomemCardInstanceId != null && targetHolomemCardInstanceId > 0) {
+            targetOwnerUserId = jdbcTemplate.query(
+                """
+                SELECT owner_user_id
+                FROM match_cards
+                WHERE match_id = ?
+                  AND id = ?
+                LIMIT 1
+                """,
+                rs -> rs.next() ? rs.getLong("owner_user_id") : null,
+                matchId,
+                targetHolomemCardInstanceId
+            );
+        }
+        if (targetOwnerUserId == null || targetOwnerUserId <= 0) {
+            return summary;
+        }
+
+        int requestedLifeLoss = resolveDownExtraLifeCount(effectNode);
+        List<Long> lostLifeCardInstanceIds = new ArrayList<>();
+        for (int index = 0; index < requestedLifeLoss; index += 1) {
+            Long lostLifeCardInstanceId = loseLifeOnce(matchId, targetOwnerUserId);
+            if (lostLifeCardInstanceId == null) {
+                break;
+            }
+            lostLifeCardInstanceIds.add(lostLifeCardInstanceId);
+        }
+
+        if (!lostLifeCardInstanceIds.isEmpty()) {
+            summary.put("lifeReduced", true);
+            summary.put("lostLifeCardInstanceId", lostLifeCardInstanceIds.get(0));
+            summary.put("lostLifeCardInstanceIds", lostLifeCardInstanceIds);
+        }
+        summary.put("extraLifeLossRequested", requestedLifeLoss);
+        summary.put("extraLifeLossApplied", lostLifeCardInstanceIds.size());
         return summary;
     }
 
@@ -2160,7 +2419,9 @@ public class MatchEffectService {
         Long matchId,
         Long userId,
         String effectType,
-        JsonNode effectNode
+        JsonNode effectNode,
+        String targetType,
+        Long targetHolomemCardInstanceId
     ) {
         String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
         List<String> actions = new ArrayList<>();
@@ -2172,6 +2433,9 @@ public class MatchEffectService {
         }
         if (rawText.contains("交代") && rawText.contains("できない")) {
             actions.add("SWAP");
+        }
+        if ((rawText.contains("Bloom") || rawText.contains("ブルーム")) && rawText.contains("できない")) {
+            actions.add("BLOOM");
         }
         if (actions.isEmpty()) {
             return executeNoOpEffect(effectType, effectNode, "無可套用的行動封鎖條件");
@@ -2191,6 +2455,28 @@ public class MatchEffectService {
         }
         int currentTurn = resolveCurrentTurnNumber(matchId);
         int expiresTurn = rawText.contains("次の相手のターン") ? currentTurn + 1 : currentTurn;
+        Long targetHolomemId = null;
+        boolean lockSpecificHolomem = rawText.contains("このホロメン")
+            || rawText.contains("このカード")
+            || rawText.contains("選んだホロメン")
+            || rawText.contains("そのホロメン");
+        if (lockSpecificHolomem) {
+            targetHolomemId = resolveEffectTargetHolomemId(
+                matchId,
+                userId,
+                targetType,
+                targetHolomemCardInstanceId,
+                true
+            );
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("actions", actions);
+        payload.put("zones", zones);
+        payload.put("rawText", rawText);
+        if (targetHolomemId != null && targetHolomemId > 0) {
+            payload.put("targetHolomemId", targetHolomemId);
+            payload.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
+        }
         int inserted = jdbcTemplate.update(
             """
             INSERT INTO match_turn_effects (
@@ -2209,13 +2495,7 @@ public class MatchEffectService {
             affectedUserId,
             "DEBUFF",
             expiresTurn,
-            toJsonString(
-                Map.of(
-                    "actions", actions,
-                    "zones", zones,
-                    "rawText", rawText
-                )
-            )
+            toJsonString(payload)
         );
 
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -2224,6 +2504,8 @@ public class MatchEffectService {
         summary.put("statType", "ACTION_LOCK");
         summary.put("actions", actions);
         summary.put("zones", zones);
+        summary.put("targetHolomemId", targetHolomemId);
+        summary.put("targetHolomemCardInstanceId", targetHolomemId == null ? null : resolveHolomemCardInstanceId(targetHolomemId));
         summary.put("affectedUserId", affectedUserId);
         summary.put("expiresTurn", expiresTurn);
         return summary;
@@ -3124,6 +3406,15 @@ public class MatchEffectService {
         return summary;
     }
 
+    private Map<String, Object> buildSkippedEffect(String effectType, String reason) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", normalizeEffectType(effectType));
+        summary.put("applied", false);
+        summary.put("skipped", true);
+        summary.put("reason", StringUtils.hasText(reason) ? reason : "EFFECT_SKIPPED");
+        return summary;
+    }
+
     private Map<String, Object> executeMatchResultEffect(
         Long matchId,
         Long userId,
@@ -3260,14 +3551,7 @@ public class MatchEffectService {
     private SelectionProbe probeSearchCandidates(Long matchId, Long userId, JsonNode effectNode) {
         int requestedCount = Math.max(resolveSearchCount(effectNode), 1);
         SearchCriteria criteria = resolveSearchCriteria(effectNode);
-        List<Map<String, Object>> rows = loadSearchCandidates(
-            matchId,
-            userId,
-            criteria.cardType(),
-            criteria.levelType(),
-            criteria.tag(),
-            criteria.nameContains()
-        );
+        List<Map<String, Object>> rows = loadSearchCandidates(matchId, userId, criteria);
         return new SelectionProbe(
             requestedCount,
             mapDecisionCandidates(rows, "DECK")
@@ -3286,10 +3570,7 @@ public class MatchEffectService {
             matchId,
             userId,
             "ARCHIVE",
-            criteria.cardType(),
-            criteria.levelType(),
-            criteria.tag(),
-            criteria.nameContains(),
+            criteria,
             excludeLimitedSupport
         );
         return new SelectionProbe(
@@ -3309,10 +3590,7 @@ public class MatchEffectService {
             matchId,
             userId,
             "ARCHIVE",
-            criteria.cardType(),
-            criteria.levelType(),
-            criteria.tag(),
-            criteria.nameContains(),
+            criteria,
             false
         );
         return new SelectionProbe(
@@ -3544,6 +3822,13 @@ public class MatchEffectService {
         return normalizeCollabText(passiveText);
     }
 
+    private String loadGiftEffectText(String passiveText) {
+        if (!StringUtils.hasText(passiveText) || !passiveText.contains("ギフト")) {
+            return null;
+        }
+        return normalizeGiftText(passiveText);
+    }
+
     private String normalizeBloomText(String passiveText) {
         if (!StringUtils.hasText(passiveText)) {
             return "";
@@ -3591,6 +3876,33 @@ public class MatchEffectService {
         int end = trimmed.length();
         for (String token : stopTokens) {
             int tokenIdx = trimmed.indexOf(token, "コラボエフェクト".length());
+            if (tokenIdx > 0 && tokenIdx < end) {
+                end = tokenIdx;
+            }
+        }
+        return trimmed.substring(0, end).trim();
+    }
+
+    private String normalizeGiftText(String passiveText) {
+        if (!StringUtils.hasText(passiveText)) {
+            return "";
+        }
+        String normalized = passiveText
+            .replace("\\n", "\n")
+            .replace("\\r", "\n")
+            .replace("{", " ")
+            .replace("}", " ")
+            .replace("\"", " ")
+            .replace(":", " ");
+        int idx = normalized.indexOf("ギフト");
+        if (idx < 0) {
+            return normalized.trim();
+        }
+        String trimmed = normalized.substring(idx).trim();
+        String[] stopTokens = { "ブルームエフェクト", "コラボエフェクト", "エクストラ" };
+        int end = trimmed.length();
+        for (String token : stopTokens) {
+            int tokenIdx = trimmed.indexOf(token, "ギフト".length());
             if (tokenIdx > 0 && tokenIdx < end) {
                 end = tokenIdx;
             }
@@ -3659,10 +3971,20 @@ public class MatchEffectService {
         if (text.contains("ダウンさせる") && text.contains("ダウンしても相手のライフは減らない")) {
             effectTypes.add("DOWN_NO_LIFE");
         }
+        if (
+            text.contains("ダウンさせる")
+                && text.contains("ライフ")
+                && (text.contains("追加") || text.contains("さらに"))
+        ) {
+            effectTypes.add("DOWN_EXTRA_LIFE");
+        }
         if (text.contains("バトンタッチに必要な無色") && (text.contains("+") || text.contains("＋"))) {
             effectTypes.add("BATON_TOUCH_COST_MODIFIER");
         }
-        if (text.contains("できない") && (text.contains("バトンタッチ") || text.contains("移動") || text.contains("交代"))) {
+        if (
+            text.contains("できない")
+                && (text.contains("バトンタッチ") || text.contains("移動") || text.contains("交代") || text.contains("Bloom") || text.contains("ブルーム"))
+        ) {
             effectTypes.add("ACTION_LOCK");
         }
         if (text.contains("もう1回Bloomできる")) {
@@ -3701,7 +4023,7 @@ public class MatchEffectService {
 
     private String inferBloomTargetType(String effectType) {
         return switch (effectType) {
-            case "DAMAGE", "DEBUFF", "MOVE_ZONE", "REST", "DOWN_NO_LIFE" -> "ENEMY";
+            case "DAMAGE", "DEBUFF", "MOVE_ZONE", "REST", "DOWN_NO_LIFE", "DOWN_EXTRA_LIFE" -> "ENEMY";
             default -> "SELF";
         };
     }
@@ -3737,21 +4059,29 @@ public class MatchEffectService {
 
     private List<String> resolveEffectTypes(String effectType, JsonNode effectNode) {
         Set<String> effectTypes = new LinkedHashSet<>();
-        if (StringUtils.hasText(effectType)) {
-            effectTypes.add(normalizeEffectType(effectType));
-        }
-        if (effectNode != null && effectNode.hasNonNull("type")) {
-            effectTypes.add(normalizeEffectType(effectNode.path("type").asText()));
-        }
+        boolean hasStructuredEffects = false;
         if (effectNode != null) {
             JsonNode effectsNode = effectNode.get("effects");
             if (effectsNode != null && effectsNode.isArray()) {
                 for (JsonNode node : effectsNode) {
                     if (node.isTextual() && StringUtils.hasText(node.asText())) {
+                        hasStructuredEffects = true;
                         effectTypes.add(normalizeEffectType(node.asText()));
                     }
                 }
             }
+        }
+        if (!hasStructuredEffects && StringUtils.hasText(effectType)) {
+            effectTypes.add(normalizeEffectType(effectType));
+        }
+        if (!hasStructuredEffects && effectNode != null && effectNode.hasNonNull("type")) {
+            effectTypes.add(normalizeEffectType(effectNode.path("type").asText()));
+        }
+        if (hasStructuredEffects && StringUtils.hasText(effectType)) {
+            effectTypes.add(normalizeEffectType(effectType));
+        }
+        if (hasStructuredEffects && effectNode != null && effectNode.hasNonNull("type")) {
+            effectTypes.add(normalizeEffectType(effectNode.path("type").asText()));
         }
         return new ArrayList<>(effectTypes);
     }
@@ -3911,12 +4241,46 @@ public class MatchEffectService {
 
     private SearchCriteria resolveSearchCriteria(JsonNode effectNode) {
         JsonNode criteriaNode = effectNode == null ? null : effectNode.get("searchCriteria");
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        return resolveSearchCriteriaNode(criteriaNode, rawText, true);
+    }
+
+    private SearchCriteria resolveSearchCriteriaNode(JsonNode criteriaNode, String rawText, boolean allowRawInference) {
         String cardType = normalizeCardType(readText(criteriaNode, "cardType"));
         String levelType = normalizeLevelType(readText(criteriaNode, "level", "levelType"));
         String tag = readText(criteriaNode, "tag");
         String nameContains = readText(criteriaNode, "nameContains");
+        String color = normalizeColorType(readText(criteriaNode, "color", "mainColor", "cheerColor"));
+        Boolean rested = readBoolean(criteriaNode, "rested", "isRested", "requireRested", "mustBeRested");
+        Boolean active = readBoolean(criteriaNode, "active", "isActive", "mustBeActive");
+        if (rested == null && active != null) {
+            rested = !active;
+        }
+        Integer minRemainHp = extractNullableInt(
+            criteriaNode,
+            "minRemainHp",
+            "remainHpMin",
+            "remainingHpMin",
+            "minHp",
+            "hpMin",
+            "hpAtLeast"
+        );
+        Integer maxRemainHp = extractNullableInt(
+            criteriaNode,
+            "maxRemainHp",
+            "remainHpMax",
+            "remainingHpMax",
+            "maxHp",
+            "hpMax",
+            "hpAtMost"
+        );
+        List<SearchCriteria> allOf = resolveCriteriaList(criteriaNode == null ? null : criteriaNode.get("allOf"), rawText);
+        List<SearchCriteria> anyOf = resolveCriteriaList(criteriaNode == null ? null : criteriaNode.get("anyOf"), rawText);
 
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        if (!allowRawInference) {
+            return new SearchCriteria(cardType, levelType, tag, nameContains, color, rested, minRemainHp, maxRemainHp, allOf, anyOf);
+        }
+
         if (!StringUtils.hasText(cardType)) {
             if (rawText.contains("ホロメン")) {
                 cardType = "MEMBER";
@@ -3960,7 +4324,24 @@ public class MatchEffectService {
                 nameContains = nameTokenMatcher.group(1).trim();
             }
         }
-        return new SearchCriteria(cardType, levelType, tag, nameContains);
+        if (!StringUtils.hasText(color)) {
+            color = normalizeColorType(resolveCheerColorFilter(rawText));
+        }
+        return new SearchCriteria(cardType, levelType, tag, nameContains, color, rested, minRemainHp, maxRemainHp, allOf, anyOf);
+    }
+
+    private List<SearchCriteria> resolveCriteriaList(JsonNode criteriaArrayNode, String rawText) {
+        if (criteriaArrayNode == null || !criteriaArrayNode.isArray() || criteriaArrayNode.isEmpty()) {
+            return List.of();
+        }
+        List<SearchCriteria> criteriaList = new ArrayList<>();
+        for (JsonNode child : criteriaArrayNode) {
+            if (child == null || child.isNull()) {
+                continue;
+            }
+            criteriaList.add(resolveSearchCriteriaNode(child, rawText, false));
+        }
+        return criteriaList;
     }
 
     private String resolveTagFromKnownTags(String rawText) {
@@ -3988,40 +4369,52 @@ public class MatchEffectService {
     private List<Map<String, Object>> loadSearchCandidates(
         Long matchId,
         Long userId,
+        SearchCriteria criteria
+    ) {
+        return loadCandidatesFromZone(matchId, userId, "DECK", criteria, false);
+    }
+
+    private List<Map<String, Object>> loadSearchCandidates(
+        Long matchId,
+        Long userId,
         String cardType,
         String levelType,
         String tag,
         String nameContains
     ) {
-        return loadCandidatesFromZone(
-            matchId,
-            userId,
-            "DECK",
-            cardType,
-            levelType,
-            tag,
-            nameContains,
-            false
-        );
+        return loadSearchCandidates(matchId, userId, new SearchCriteria(cardType, levelType, tag, nameContains));
     }
 
     private List<Map<String, Object>> loadCandidatesFromZone(
         Long matchId,
         Long userId,
         String zone,
-        String cardType,
-        String levelType,
-        String tag,
-        String nameContains,
+        SearchCriteria criteria,
         boolean excludeLimitedSupport
     ) {
-        return jdbcTemplate.query(
+        SearchCriteria resolved = criteria == null ? SearchCriteria.empty() : criteria;
+        List<Map<String, Object>> rows = jdbcTemplate.query(
             """
-            SELECT mc.id, mc.card_id, c.card_type, m.level_type, c.name, c.tags_json::text AS tags_json
+            SELECT mc.id,
+                   mc.card_id,
+                   c.card_type,
+                   m.level_type,
+                   c.name,
+                   c.tags_json::text AS tags_json,
+                   m.main_color,
+                   m.sub_color,
+                   cc.color AS cheer_color,
+                   h.is_rested,
+                   GREATEST(COALESCE(m.hp, 0) - COALESCE(h.damage_taken, 0), 0) AS remain_hp
             FROM match_cards mc
             JOIN cards c ON c.card_id = mc.card_id
             LEFT JOIN member_cards m ON m.card_id = mc.card_id
+            LEFT JOIN cheer_cards cc ON cc.card_id = mc.card_id
             LEFT JOIN support_cards sc ON sc.card_id = mc.card_id
+            LEFT JOIN match_holomems h
+              ON h.match_card_id = mc.id
+             AND h.match_id = mc.match_id
+             AND h.owner_user_id = mc.owner_user_id
             WHERE mc.match_id = ?
               AND mc.owner_user_id = ?
               AND mc.zone = ?
@@ -4047,21 +4440,159 @@ public class MatchEffectService {
                 row.put("level_type", rs.getString("level_type"));
                 row.put("name", rs.getString("name"));
                 row.put("tags_json", rs.getString("tags_json"));
+                row.put("main_color", rs.getString("main_color"));
+                row.put("sub_color", rs.getString("sub_color"));
+                row.put("cheer_color", rs.getString("cheer_color"));
+                row.put("is_rested", rs.getObject("is_rested"));
+                row.put("remain_hp", rs.getObject("remain_hp"));
                 return row;
             },
             matchId,
             userId,
             zone,
-            nullToEmpty(cardType),
-            nullToEmpty(cardType),
-            nullToEmpty(levelType),
-            nullToEmpty(levelType),
-            nullToEmpty(nameContains),
-            nullToEmpty(nameContains),
+            nullToEmpty(resolved.cardType()),
+            nullToEmpty(resolved.cardType()),
+            nullToEmpty(resolved.levelType()),
+            nullToEmpty(resolved.levelType()),
+            nullToEmpty(resolved.nameContains()),
+            nullToEmpty(resolved.nameContains()),
             excludeLimitedSupport,
-            nullToEmpty(tag),
-            nullToEmpty(tag)
+            nullToEmpty(resolved.tag()),
+            nullToEmpty(resolved.tag())
         );
+        return filterCandidatesByCriteria(rows, resolved);
+    }
+
+    private List<Map<String, Object>> loadCandidatesFromZone(
+        Long matchId,
+        Long userId,
+        String zone,
+        String cardType,
+        String levelType,
+        String tag,
+        String nameContains,
+        boolean excludeLimitedSupport
+    ) {
+        return loadCandidatesFromZone(
+            matchId,
+            userId,
+            zone,
+            new SearchCriteria(cardType, levelType, tag, nameContains),
+            excludeLimitedSupport
+        );
+    }
+
+    private List<Map<String, Object>> filterCandidatesByCriteria(List<Map<String, Object>> rows, SearchCriteria criteria) {
+        if (rows == null || rows.isEmpty()) {
+            return List.of();
+        }
+        if (criteria == null || criteria.isEmpty()) {
+            return rows;
+        }
+        List<Map<String, Object>> filtered = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            if (matchesSearchCriteria(row, criteria)) {
+                filtered.add(row);
+            }
+        }
+        return filtered;
+    }
+
+    private boolean matchesSearchCriteria(Map<String, Object> row, SearchCriteria criteria) {
+        if (!matchesBasicSearchCriteria(row, criteria)) {
+            return false;
+        }
+        if (!criteria.allOf().isEmpty()) {
+            for (SearchCriteria subCriteria : criteria.allOf()) {
+                if (!matchesSearchCriteria(row, subCriteria)) {
+                    return false;
+                }
+            }
+        }
+        if (!criteria.anyOf().isEmpty()) {
+            for (SearchCriteria subCriteria : criteria.anyOf()) {
+                if (matchesSearchCriteria(row, subCriteria)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private boolean matchesBasicSearchCriteria(Map<String, Object> row, SearchCriteria criteria) {
+        String cardType = normalize(asText(row.get("card_type")));
+        if (StringUtils.hasText(criteria.cardType()) && !criteria.cardType().equals(cardType)) {
+            return false;
+        }
+        String levelType = normalizeLevelType(asText(row.get("level_type")));
+        if (StringUtils.hasText(criteria.levelType()) && !criteria.levelType().equals(levelType)) {
+            return false;
+        }
+        String name = asText(row.get("name"));
+        if (
+            StringUtils.hasText(criteria.nameContains()) &&
+            (!StringUtils.hasText(name) || !name.toLowerCase(Locale.ROOT).contains(criteria.nameContains().toLowerCase(Locale.ROOT)))
+        ) {
+            return false;
+        }
+        if (StringUtils.hasText(criteria.tag()) && !rowTagsContains(asText(row.get("tags_json")), criteria.tag())) {
+            return false;
+        }
+        if (StringUtils.hasText(criteria.color()) && !matchesAnyColor(row, criteria.color())) {
+            return false;
+        }
+        if (criteria.rested() != null) {
+            Boolean rowRested = readRowBoolean(row.get("is_rested"));
+            if (rowRested == null || !rowRested.equals(criteria.rested())) {
+                return false;
+            }
+        }
+        if (criteria.minRemainHp() != null || criteria.maxRemainHp() != null) {
+            Long remainHp = asLong(row.get("remain_hp"));
+            if (remainHp == null) {
+                return false;
+            }
+            if (criteria.minRemainHp() != null && remainHp < criteria.minRemainHp()) {
+                return false;
+            }
+            if (criteria.maxRemainHp() != null && remainHp > criteria.maxRemainHp()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean rowTagsContains(String tagsJson, String targetTag) {
+        if (!StringUtils.hasText(tagsJson) || !StringUtils.hasText(targetTag)) {
+            return false;
+        }
+        JsonNode tagsNode = parseEffectJson(tagsJson);
+        if (tagsNode == null || !tagsNode.isArray()) {
+            return false;
+        }
+        for (JsonNode tagNode : tagsNode) {
+            if (tagNode == null || !tagNode.isTextual()) {
+                continue;
+            }
+            if (targetTag.equals(tagNode.asText().trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesAnyColor(Map<String, Object> row, String color) {
+        if (!StringUtils.hasText(color)) {
+            return true;
+        }
+        String expected = normalizeColorType(color);
+        if (!StringUtils.hasText(expected)) {
+            return true;
+        }
+        return expected.equals(normalizeColorType(asText(row.get("main_color"))))
+            || expected.equals(normalizeColorType(asText(row.get("sub_color"))))
+            || expected.equals(normalizeColorType(asText(row.get("cheer_color"))));
     }
 
     private List<Map<String, Object>> selectSearchCards(
@@ -4118,12 +4649,121 @@ public class MatchEffectService {
         return null;
     }
 
+    private Boolean readBoolean(JsonNode node, String... fields) {
+        if (node == null || fields == null) {
+            return null;
+        }
+        for (String field : fields) {
+            JsonNode value = node.get(field);
+            if (value == null || value.isNull()) {
+                continue;
+            }
+            if (value.isBoolean()) {
+                return value.asBoolean();
+            }
+            if (value.isInt() || value.isLong()) {
+                return value.asInt() != 0;
+            }
+            if (value.isTextual()) {
+                String normalized = value.asText().trim().toLowerCase(Locale.ROOT);
+                if ("true".equals(normalized) || "1".equals(normalized) || "yes".equals(normalized)) {
+                    return true;
+                }
+                if ("false".equals(normalized) || "0".equals(normalized) || "no".equals(normalized)) {
+                    return false;
+                }
+            }
+        }
+        return null;
+    }
+
+    private Boolean readRowBoolean(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Boolean booleanValue) {
+            return booleanValue;
+        }
+        if (value instanceof Number number) {
+            return number.intValue() != 0;
+        }
+        if (value instanceof String text) {
+            String normalized = text.trim().toLowerCase(Locale.ROOT);
+            if ("true".equals(normalized) || "1".equals(normalized) || "yes".equals(normalized)) {
+                return true;
+            }
+            if ("false".equals(normalized) || "0".equals(normalized) || "no".equals(normalized)) {
+                return false;
+            }
+        }
+        return null;
+    }
+
+    private Integer extractNullableInt(JsonNode node, String... fieldNames) {
+        if (node == null || fieldNames == null) {
+            return null;
+        }
+        for (String fieldName : fieldNames) {
+            JsonNode valueNode = node.get(fieldName);
+            if (valueNode == null || valueNode.isNull()) {
+                continue;
+            }
+            if (valueNode.isInt() || valueNode.isLong()) {
+                return valueNode.asInt();
+            }
+            if (valueNode.isTextual()) {
+                try {
+                    return Integer.parseInt(normalizeDigits(valueNode.asText()).trim());
+                } catch (NumberFormatException ignored) {
+                    // ignore invalid string value
+                }
+            }
+        }
+        return null;
+    }
+
+    private Map<String, Object> buildCriteriaSummary(SearchCriteria criteria) {
+        SearchCriteria resolved = criteria == null ? SearchCriteria.empty() : criteria;
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("cardType", resolved.cardType());
+        summary.put("levelType", resolved.levelType());
+        summary.put("tag", resolved.tag());
+        summary.put("nameContains", resolved.nameContains());
+        summary.put("color", resolved.color());
+        summary.put("rested", resolved.rested());
+        summary.put("minRemainHp", resolved.minRemainHp());
+        summary.put("maxRemainHp", resolved.maxRemainHp());
+        if (!resolved.allOf().isEmpty()) {
+            List<Map<String, Object>> allOfSummaries = new ArrayList<>();
+            for (SearchCriteria sub : resolved.allOf()) {
+                allOfSummaries.add(buildCriteriaSummary(sub));
+            }
+            summary.put("allOf", allOfSummaries);
+        }
+        if (!resolved.anyOf().isEmpty()) {
+            List<Map<String, Object>> anyOfSummaries = new ArrayList<>();
+            for (SearchCriteria sub : resolved.anyOf()) {
+                anyOfSummaries.add(buildCriteriaSummary(sub));
+            }
+            summary.put("anyOf", anyOfSummaries);
+        }
+        return summary;
+    }
+
     private String normalizeCardType(String cardType) {
         String normalized = normalize(cardType);
         if ("MEMBER".equals(normalized) || "SUPPORT".equals(normalized) || "CHEER".equals(normalized)) {
             return normalized;
         }
         return "";
+    }
+
+    private String normalizeColorType(String color) {
+        String normalized = normalize(color);
+        return switch (normalized) {
+            case "RED", "BLUE", "GREEN", "WHITE", "PURPLE", "YELLOW", "COLORLESS" -> normalized;
+            default -> "";
+        };
     }
 
     private String normalizeLevelType(String levelType) {
@@ -4849,6 +5489,29 @@ public class MatchEffectService {
         );
     }
 
+    private boolean isGiftAlreadyUsedThisTurn(Long matchId, Long userId, int turnNumber, Long holderHolomemId) {
+        if (matchId == null || userId == null || turnNumber <= 0 || holderHolomemId == null || holderHolomemId <= 0) {
+            return false;
+        }
+        Integer used = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'giftHolderHolomemId' = ?
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            userId,
+            turnNumber,
+            holderHolomemId.toString()
+        );
+        return used != null && used > 0;
+    }
+
     private Map<String, Object> findAttachableCheerCard(Long matchId, Long userId) {
         return jdbcTemplate.query(
             """
@@ -5047,6 +5710,22 @@ public class MatchEffectService {
         return StringUtils.hasText(merged) && merged.contains("ダウンしても相手のライフは減らない");
     }
 
+    private int resolveDownExtraLifeCount(JsonNode effectNode) {
+        int fromField = extractInt(effectNode, 0, "extraLifeLoss", "lifeLoss", "value", "amount");
+        if (fromField > 0) {
+            return fromField;
+        }
+        String merged = normalizeDigits(extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
+        int byPattern = extractByPattern(merged, DOWN_EXTRA_LIFE_PATTERN);
+        if (byPattern > 0) {
+            return byPattern;
+        }
+        if (StringUtils.hasText(merged) && merged.contains("ライフ")) {
+            return 1;
+        }
+        return 0;
+    }
+
     private int resolveDamageValue(JsonNode effectNode) {
         int fromFields = extractInt(effectNode, 0, "value", "amount", "damage");
         if (fromFields > 0) {
@@ -5202,12 +5881,70 @@ public class MatchEffectService {
         return value.toString();
     }
 
+    private boolean toBoolean(Object value) {
+        if (value instanceof Boolean booleanValue) {
+            return booleanValue;
+        }
+        if (value instanceof Number number) {
+            return number.intValue() != 0;
+        }
+        if (value instanceof String text) {
+            String normalized = text.trim();
+            if (normalized.isEmpty()) {
+                return false;
+            }
+            return "1".equals(normalized) || "true".equalsIgnoreCase(normalized) || "yes".equalsIgnoreCase(normalized);
+        }
+        return false;
+    }
+
     private record SearchCriteria(
         String cardType,
         String levelType,
         String tag,
-        String nameContains
-    ) {}
+        String nameContains,
+        String color,
+        Boolean rested,
+        Integer minRemainHp,
+        Integer maxRemainHp,
+        List<SearchCriteria> allOf,
+        List<SearchCriteria> anyOf
+    ) {
+        private SearchCriteria {
+            cardType = normalizeToken(cardType);
+            levelType = normalizeToken(levelType);
+            tag = normalizeToken(tag);
+            nameContains = normalizeToken(nameContains);
+            color = normalizeToken(color);
+            allOf = allOf == null ? List.of() : List.copyOf(allOf);
+            anyOf = anyOf == null ? List.of() : List.copyOf(anyOf);
+        }
+
+        private SearchCriteria(String cardType, String levelType, String tag, String nameContains) {
+            this(cardType, levelType, tag, nameContains, "", null, null, null, List.of(), List.of());
+        }
+
+        private static SearchCriteria empty() {
+            return new SearchCriteria("", "", "", "", "", null, null, null, List.of(), List.of());
+        }
+
+        private static String normalizeToken(String value) {
+            return value == null ? "" : value.trim();
+        }
+
+        private boolean isEmpty() {
+            return cardType.isEmpty()
+                && levelType.isEmpty()
+                && tag.isEmpty()
+                && nameContains.isEmpty()
+                && color.isEmpty()
+                && rested == null
+                && minRemainHp == null
+                && maxRemainHp == null
+                && allOf.isEmpty()
+                && anyOf.isEmpty();
+        }
+    }
 
     public record DecisionCandidate(
         Long cardInstanceId,
