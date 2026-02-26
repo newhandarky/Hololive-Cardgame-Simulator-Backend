@@ -17,6 +17,7 @@ import com.hololive.cardgame.dto.PlayToStageActionRequest;
 import com.hololive.cardgame.dto.UseOshiSkillActionRequest;
 import com.hololive.cardgame.model.LobbyMatch;
 import com.hololive.cardgame.service.AuthUserResolver;
+import com.hololive.cardgame.service.HardNpcService;
 import com.hololive.cardgame.service.LobbyMatchService;
 import com.hololive.cardgame.service.MatchActionService;
 import com.hololive.cardgame.service.MatchGameStateService;
@@ -36,6 +37,7 @@ import org.springframework.web.server.ResponseStatusException;
 public class MatchController {
 
     private final LobbyMatchService lobbyMatchService;
+    private final HardNpcService hardNpcService;
     private final MatchActionService matchActionService;
     private final MatchGameStateService matchGameStateService;
     private final MatchSocketHandler matchSocketHandler;
@@ -43,12 +45,14 @@ public class MatchController {
 
     public MatchController(
         LobbyMatchService lobbyMatchService,
+        HardNpcService hardNpcService,
         MatchActionService matchActionService,
         MatchGameStateService matchGameStateService,
         MatchSocketHandler matchSocketHandler,
         AuthUserResolver authUserResolver
     ) {
         this.lobbyMatchService = lobbyMatchService;
+        this.hardNpcService = hardNpcService;
         this.matchActionService = matchActionService;
         this.matchGameStateService = matchGameStateService;
         this.matchSocketHandler = matchSocketHandler;
@@ -63,6 +67,20 @@ public class MatchController {
         LobbyMatchResponse response = LobbyMatchResponse.from(match);
         publish(match.getId(), "MATCH_CREATED", response);
         return response;
+    }
+
+    @PostMapping("/create-vs-hard-npc")
+    @ResponseStatus(HttpStatus.CREATED)
+    public LobbyMatchResponse createVsHardNpcMatch() {
+        Long userId = currentUserId();
+        try {
+            LobbyMatch match = lobbyMatchService.createAndStartHardNpcMatch(userId);
+            LobbyMatchResponse response = LobbyMatchResponse.from(match);
+            publish(match.getId(), "MATCH_STARTED", response);
+            return response;
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
     }
 
     @PostMapping("/join")
@@ -301,6 +319,13 @@ public class MatchController {
             matchActionService.endTurn(matchId, currentUserId());
             LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
             publish(matchId, "TURN_ENDED", response);
+
+            if (hardNpcService.hasHardNpcInMatch(matchId)) {
+                LobbyMatch matchAfterNpcTurn = hardNpcService.executeHardNpcTurn(matchId, currentUserId());
+                LobbyMatchResponse npcResponse = LobbyMatchResponse.from(matchAfterNpcTurn);
+                publish(matchId, "NPC_HARD_TURN", npcResponse);
+                return npcResponse;
+            }
             return response;
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
@@ -315,6 +340,20 @@ public class MatchController {
             matchActionService.concede(matchId, currentUserId());
             LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
             publish(matchId, "CONCEDE", response);
+            return response;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    @PostMapping("/{matchId}/actions/npc-hard-turn")
+    public LobbyMatchResponse executeHardNpcTurn(@PathVariable Long matchId) {
+        try {
+            LobbyMatch match = hardNpcService.executeHardNpcTurn(matchId, currentUserId());
+            LobbyMatchResponse response = LobbyMatchResponse.from(match);
+            publish(matchId, "NPC_HARD_TURN", response);
             return response;
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());

@@ -13,6 +13,7 @@ import com.hololive.cardgame.repository.MatchActionRepository;
 import com.hololive.cardgame.repository.MatchDeckSnapshotRepository;
 import com.hololive.cardgame.repository.MatchPlayerRepository;
 import com.hololive.cardgame.repository.MatchRepository;
+import com.hololive.cardgame.repository.UserRepository;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -38,12 +39,15 @@ public class LobbyMatchService {
     private static final int REQUIRED_MAIN_DECK_SIZE = 50;
     private static final int REQUIRED_CHEER_DECK_SIZE = 20;
     private static final int DEFAULT_OSHI_LIFE = 5;
+    private static final String HARD_NPC_LINE_USER_ID = "npc-hard-v1";
+    private static final String HARD_NPC_DISPLAY_NAME = "Hard NPC";
 
     private final MatchRepository matchRepository;
     private final MatchPlayerRepository matchPlayerRepository;
     private final MatchActionRepository matchActionRepository;
     private final MatchDeckSnapshotRepository matchDeckSnapshotRepository;
     private final DeckService deckService;
+    private final UserRepository userRepository;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final SecureRandom random = new SecureRandom();
@@ -54,6 +58,7 @@ public class LobbyMatchService {
         MatchActionRepository matchActionRepository,
         MatchDeckSnapshotRepository matchDeckSnapshotRepository,
         DeckService deckService,
+        UserRepository userRepository,
         JdbcTemplate jdbcTemplate,
         ObjectMapper objectMapper
     ) {
@@ -62,6 +67,7 @@ public class LobbyMatchService {
         this.matchActionRepository = matchActionRepository;
         this.matchDeckSnapshotRepository = matchDeckSnapshotRepository;
         this.deckService = deckService;
+        this.userRepository = userRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
     }
@@ -81,6 +87,21 @@ public class LobbyMatchService {
 
         createMatchPlayer(match.getId(), hostUserId, false);
         return toModel(match, matchPlayerRepository.findByMatchIdOrderByIdAsc(match.getId()));
+    }
+
+    @Transactional
+    public LobbyMatch createAndStartHardNpcMatch(Long hostUserId) {
+        Long hardNpcUserId = ensureHardNpcUser();
+        if (hostUserId.equals(hardNpcUserId)) {
+            throw new IllegalStateException("Hard NPC 使用者不可建立對戰");
+        }
+        deckService.bootstrapStarterDecksForUser(hardNpcUserId);
+
+        LobbyMatch created = createMatch(hostUserId);
+        LobbyMatch joined = joinMatch(created.getRoomCode(), hardNpcUserId);
+        setReady(joined.getId(), hostUserId, true);
+        setReady(joined.getId(), hardNpcUserId, true);
+        return startMatch(joined.getId(), hostUserId);
     }
 
     @Transactional
@@ -498,5 +519,19 @@ public class LobbyMatchService {
 
     private void touchUpdatedAt(MatchEntity match) {
         match.setUpdatedAt(LocalDateTime.now());
+    }
+
+    private Long ensureHardNpcUser() {
+        return userRepository.findByLineUserId(HARD_NPC_LINE_USER_ID)
+            .map(user -> user.getId())
+            .orElseGet(() -> {
+                com.hololive.cardgame.entity.User npc = new com.hololive.cardgame.entity.User();
+                npc.setLineUserId(HARD_NPC_LINE_USER_ID);
+                npc.setDisplayName(HARD_NPC_DISPLAY_NAME);
+                npc.setAvatarUrl(null);
+                npc.setCreatedAt(LocalDateTime.now());
+                npc.setUpdatedAt(LocalDateTime.now());
+                return userRepository.save(npc).getId();
+            });
     }
 }
