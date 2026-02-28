@@ -1,8 +1,8 @@
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5432/holocardgame_db
-    username: holocard_user
-    password: holocard_password
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/holocardgame_db}
+    username: ${SPRING_DATASOURCE_USERNAME:holocard_user}
+    password: ${SPRING_DATASOURCE_PASSWORD:holocard_password}
   jpa:
     hibernate:
       ddl-auto: none
@@ -13,11 +13,14 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+
 line:
   channel-id: ${LINE_CHANNEL_ID:YOUR_LINE_CHANNEL_ID}
+
 jwt:
   secret: ${JWT_SECRET:change-me-jwt-secret-at-least-32-bytes-long-for-dev-only}
   expiration: 86400000
+
 server:
   port: ${PORT:8080}
   error:

@@ -26,6 +26,11 @@ public class WebSocketConfig implements WebSocketConfigurer {
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(matchSocketHandler, "/ws/matches/{matchId}")
             .addInterceptors(wsAuthHandshakeInterceptor)
-            .setAllowedOriginPatterns("http://localhost:*", "http://127.0.0.1:*");
+            .setAllowedOriginPatterns(
+                "http://localhost:*",
+                "http://127.0.0.1:*",
+                "https://*.vercel.app",
+                "https://*.github.io"
+            );
     }
 }
