@@ -39,6 +39,7 @@ import org.springframework.util.StringUtils;
 public class MatchGameStateService {
     private static final Pattern SPECIAL_DAMAGE_PATTERN = Pattern.compile("特殊ダメージ\\s*(\\d+)");
     private static final Pattern DAMAGE_PATTERN = Pattern.compile("ダメージ\\s*(\\d+)");
+    private static final Pattern ANY_NUMBER_PATTERN = Pattern.compile("(\\d+)");
 
     // 場地 1~9 映射，供前端直接依 slot 渲染。
     private static final Map<String, Integer> BOARD_ZONE_SLOT_INDEX = Map.of(
@@ -806,6 +807,18 @@ public class MatchGameStateService {
         if (normal.find()) {
             Integer parsed = toNullableInt(normal.group(1));
             return parsed == null ? 0 : parsed;
+        }
+        // 卡面原文常見格式為「藝能名稱 ... 40」或「100+」，此處以最後一個正整數作為基礎攻擊值回退。
+        Matcher anyNumber = ANY_NUMBER_PATTERN.matcher(text);
+        int fallback = 0;
+        while (anyNumber.find()) {
+            Integer parsed = toNullableInt(anyNumber.group(1));
+            if (parsed != null && parsed > 0) {
+                fallback = parsed;
+            }
+        }
+        if (fallback > 0) {
+            return fallback;
         }
         return 0;
     }

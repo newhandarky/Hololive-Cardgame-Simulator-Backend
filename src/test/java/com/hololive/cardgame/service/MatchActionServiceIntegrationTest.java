@@ -965,12 +965,11 @@ class MatchActionServiceIntegrationTest {
     }
 
     @Test
-    void endTurnShouldFinishMatchWhenCurrentPlayerHasNoHolomemAfterCenterReplenishCycle() {
+    void endTurnShouldNotFinishMatchWhenOpponentHasNoHolomem() {
         StartedMatchContext context = createStartedMatch("end-no-holomem-host", "end-no-holomem-guest");
         Long matchId = context.matchId();
         Long hostId = context.hostId();
         Long guestId = context.guestId();
-        createStageHolomemWithSingleCard(matchId, guestId, findMemberCardIdByLevel("DEBUT"), "CENTER", "DEBUT", 0);
 
         jdbcTemplate.update(
             """
@@ -979,10 +978,10 @@ class MatchActionServiceIntegrationTest {
               AND owner_user_id = ?
             """,
             matchId,
-            hostId
+            guestId
         );
 
-        executeRequiredTurnActions(matchId, hostId, null);
+        executeRequiredTurnActions(matchId, hostId, loadFirstCenterCardInstanceId(matchId, hostId));
         matchActionService.endTurn(matchId, hostId);
 
         String status = jdbcTemplate.queryForObject(
@@ -990,8 +989,8 @@ class MatchActionServiceIntegrationTest {
             String.class,
             matchId
         );
-        Long winnerUserId = jdbcTemplate.queryForObject(
-            "SELECT winner_user_id FROM matches WHERE id = ?",
+        Long currentTurnPlayerId = jdbcTemplate.queryForObject(
+            "SELECT current_turn_player_id FROM matches WHERE id = ?",
             Long.class,
             matchId
         );
@@ -1000,9 +999,9 @@ class MatchActionServiceIntegrationTest {
             String.class,
             matchId
         );
-        assertThat(status).isEqualTo("finished");
-        assertThat(winnerUserId).isEqualTo(guestId);
-        assertThat(phase).isEqualTo("END");
+        assertThat(status).isEqualTo("active");
+        assertThat(currentTurnPlayerId).isEqualTo(guestId);
+        assertThat(phase).isEqualTo("MAIN");
     }
 
     @Test

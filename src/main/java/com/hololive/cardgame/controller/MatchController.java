@@ -321,10 +321,17 @@ public class MatchController {
             publish(matchId, "TURN_ENDED", response);
 
             if (hardNpcService.hasHardNpcInMatch(matchId)) {
-                LobbyMatch matchAfterNpcTurn = hardNpcService.executeHardNpcTurn(matchId, currentUserId());
-                LobbyMatchResponse npcResponse = LobbyMatchResponse.from(matchAfterNpcTurn);
-                publish(matchId, "NPC_HARD_TURN", npcResponse);
-                return npcResponse;
+                try {
+                    LobbyMatch matchAfterNpcTurn = hardNpcService.executeHardNpcTurn(matchId, currentUserId());
+                    LobbyMatchResponse npcResponse = LobbyMatchResponse.from(matchAfterNpcTurn);
+                    publish(matchId, "NPC_HARD_TURN", npcResponse);
+                    return npcResponse;
+                } catch (RuntimeException ignored) {
+                    LobbyMatch recoveredMatch = hardNpcService.recoverIfNpcTurnStuck(matchId, currentUserId());
+                    LobbyMatchResponse recoveredResponse = LobbyMatchResponse.from(recoveredMatch);
+                    publish(matchId, "NPC_HARD_TURN_RECOVERED", recoveredResponse);
+                    return recoveredResponse;
+                }
             }
             return response;
         } catch (IllegalArgumentException e) {

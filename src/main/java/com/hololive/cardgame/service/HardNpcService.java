@@ -22,7 +22,9 @@ import org.springframework.transaction.annotation.Transactional;
 public class HardNpcService {
 
     private static final String HARD_NPC_LINE_USER_ID = "npc-hard-v1";
-    private static final int MAX_ACTION_STEPS = 24;
+    private static final int MAX_ACTION_STEPS = 64;
+    private static final String TURN_START_INTERACTION_TYPE = "TURN_START";
+    private static final String PENDING_STATUS = "PENDING";
 
     private final LobbyMatchService lobbyMatchService;
     private final MatchActionService matchActionService;
@@ -57,26 +59,49 @@ public class HardNpcService {
             throw new IllegalStateException("此對戰沒有 Hard NPC");
         }
         for (int i = 0; i < MAX_ACTION_STEPS; i++) {
-            GameStateResponse state = matchGameStateService.getGameStateForUser(matchId, npcUserId);
+            GameStateResponse state;
+            try {
+                state = matchGameStateService.getGameStateForUser(matchId, npcUserId);
+            } catch (RuntimeException ignored) {
+                break;
+            }
             if (state == null || !"STARTED".equalsIgnoreCase(state.getStatus())) {
                 break;
             }
             if (!npcUserId.equals(state.getCurrentTurnPlayerId())) {
                 break;
             }
-            if (resolvePending(state, matchId, npcUserId)) {
-                continue;
-            }
-            if (!executeOneAction(state, matchId, npcUserId)) {
+            try {
+                if (resolvePending(state, matchId, npcUserId)) {
+                    continue;
+                }
+                if (!executeOneAction(state, matchId, npcUserId)) {
+                    break;
+                }
+            } catch (RuntimeException ignored) {
                 break;
             }
         }
+        forceAdvanceTurnIfNpcStuck(matchId, npcUserId);
         return lobbyMatchService.getMatch(matchId);
     }
 
     @Transactional(readOnly = true)
     public boolean hasHardNpcInMatch(Long matchId) {
         return resolveNpcUserIdInMatch(matchId) != null;
+    }
+
+    @Transactional
+    public LobbyMatch recoverIfNpcTurnStuck(Long matchId, Long requesterUserId) {
+        if (!lobbyMatchService.isUserInMatch(matchId, requesterUserId)) {
+            throw new IllegalStateException("你不在此房間中");
+        }
+        Long npcUserId = resolveNpcUserIdInMatch(matchId);
+        if (npcUserId == null) {
+            return lobbyMatchService.getMatch(matchId);
+        }
+        forceAdvanceTurnIfNpcStuck(matchId, npcUserId);
+        return lobbyMatchService.getMatch(matchId);
     }
 
     private boolean resolvePending(GameStateResponse state, Long matchId, Long npcUserId) {
@@ -243,6 +268,113 @@ public class HardNpcService {
             .map(match -> hardNpcUserId.equals(match.getPlayerAId()) || hardNpcUserId.equals(match.getPlayerBId()))
             .orElse(false);
         return exists ? hardNpcUserId : null;
+    }
+
+    private void forceAdvanceTurnIfNpcStuck(Long matchId, Long npcUserId) {
+        // 防止 NPC 回合因例外中斷而卡住：直接以 matches 狀態判斷是否仍停在 NPC 回合。
+        // 不依賴 getGameStateForUser，避免 game-state 組裝異常時連恢復流程也失效。
+        var matchOpt = matchRepository.findByIdForUpdate(matchId);
+        if (matchOpt.isEmpty()) {
+            return;
+        }
+        var match = matchOpt.get();
+        if (
+            !"active".equalsIgnoreCase(normalize(match.getStatus())) ||
+            !"STARTED".equalsIgnoreCase(normalize(match.getLobbyStatus())) ||
+            !npcUserId.equals(match.getCurrentTurnPlayerId())
+        ) {
+            return;
+        }
+        Long opponentUserId = null;
+        if (match.getPlayerAId() != null && !match.getPlayerAId().equals(npcUserId)) {
+            opponentUserId = match.getPlayerAId();
+        } else if (match.getPlayerBId() != null && !match.getPlayerBId().equals(npcUserId)) {
+            opponentUserId = match.getPlayerBId();
+        }
+        if (opponentUserId == null || opponentUserId <= 0) {
+            return;
+        }
+
+        int currentTurn = match.getTurnNumber() == null ? 1 : match.getTurnNumber();
+        int nextTurn = currentTurn + 1;
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET current_turn_player_id = ?,
+                turn_number = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND status = 'active'
+              AND lobby_status = 'STARTED'
+            """,
+            opponentUserId,
+            nextTurn,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET skill_used_this_turn = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            matchId,
+            opponentUserId
+        );
+        ensureTurnStartPendingInteraction(matchId, opponentUserId, nextTurn);
+    }
+
+    private void ensureTurnStartPendingInteraction(Long matchId, Long userId, int turnNumber) {
+        if (matchId == null || userId == null || userId <= 0) {
+            return;
+        }
+        Integer hasPending = jdbcTemplate.query(
+            """
+            SELECT CASE WHEN EXISTS (
+                SELECT 1
+                FROM match_pending_decisions
+                WHERE match_id = ?
+                  AND user_id = ?
+                  AND status = 'PENDING'
+            ) THEN 1 ELSE 0 END AS has_pending
+            """,
+            rs -> rs.next() ? rs.getInt("has_pending") : 0,
+            matchId,
+            userId
+        );
+        if (hasPending != null && hasPending > 0) {
+            return;
+        }
+
+        String contextJson = """
+            {"interactionType":"TURN_START","title":"回合開始","message":"現在是你的回合。請先確認，再由你手動執行抽牌與吶喊操作。","turnNumber":%d}
+            """.formatted(Math.max(turnNumber, 1));
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_pending_decisions (
+                match_id,
+                user_id,
+                decision_type,
+                source_action_type,
+                source_card_instance_id,
+                source_card_id,
+                effect_type,
+                min_select,
+                max_select,
+                status,
+                context_json
+            ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 1, 1, ?, CAST(? AS jsonb))
+            """,
+            matchId,
+            userId,
+            TURN_START_INTERACTION_TYPE,
+            TURN_START_INTERACTION_TYPE,
+            TURN_START_INTERACTION_TYPE,
+            PENDING_STATUS,
+            contextJson
+        );
     }
 
     private Long pickPreferredHolomemCardInstanceId(GameStateResponse state, Long userId) {

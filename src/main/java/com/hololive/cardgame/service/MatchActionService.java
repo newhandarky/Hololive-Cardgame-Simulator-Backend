@@ -2182,11 +2182,6 @@ public class MatchActionService {
             toJson(payload),
             context.turnNumber
         );
-        if (evaluateNoHolomemDefeat(context.match, userId, context.turnNumber)) {
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-            return;
-        }
 
         context.match.setCurrentTurnPlayerId(context.opponentUserId);
         context.match.setTurnNumber(nextTurnNumber);
