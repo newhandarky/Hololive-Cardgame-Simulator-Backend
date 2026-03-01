@@ -8,6 +8,7 @@ import com.hololive.cardgame.game.action.AtomicAction;
 import com.hololive.cardgame.game.action.EffectContext;
 import com.hololive.cardgame.game.action.EffectResolver;
 import com.hololive.cardgame.game.action.GameActionExecutor;
+import com.hololive.cardgame.game.action.HolomemMoveZoneAction;
 import com.hololive.cardgame.game.action.ReduceLifeAction;
 import com.hololive.cardgame.game.action.SendCheerAction;
 import java.util.ArrayList;
@@ -3681,27 +3682,45 @@ public class MatchEffectService {
             }
         }
 
-        jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET zone = ?,
-                is_rested = CASE WHEN ? THEN TRUE ELSE is_rested END,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-            """,
-            toZone,
-            restAfterMove,
-            targetHolomemId,
-            matchId
+        Boolean restedAfterMove = null;
+        EffectContext actionContext = new EffectContext(
+            matchId,
+            userId,
+            currentTurn,
+            effectType,
+            resolveHolomemCardInstanceId(targetHolomemId),
+            null
         );
-
-        Boolean restedAfterMove = jdbcTemplate.query(
-            "SELECT is_rested FROM match_holomems WHERE id = ? AND match_id = ?",
-            rs -> rs.next() ? rs.getBoolean("is_rested") : null,
-            targetHolomemId,
-            matchId
-        );
+        HolomemMoveZoneAction moveAction = new HolomemMoveZoneAction(targetHolomemId, fromZone, toZone, restAfterMove);
+        List<ActionResult> actionResults = gameActionExecutor.execute(actionContext, List.of(moveAction));
+        if (!actionResults.isEmpty() && actionResults.get(0).success()) {
+            Object rested = actionResults.get(0).details().get("rested");
+            if (rested instanceof Boolean value) {
+                restedAfterMove = value;
+            }
+        } else {
+            // fallback: preserve previous SQL behavior
+            jdbcTemplate.update(
+                """
+                UPDATE match_holomems
+                SET zone = ?,
+                    is_rested = CASE WHEN ? THEN TRUE ELSE is_rested END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND match_id = ?
+                """,
+                toZone,
+                restAfterMove,
+                targetHolomemId,
+                matchId
+            );
+            restedAfterMove = jdbcTemplate.query(
+                "SELECT is_rested FROM match_holomems WHERE id = ? AND match_id = ?",
+                rs -> rs.next() ? rs.getBoolean("is_rested") : null,
+                targetHolomemId,
+                matchId
+            );
+        }
 
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);

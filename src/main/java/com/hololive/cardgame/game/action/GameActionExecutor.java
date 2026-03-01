@@ -32,6 +32,9 @@ public class GameActionExecutor {
         if (action instanceof MoveZoneAction moveZoneAction) {
             return executeMoveZone(context, moveZoneAction);
         }
+        if (action instanceof HolomemMoveZoneAction holomemMoveZoneAction) {
+            return executeHolomemMoveZone(context, holomemMoveZoneAction);
+        }
         if (action instanceof DrawAction drawAction) {
             return executeDraw(context, drawAction);
         }
@@ -180,6 +183,48 @@ public class GameActionExecutor {
                 "fromZone", fromZone,
                 "toZone", toZone,
                 "orderIndex", targetOrder == null ? 1 : targetOrder
+            )
+        );
+    }
+
+    private ActionResult executeHolomemMoveZone(EffectContext context, HolomemMoveZoneAction action) {
+        if (context == null || context.matchId() == null || action == null || action.holomemId() == null) {
+            return ActionResult.failure("MOVE_ZONE", "INVALID_ARGUMENTS");
+        }
+        String fromZone = normalizeZone(action.fromZone());
+        String toZone = normalizeZone(action.toZone());
+        int updated = jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET zone = ?,
+                is_rested = CASE WHEN ? THEN TRUE ELSE is_rested END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND zone = ?
+            """,
+            toZone,
+            action.restAfterMove(),
+            action.holomemId(),
+            context.matchId(),
+            fromZone
+        );
+        if (updated != 1) {
+            return ActionResult.failure("MOVE_ZONE", "HOLOMEM_NOT_MOVED");
+        }
+        Boolean rested = jdbcTemplate.query(
+            "SELECT is_rested FROM match_holomems WHERE id = ? AND match_id = ?",
+            rs -> rs.next() ? rs.getBoolean("is_rested") : null,
+            action.holomemId(),
+            context.matchId()
+        );
+        return ActionResult.success(
+            "MOVE_ZONE",
+            Map.of(
+                "holomemId", action.holomemId(),
+                "fromZone", fromZone,
+                "toZone", toZone,
+                "rested", rested == null ? action.restAfterMove() : rested
             )
         );
     }
