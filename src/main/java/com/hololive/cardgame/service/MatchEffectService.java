@@ -3,6 +3,13 @@ package com.hololive.cardgame.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.hololive.cardgame.game.action.ActionResult;
+import com.hololive.cardgame.game.action.AtomicAction;
+import com.hololive.cardgame.game.action.EffectContext;
+import com.hololive.cardgame.game.action.EffectResolver;
+import com.hololive.cardgame.game.action.GameActionExecutor;
+import com.hololive.cardgame.game.action.ReduceLifeAction;
+import com.hololive.cardgame.game.action.SendCheerAction;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
@@ -48,11 +55,21 @@ public class MatchEffectService {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final DiceService diceService;
+    private final EffectResolver effectResolver;
+    private final GameActionExecutor gameActionExecutor;
 
-    public MatchEffectService(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper, DiceService diceService) {
+    public MatchEffectService(
+        JdbcTemplate jdbcTemplate,
+        ObjectMapper objectMapper,
+        DiceService diceService,
+        EffectResolver effectResolver,
+        GameActionExecutor gameActionExecutor
+    ) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.diceService = diceService;
+        this.effectResolver = effectResolver;
+        this.gameActionExecutor = gameActionExecutor;
     }
 
     public Map<String, Object> applySupportEffect(
@@ -892,44 +909,82 @@ public class MatchEffectService {
         int drawCount = Math.max(requestedCount, 1);
 
         List<Long> drawnCardInstanceIds = new ArrayList<>();
-        int nextHandOrder = nextZoneOrder(matchId, userId, "HAND");
-        for (int i = 0; i < drawCount; i++) {
-            Long deckCardInstanceId = jdbcTemplate.query(
-                """
-                SELECT id
-                FROM match_cards
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'DECK'
-                ORDER BY order_index NULLS LAST, id
-                LIMIT 1
-                """,
-                rs -> rs.next() ? rs.getLong("id") : null,
+        // P1-3: 以 EffectResolver + GameActionExecutor 執行 DRAW，舊 SQL 作為安全 fallback。
+        try {
+            ObjectNode pipelineNode = objectMapper.createObjectNode();
+            pipelineNode.put("drawCount", drawCount);
+            pipelineNode.put("fromZone", "DECK");
+            pipelineNode.put("toZone", "HAND");
+            EffectContext context = new EffectContext(
                 matchId,
-                userId
+                userId,
+                resolveCurrentTurnNumber(matchId),
+                "SUPPORT_EFFECT",
+                null,
+                null
             );
-            if (deckCardInstanceId == null) {
-                break;
+            List<AtomicAction> actions = effectResolver.resolve(context, effectType, pipelineNode);
+            if (!actions.isEmpty()) {
+                List<ActionResult> results = gameActionExecutor.execute(context, actions);
+                if (!results.isEmpty() && results.get(0).success()) {
+                    Object movedCards = results.get(0).details().get("cardInstanceIds");
+                    if (movedCards instanceof List<?> list) {
+                        for (Object id : list) {
+                            if (id instanceof Number n) {
+                                drawnCardInstanceIds.add(n.longValue());
+                            } else if (id instanceof String s) {
+                                try {
+                                    drawnCardInstanceIds.add(Long.parseLong(s));
+                                } catch (NumberFormatException ignored) {
+                                    // ignore invalid id payload
+                                }
+                            }
+                        }
+                    }
+                }
             }
-
-            jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'HAND',
-                    order_index = ?,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'DECK'
-                """,
-                nextHandOrder++,
-                deckCardInstanceId,
-                matchId,
-                userId
-            );
-            drawnCardInstanceIds.add(deckCardInstanceId);
+        } catch (RuntimeException ignored) {
+            // fallback below
+        }
+        if (drawnCardInstanceIds.isEmpty()) {
+            int nextHandOrder = nextZoneOrder(matchId, userId, "HAND");
+            for (int i = 0; i < drawCount; i++) {
+                Long deckCardInstanceId = jdbcTemplate.query(
+                    """
+                    SELECT id
+                    FROM match_cards
+                    WHERE match_id = ?
+                      AND owner_user_id = ?
+                      AND zone = 'DECK'
+                    ORDER BY order_index NULLS LAST, id
+                    LIMIT 1
+                    """,
+                    rs -> rs.next() ? rs.getLong("id") : null,
+                    matchId,
+                    userId
+                );
+                if (deckCardInstanceId == null) {
+                    break;
+                }
+                jdbcTemplate.update(
+                    """
+                    UPDATE match_cards
+                    SET zone = 'HAND',
+                        order_index = ?,
+                        is_face_down = FALSE,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                      AND match_id = ?
+                      AND owner_user_id = ?
+                      AND zone = 'DECK'
+                    """,
+                    nextHandOrder++,
+                    deckCardInstanceId,
+                    matchId,
+                    userId
+                );
+                drawnCardInstanceIds.add(deckCardInstanceId);
+            }
         }
 
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -2324,12 +2379,42 @@ public class MatchEffectService {
 
         int requestedLifeLoss = resolveDownExtraLifeCount(effectNode);
         List<Long> lostLifeCardInstanceIds = new ArrayList<>();
-        for (int index = 0; index < requestedLifeLoss; index += 1) {
-            Long lostLifeCardInstanceId = loseLifeOnce(matchId, targetOwnerUserId);
-            if (lostLifeCardInstanceId == null) {
-                break;
+        if (requestedLifeLoss > 0) {
+            EffectContext actionContext = new EffectContext(
+                matchId,
+                userId,
+                resolveCurrentTurnNumber(matchId),
+                effectType,
+                targetHolomemCardInstanceId,
+                null
+            );
+            ReduceLifeAction reduceLifeAction = new ReduceLifeAction(targetOwnerUserId, requestedLifeLoss, "DOWN_EXTRA_LIFE");
+            List<ActionResult> actionResults = gameActionExecutor.execute(actionContext, List.of(reduceLifeAction));
+            if (!actionResults.isEmpty() && actionResults.get(0).success()) {
+                Object ids = actionResults.get(0).details().get("lifeCardInstanceIds");
+                if (ids instanceof List<?> list) {
+                    for (Object id : list) {
+                        if (id instanceof Number n) {
+                            lostLifeCardInstanceIds.add(n.longValue());
+                        } else if (id instanceof String s) {
+                            try {
+                                lostLifeCardInstanceIds.add(Long.parseLong(s));
+                            } catch (NumberFormatException ignored) {
+                                // ignore malformed id value
+                            }
+                        }
+                    }
+                }
             }
-            lostLifeCardInstanceIds.add(lostLifeCardInstanceId);
+        }
+        if (lostLifeCardInstanceIds.isEmpty()) {
+            for (int index = 0; index < requestedLifeLoss; index += 1) {
+                Long lostLifeCardInstanceId = loseLifeOnce(matchId, targetOwnerUserId);
+                if (lostLifeCardInstanceId == null) {
+                    break;
+                }
+                lostLifeCardInstanceIds.add(lostLifeCardInstanceId);
+            }
         }
 
         if (!lostLifeCardInstanceIds.isEmpty()) {
@@ -2941,7 +3026,23 @@ public class MatchEffectService {
             if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
                 continue;
             }
+            EffectContext actionContext = new EffectContext(
+                matchId,
+                userId,
+                resolveCurrentTurnNumber(matchId),
+                effectType,
+                cardInstanceId,
+                cardId
+            );
+            SendCheerAction sendCheerAction = new SendCheerAction(cardInstanceId, targetHolomemId, effectType);
+            List<ActionResult> actionResults = gameActionExecutor.execute(actionContext, List.of(sendCheerAction));
+            if (!actionResults.isEmpty() && actionResults.get(0).success()) {
+                attachedCardInstanceIds.add(cardInstanceId);
+                sourceZones.add(sourceZone);
+                continue;
+            }
 
+            // fallback: preserve previous behavior when pipeline fails unexpectedly
             int moved = jdbcTemplate.update(
                 """
                 UPDATE match_cards
@@ -2958,20 +3059,18 @@ public class MatchEffectService {
                 matchId,
                 userId
             );
-            if (moved != 1) {
-                continue;
+            if (moved == 1) {
+                jdbcTemplate.update(
+                    """
+                    INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down)
+                    VALUES (?, ?, FALSE)
+                    """,
+                    targetHolomemId,
+                    cardId
+                );
+                attachedCardInstanceIds.add(cardInstanceId);
+                sourceZones.add(sourceZone);
             }
-
-            jdbcTemplate.update(
-                """
-                INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down)
-                VALUES (?, ?, FALSE)
-                """,
-                targetHolomemId,
-                cardId
-            );
-            attachedCardInstanceIds.add(cardInstanceId);
-            sourceZones.add(sourceZone);
         }
 
         Map<String, Object> summary = new LinkedHashMap<>();

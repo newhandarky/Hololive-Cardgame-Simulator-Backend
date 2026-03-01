@@ -17,6 +17,12 @@ import com.hololive.cardgame.entity.MatchEntity;
 import com.hololive.cardgame.entity.MatchPlayerEntity;
 import com.hololive.cardgame.error.GameErrorCode;
 import com.hololive.cardgame.error.GameRuleException;
+import com.hololive.cardgame.game.action.ActionResult;
+import com.hololive.cardgame.game.action.EffectContext;
+import com.hololive.cardgame.game.action.GameActionExecutor;
+import com.hololive.cardgame.game.action.MoveZoneAction;
+import com.hololive.cardgame.game.action.ReduceLifeAction;
+import com.hololive.cardgame.game.action.SendCheerAction;
 import com.hololive.cardgame.model.LobbyMatchStatus;
 import com.hololive.cardgame.model.MatchPhase;
 import com.hololive.cardgame.repository.MatchActionRepository;
@@ -73,6 +79,7 @@ public class MatchActionService {
     private final ObjectMapper objectMapper;
     private final MatchEffectService matchEffectService;
     private final MatchEventHookService matchEventHookService;
+    private final GameActionExecutor gameActionExecutor;
     private final SecureRandom random = new SecureRandom();
 
     public MatchActionService(
@@ -82,7 +89,8 @@ public class MatchActionService {
         JdbcTemplate jdbcTemplate,
         ObjectMapper objectMapper,
         MatchEffectService matchEffectService,
-        MatchEventHookService matchEventHookService
+        MatchEventHookService matchEventHookService,
+        GameActionExecutor gameActionExecutor
     ) {
         this.matchRepository = matchRepository;
         this.matchPlayerRepository = matchPlayerRepository;
@@ -91,6 +99,7 @@ public class MatchActionService {
         this.objectMapper = objectMapper;
         this.matchEffectService = matchEffectService;
         this.matchEventHookService = matchEventHookService;
+        this.gameActionExecutor = gameActionExecutor;
     }
 
     @Transactional
@@ -791,33 +800,24 @@ public class MatchActionService {
             if (cheerCount == null || cheerCount <= 0) {
                 throw new IllegalStateException("來源卡不是 Cheer 卡");
             }
-            int moved = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'STAGE',
-                    order_index = NULL,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone IN ('CHEER_DECK','ARCHIVE','HAND')
-                """,
-                sourceCardInstanceId,
+            EffectContext effectContext = new EffectContext(
                 matchId,
-                userId
-            );
-            if (moved != 1) {
-                throw new IllegalStateException("發送吶喊失敗，來源卡片狀態已變更");
-            }
-            jdbcTemplate.update(
-                """
-                INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down)
-                VALUES (?, ?, FALSE)
-                """,
-                targetHolomemId,
+                userId,
+                context.turnNumber,
+                pending.sourceActionType(),
+                sourceCardInstanceId,
                 cheerCardId
             );
+            SendCheerAction sendCheerAction = new SendCheerAction(
+                sourceCardInstanceId,
+                targetHolomemId,
+                pending.sourceActionType()
+            );
+            List<ActionResult> actionResults = gameActionExecutor.execute(effectContext, List.of(sendCheerAction));
+            if (actionResults.isEmpty() || !actionResults.get(0).success()) {
+                String reason = actionResults.isEmpty() ? "UNKNOWN" : asString(actionResults.get(0).details().get("reason"));
+                throw new IllegalStateException("發送吶喊失敗：" + reason);
+            }
             markDecisionResolved(pending.decisionId());
 
             context.match.setCurrentPhase(MatchPhase.MAIN.name());
@@ -3136,24 +3136,20 @@ public class MatchActionService {
             matchId,
             userId
         );
-        int updated = jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET zone = 'HAND',
-                order_index = ?,
-                is_face_down = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'DECK'
-            """,
-            nextHandOrder == null ? 1 : nextHandOrder,
+        EffectContext effectContext = EffectContext.system(matchId, userId, ACTION_TYPE_DRAW_TURN);
+        MoveZoneAction moveZoneAction = new MoveZoneAction(
             deckCardInstanceId,
-            matchId,
-            userId
+            userId,
+            "DECK",
+            "HAND",
+            nextHandOrder == null ? 1 : nextHandOrder,
+            false
         );
-        return updated == 1 ? deckCardInstanceId : null;
+        List<ActionResult> results = gameActionExecutor.execute(effectContext, List.of(moveZoneAction));
+        if (results.isEmpty() || !results.get(0).success()) {
+            return null;
+        }
+        return deckCardInstanceId;
     }
 
     private int countCardsInZone(Long matchId, Long userId, String zone) {
@@ -5369,64 +5365,28 @@ public class MatchActionService {
     }
 
     private Long loseLifeOnce(Long matchId, Long ownerUserId) {
-        Long lifeCardInstanceId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'LIFE'
-            ORDER BY order_index NULLS LAST, id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            ownerUserId
-        );
-        if (lifeCardInstanceId == null) {
+        EffectContext effectContext = EffectContext.system(matchId, ownerUserId, ACTION_TYPE_RULE_EVENT);
+        ReduceLifeAction reduceLifeAction = new ReduceLifeAction(ownerUserId, 1, "LOSE_LIFE_ONCE");
+        List<ActionResult> actionResults = gameActionExecutor.execute(effectContext, List.of(reduceLifeAction));
+        if (actionResults.isEmpty() || !actionResults.get(0).success()) {
             return null;
         }
-        int archiveOrder = jdbcTemplate.queryForObject(
-            """
-            SELECT COALESCE(MAX(order_index), 0) + 1
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'ARCHIVE'
-            """,
-            Integer.class,
-            matchId,
-            ownerUserId
-        );
-        jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET zone = 'ARCHIVE',
-                order_index = ?,
-                is_face_down = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'LIFE'
-            """,
-            archiveOrder,
-            lifeCardInstanceId,
-            matchId,
-            ownerUserId
-        );
-        jdbcTemplate.update(
-            """
-            UPDATE match_players
-            SET current_life = GREATEST(COALESCE(current_life, 0) - 1, 0),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE match_id = ?
-              AND user_id = ?
-            """,
-            matchId,
-            ownerUserId
-        );
-        return lifeCardInstanceId;
+        Object movedCards = actionResults.get(0).details().get("lifeCardInstanceIds");
+        if (!(movedCards instanceof List<?> movedList) || movedList.isEmpty()) {
+            return null;
+        }
+        Object first = movedList.get(0);
+        if (first instanceof Number n) {
+            return n.longValue();
+        }
+        if (first instanceof String s) {
+            try {
+                return Long.parseLong(s);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private String toJson(Map<String, Object> payload) {
