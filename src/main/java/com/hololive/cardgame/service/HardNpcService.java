@@ -12,18 +12,25 @@ import com.hololive.cardgame.model.LobbyMatch;
 import com.hololive.cardgame.repository.MatchRepository;
 import com.hololive.cardgame.repository.UserRepository;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class HardNpcService {
 
+    private static final Logger log = LoggerFactory.getLogger(HardNpcService.class);
     private static final String HARD_NPC_LINE_USER_ID = "npc-hard-v1";
     private static final int MAX_ACTION_STEPS = 64;
     private static final String TURN_START_INTERACTION_TYPE = "TURN_START";
+    private static final String DRAW_REVEAL_INTERACTION_TYPE = "DRAW_REVEAL";
+    private static final String CARD_SELECTION_INTERACTION_TYPE = "CARD_SELECTION";
     private static final String PENDING_STATUS = "PENDING";
 
     private final LobbyMatchService lobbyMatchService;
@@ -62,7 +69,13 @@ public class HardNpcService {
             GameStateResponse state;
             try {
                 state = matchGameStateService.getGameStateForUser(matchId, npcUserId);
-            } catch (RuntimeException ignored) {
+            } catch (RuntimeException ex) {
+                log.warn(
+                    "Hard NPC turn aborted while loading game state. matchId={}, npcUserId={}, step=LOAD_STATE",
+                    matchId,
+                    npcUserId,
+                    ex
+                );
                 break;
             }
             if (state == null || !"STARTED".equalsIgnoreCase(state.getStatus())) {
@@ -78,11 +91,18 @@ public class HardNpcService {
                 if (!executeOneAction(state, matchId, npcUserId)) {
                     break;
                 }
-            } catch (RuntimeException ignored) {
+            } catch (RuntimeException ex) {
+                log.warn(
+                    "Hard NPC turn aborted on action loop. matchId={}, npcUserId={}, turnNumber={}, step=ACTION_LOOP",
+                    matchId,
+                    npcUserId,
+                    state.getTurnNumber(),
+                    ex
+                );
                 break;
             }
         }
-        forceAdvanceTurnIfNpcStuck(matchId, npcUserId);
+        safeForceAdvanceTurn(matchId, npcUserId);
         return lobbyMatchService.getMatch(matchId);
     }
 
@@ -100,8 +120,13 @@ public class HardNpcService {
         if (npcUserId == null) {
             return lobbyMatchService.getMatch(matchId);
         }
-        forceAdvanceTurnIfNpcStuck(matchId, npcUserId);
+        safeForceAdvanceTurn(matchId, npcUserId);
         return lobbyMatchService.getMatch(matchId);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void safeForceAdvanceTurn(Long matchId, Long npcUserId) {
+        forceAdvanceTurnIfNpcStuck(matchId, npcUserId);
     }
 
     private boolean resolvePending(GameStateResponse state, Long matchId, Long npcUserId) {
@@ -110,7 +135,9 @@ public class HardNpcService {
             ResolveDecisionRequest resolve = new ResolveDecisionRequest();
             resolve.setDecisionId(pending.getInteractionId());
             String type = normalize(pending.getInteractionType());
-            if ("LOOK_TOP_DECK".equals(type)) {
+            if (isAutoResolveInteractionType(type)) {
+                // no extra selection payload
+            } else if ("LOOK_TOP_DECK".equals(type)) {
                 resolve.setPlacement("TOP");
             } else if ("SEND_CHEER".equals(type)) {
                 Long targetCardInstanceId = pickPreferredHolomemCardInstanceId(state, npcUserId);
@@ -123,6 +150,22 @@ public class HardNpcService {
                     .filter(id -> id != null && id > 0)
                     .toList();
                 resolve.setSelectedCardInstanceIds(ids);
+            } else if (CARD_SELECTION_INTERACTION_TYPE.equals(type)) {
+                int minSelect = pending.getMinSelect() == null ? 0 : Math.max(pending.getMinSelect(), 0);
+                if (minSelect > 0 && pending.getCards() != null && !pending.getCards().isEmpty()) {
+                    List<Long> selected = new ArrayList<>();
+                    for (var candidate : pending.getCards()) {
+                        Long cardInstanceId = candidate.getCardInstanceId();
+                        if (cardInstanceId == null || cardInstanceId <= 0) {
+                            continue;
+                        }
+                        selected.add(cardInstanceId);
+                        if (selected.size() >= minSelect) {
+                            break;
+                        }
+                    }
+                    resolve.setSelectedCardInstanceIds(selected);
+                }
             }
             matchActionService.resolveDecision(matchId, npcUserId, resolve);
             return true;
@@ -131,6 +174,11 @@ public class HardNpcService {
             var pending = state.getPendingDecisions().get(0);
             ResolveDecisionRequest resolve = new ResolveDecisionRequest();
             resolve.setDecisionId(pending.getDecisionId());
+            String type = normalize(pending.getDecisionType());
+            if (isAutoResolveInteractionType(type)) {
+                matchActionService.resolveDecision(matchId, npcUserId, resolve);
+                return true;
+            }
             int minSelect = pending.getMinSelect() == null ? 0 : Math.max(pending.getMinSelect(), 0);
             if (minSelect > 0 && pending.getCandidates() != null && !pending.getCandidates().isEmpty()) {
                 List<Long> selected = new ArrayList<>();
@@ -156,14 +204,26 @@ public class HardNpcService {
         try {
             matchActionService.drawTurn(matchId, npcUserId);
             return true;
-        } catch (RuntimeException ignored) {
-            // keep going
+        } catch (RuntimeException ex) {
+            log.warn(
+                "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=DRAW",
+                matchId,
+                npcUserId,
+                state.getTurnNumber(),
+                ex
+            );
         }
         try {
             matchActionService.sendTurnCheer(matchId, npcUserId);
             return true;
-        } catch (RuntimeException ignored) {
-            // keep going
+        } catch (RuntimeException ex) {
+            log.warn(
+                "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=SEND_TURN_CHEER",
+                matchId,
+                npcUserId,
+                state.getTurnNumber(),
+                ex
+            );
         }
         Long handHolomem = findPlayableHandHolomemCardInstanceId(matchId, npcUserId);
         if (handHolomem != null) {
@@ -173,8 +233,15 @@ public class HardNpcService {
                 playToStage.setTargetZone("BACK");
                 matchActionService.playToStage(matchId, npcUserId, playToStage);
                 return true;
-            } catch (RuntimeException ignored) {
-                // keep going
+            } catch (RuntimeException ex) {
+                log.warn(
+                    "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=PLAY_TO_STAGE, cardInstanceId={}",
+                    matchId,
+                    npcUserId,
+                    state.getTurnNumber(),
+                    handHolomem,
+                    ex
+                );
             }
         }
         Long centerCard = findZoneCardInstance(state, npcUserId, "CENTER");
@@ -186,8 +253,15 @@ public class HardNpcService {
                 move.setTargetZone("CENTER");
                 matchActionService.moveStageHolomem(matchId, npcUserId, move);
                 return true;
-            } catch (RuntimeException ignored) {
-                // keep going
+            } catch (RuntimeException ex) {
+                log.warn(
+                    "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=MOVE_BACK_TO_CENTER, cardInstanceId={}",
+                    matchId,
+                    npcUserId,
+                    state.getTurnNumber(),
+                    backCard,
+                    ex
+                );
             }
         }
         if (centerCard == null) {
@@ -206,8 +280,16 @@ public class HardNpcService {
                     attachCheer.setTargetHolomemCardInstanceId(centerCard);
                     matchActionService.attachCheer(matchId, npcUserId, attachCheer);
                     return true;
-                } catch (RuntimeException ignored) {
-                    // keep going
+                } catch (RuntimeException ex) {
+                    log.warn(
+                        "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=ATTACH_CHEER, cheerCardInstanceId={}, targetCardInstanceId={}",
+                        matchId,
+                        npcUserId,
+                        state.getTurnNumber(),
+                        cheerInHand,
+                        centerCard,
+                        ex
+                    );
                 }
             }
         }
@@ -222,8 +304,16 @@ public class HardNpcService {
                     bloom.setTargetHolomemCardInstanceId(bloomTarget);
                     matchActionService.bloom(matchId, npcUserId, bloom);
                     return true;
-                } catch (RuntimeException ignored) {
-                    // keep going
+                } catch (RuntimeException ex) {
+                    log.warn(
+                        "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=BLOOM, bloomCardInstanceId={}, targetCardInstanceId={}",
+                        matchId,
+                        npcUserId,
+                        state.getTurnNumber(),
+                        bloomCardInHand,
+                        bloomTarget,
+                        ex
+                    );
                 }
             }
         }
@@ -244,15 +334,30 @@ public class HardNpcService {
                 attack.setTargetCardInstanceId(opponentAny);
                 matchActionService.attackArt(matchId, npcUserId, attack);
                 return true;
-            } catch (RuntimeException ignored) {
-                // try next attacker
+            } catch (RuntimeException ex) {
+                log.warn(
+                    "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=ATTACK_ART, attackerCardInstanceId={}, targetCardInstanceId={}",
+                    matchId,
+                    npcUserId,
+                    state.getTurnNumber(),
+                    attacker,
+                    opponentAny,
+                    ex
+                );
             }
         }
 
         try {
             matchActionService.endTurn(matchId, npcUserId);
             return true;
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException ex) {
+            log.warn(
+                "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=END_TURN",
+                matchId,
+                npcUserId,
+                state.getTurnNumber(),
+                ex
+            );
             return false;
         }
     }
@@ -382,11 +487,41 @@ public class HardNpcService {
         if (center != null) {
             return center;
         }
-        Long collab = findZoneCardInstance(state, userId, "COLLAB");
-        if (collab != null) {
-            return collab;
+        Long backHighestHp = findHighestHpCardInstanceInZone(state, userId, "BACK");
+        if (backHighestHp != null) {
+            return backHighestHp;
         }
-        return findZoneCardInstance(state, userId, "BACK");
+        return findZoneCardInstance(state, userId, "COLLAB");
+    }
+
+    private Long findHighestHpCardInstanceInZone(GameStateResponse state, Long userId, String zone) {
+        PlayerZoneStateResponse player = findPlayerState(state, userId);
+        if (player == null || player.getBoardZones() == null) {
+            return null;
+        }
+        String normalizedZone = normalize(zone);
+        for (var boardZone : player.getBoardZones()) {
+            if (!normalizedZone.equals(normalize(boardZone.getZone()))) {
+                continue;
+            }
+            if (boardZone.getCards() == null || boardZone.getCards().isEmpty()) {
+                return null;
+            }
+            return boardZone.getCards().stream()
+                .filter(card -> card.getCardInstanceId() != null && card.getCardInstanceId() > 0)
+                .max(
+                    Comparator.comparingInt((com.hololive.cardgame.dto.ZoneCardInstanceResponse card) ->
+                        card.getCurrentHp() == null ? Integer.MIN_VALUE : card.getCurrentHp()
+                    ).thenComparingInt(card -> card.getMaxHp() == null ? Integer.MIN_VALUE : card.getMaxHp())
+                )
+                .map(card -> card.getCardInstanceId())
+                .orElse(null);
+        }
+        return null;
+    }
+
+    private boolean isAutoResolveInteractionType(String type) {
+        return TURN_START_INTERACTION_TYPE.equals(type) || DRAW_REVEAL_INTERACTION_TYPE.equals(type);
     }
 
     private Long findZoneCardInstance(GameStateResponse state, Long userId, String zone) {

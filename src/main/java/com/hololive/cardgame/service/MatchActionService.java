@@ -2153,6 +2153,12 @@ public class MatchActionService {
             context.turnNumber
         );
         Map<String, Object> centerReplenishSummary = resolveEndTurnCenterReplenishCycle(matchId, userId);
+        if (
+            !"active".equalsIgnoreCase(asString(context.match.getStatus())) ||
+            !LobbyMatchStatus.STARTED.name().equalsIgnoreCase(asString(context.match.getLobbyStatus()))
+        ) {
+            throw new IllegalStateException("END_TURN 結算流程異常：對戰已非進行中狀態");
+        }
         jdbcTemplate.update(
             """
             UPDATE match_players

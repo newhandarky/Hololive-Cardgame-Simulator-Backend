@@ -1002,6 +1002,30 @@ class MatchActionServiceIntegrationTest {
         assertThat(status).isEqualTo("active");
         assertThat(currentTurnPlayerId).isEqualTo(guestId);
         assertThat(phase).isEqualTo("MAIN");
+
+        Integer matchFinishedActions = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND action_type = 'MATCH_FINISHED'
+            """,
+            Integer.class,
+            matchId
+        );
+        Integer matchFinishedRuleEvents = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND action_type = 'RULE_EVENT'
+              AND payload::text LIKE '%"eventType":"MATCH_FINISHED"%'
+            """,
+            Integer.class,
+            matchId
+        );
+        assertThat(matchFinishedActions).isZero();
+        assertThat(matchFinishedRuleEvents).isZero();
     }
 
     @Test
