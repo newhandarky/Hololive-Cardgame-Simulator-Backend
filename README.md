@@ -50,6 +50,10 @@ docker start holocardgame_db
 ### 2) 啟動後端
 ```bash
 ./mvnw spring-boot:run
+# 查看log
+./mvnw spring-boot:run 2>&1 | tee /tmp/backend.log
+# 搭配另一個終端機看LOG
+tail -f /tmp/backend.log | grep -iE "hard npc|action_loop|step="
 ```
 
 ## 常用指令
@@ -57,9 +61,19 @@ docker start holocardgame_db
 ```bash
 ./mvnw -q compile
 ./mvnw test
+./scripts/run_rule_regression_tests.sh
 ./mvnw clean package
 ./mvnw dependency:tree
 ```
+
+### 規則回歸測試群（P3-2）
+- 本地執行：`./scripts/run_rule_regression_tests.sh`
+- CI：`.github/workflows/backend-rule-regression.yml`
+- 覆蓋重點：
+  - NPC 不卡回合
+  - `END_TURN` 不誤判終局
+  - Buzz down 額外 life loss
+  - アーツ / バトンタッチ費用驗證
 
 ### Flyway（手動執行）
 ```bash

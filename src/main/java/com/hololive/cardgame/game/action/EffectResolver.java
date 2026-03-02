@@ -1,90 +1,157 @@
 package com.hololive.cardgame.game.action;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.BiFunction;
 import org.springframework.stereotype.Component;
 
 @Component
 public class EffectResolver {
 
+    private static final Set<String> FIRST_BATCH_EFFECT_TYPES = Set.of(
+        "DAMAGE",
+        "BUFF",
+        "DEBUFF",
+        "SEARCH",
+        "MOVE_ZONE",
+        "ADD_CHEER",
+        "REMOVE_CHEER",
+        "DRAW",
+        "HEAL",
+        "ROLL_DICE",
+        "DOWN_EXTRA_LIFE"
+    );
+
+    private final Map<String, BiFunction<EffectContext, JsonNode, List<AtomicAction>>> resolvers = createResolvers();
+
     public List<AtomicAction> resolve(EffectContext context, String effectType, JsonNode effectJson) {
         String normalizedEffectType = normalize(effectType);
-        if ("DRAW".equals(normalizedEffectType)) {
-            int drawCount = readInt(effectJson, "drawCount", 1);
-            return List.of(new DrawAction(context.actorUserId(), Math.max(drawCount, 0), "DECK", "HAND"));
+        BiFunction<EffectContext, JsonNode, List<AtomicAction>> resolver = resolvers.get(normalizedEffectType);
+        if (resolver != null) {
+            return resolver.apply(context, effectJson);
         }
-        if ("MOVE_ZONE".equals(normalizedEffectType)) {
-            Long cardInstanceId = readLong(effectJson, "cardInstanceId");
-            String fromZone = readText(effectJson, "fromZone");
-            String toZone = readText(effectJson, "toZone");
-            Integer orderIndex = effectJson != null && effectJson.hasNonNull("orderIndex")
-                ? effectJson.get("orderIndex").asInt()
-                : null;
-            Boolean faceDown = effectJson != null && effectJson.hasNonNull("faceDown")
-                ? effectJson.get("faceDown").asBoolean()
-                : null;
-            if (cardInstanceId == null || cardInstanceId <= 0 || !hasText(fromZone) || !hasText(toZone)) {
-                return List.of();
-            }
-            return List.of(new MoveZoneAction(cardInstanceId, context.actorUserId(), fromZone, toZone, orderIndex, faceDown));
-        }
-        if ("DAMAGE".equals(normalizedEffectType)) {
-            Long targetHolomemId = readLong(effectJson, "targetHolomemId");
-            int amount = readInt(effectJson, "amount", 0);
-            if (targetHolomemId == null || targetHolomemId <= 0 || amount <= 0) {
-                return List.of();
-            }
-            return List.of(new DamageAction(targetHolomemId, amount, context.sourceActionType()));
-        }
-        if ("REDUCE_LIFE".equals(normalizedEffectType)) {
-            Long targetUserId = readLong(effectJson, "targetUserId");
-            int amount = readInt(effectJson, "amount", 1);
-            Long resolvedTargetUserId = targetUserId == null || targetUserId <= 0 ? context.actorUserId() : targetUserId;
-            if (resolvedTargetUserId == null || resolvedTargetUserId <= 0 || amount <= 0) {
-                return List.of();
-            }
-            return List.of(new ReduceLifeAction(resolvedTargetUserId, amount, context.sourceActionType()));
-        }
-        if ("ADD_CHEER".equals(normalizedEffectType) || "SEND_CHEER".equals(normalizedEffectType)) {
-            Long cheerCardInstanceId = readLong(effectJson, "cheerCardInstanceId");
-            Long targetHolomemId = readLong(effectJson, "targetHolomemId");
-            if (cheerCardInstanceId == null || cheerCardInstanceId <= 0 || targetHolomemId == null || targetHolomemId <= 0) {
-                return List.of();
-            }
-            return List.of(new SendCheerAction(cheerCardInstanceId, targetHolomemId, context.sourceActionType()));
-        }
-        if ("DOWN_EXTRA_LIFE".equals(normalizedEffectType)) {
-            int amount = readInt(effectJson, "amount", 1);
-            Long targetUserId = readLong(effectJson, "targetUserId");
-            Long resolvedTargetUserId = targetUserId == null || targetUserId <= 0 ? context.actorUserId() : targetUserId;
-            if (resolvedTargetUserId == null || resolvedTargetUserId <= 0 || amount <= 0) {
-                return List.of();
-            }
-            return List.of(new ReduceLifeAction(resolvedTargetUserId, amount, "DOWN_EXTRA_LIFE"));
-        }
-        if ("BUFF".equals(normalizedEffectType) || "DEBUFF".equals(normalizedEffectType)) {
-            // 由 match_turn_effects 寫入流程處理，暫不轉為 AtomicAction。
-            return List.of();
-        }
-        if ("SEARCH".equals(normalizedEffectType)) {
-            // 需互動選牌，暫由既有 pending decision 流程處理。
-            return List.of();
-        }
-        if ("REMOVE_CHEER".equals(normalizedEffectType)) {
-            // 需指定來源與退回區域，暫由既有邏輯處理。
-            return List.of();
-        }
-        if ("HEAL".equals(normalizedEffectType)) {
-            // 目前治療流程依賴既有資料結構，後續再拆成原子動作。
-            return List.of();
-        }
-        if ("ROLL_DICE".equals(normalizedEffectType)) {
-            // 隨機來源與條件分支仍由既有 effect service 統一處理。
-            return List.of();
-        }
-        // P1-1: 先建立對映骨架，其餘 effectType 在 P1-2/P1-3 持續補齊。
         return List.of();
+    }
+
+    public boolean hasResolver(String effectType) {
+        return resolvers.containsKey(normalize(effectType));
+    }
+
+    public Set<String> mappedEffectTypes() {
+        return Set.copyOf(resolvers.keySet());
+    }
+
+    private Map<String, BiFunction<EffectContext, JsonNode, List<AtomicAction>>> createResolvers() {
+        Map<String, BiFunction<EffectContext, JsonNode, List<AtomicAction>>> map = new LinkedHashMap<>();
+        map.put("DRAW", this::resolveDraw);
+        map.put("MOVE_ZONE", this::resolveMoveZone);
+        map.put("DAMAGE", this::resolveDamage);
+        map.put("ADD_CHEER", this::resolveAddCheer);
+        map.put("SEND_CHEER", this::resolveAddCheer);
+        map.put("REDUCE_LIFE", this::resolveReduceLife);
+        map.put("DOWN_EXTRA_LIFE", this::resolveDownExtraLife);
+        map.put("BUFF", this::resolveBuffDebuff);
+        map.put("DEBUFF", this::resolveBuffDebuff);
+        map.put("SEARCH", this::resolveSearch);
+        map.put("REMOVE_CHEER", this::resolveRemoveCheer);
+        map.put("HEAL", this::resolveHeal);
+        map.put("ROLL_DICE", this::resolveRollDice);
+        return Map.copyOf(map);
+    }
+
+    private List<AtomicAction> resolveDraw(EffectContext context, JsonNode effectJson) {
+        int drawCount = readInt(effectJson, "drawCount", 1);
+        return List.of(new DrawAction(context.actorUserId(), Math.max(drawCount, 0), "DECK", "HAND"));
+    }
+
+    private List<AtomicAction> resolveMoveZone(EffectContext context, JsonNode effectJson) {
+        Long cardInstanceId = readLong(effectJson, "cardInstanceId");
+        String fromZone = readText(effectJson, "fromZone");
+        String toZone = readText(effectJson, "toZone");
+        Integer orderIndex = effectJson != null && effectJson.hasNonNull("orderIndex")
+            ? effectJson.get("orderIndex").asInt()
+            : null;
+        Boolean faceDown = effectJson != null && effectJson.hasNonNull("faceDown")
+            ? effectJson.get("faceDown").asBoolean()
+            : null;
+        if (cardInstanceId == null || cardInstanceId <= 0 || !hasText(fromZone) || !hasText(toZone)) {
+            return List.of(unimplemented("MOVE_ZONE", "MISSING_REQUIRED_FIELDS"));
+        }
+        return List.of(new MoveZoneAction(cardInstanceId, context.actorUserId(), fromZone, toZone, orderIndex, faceDown));
+    }
+
+    private List<AtomicAction> resolveDamage(EffectContext context, JsonNode effectJson) {
+        Long targetHolomemId = readLong(effectJson, "targetHolomemId");
+        int amount = readInt(effectJson, "amount", 0);
+        if (targetHolomemId == null || targetHolomemId <= 0 || amount <= 0) {
+            return List.of(unimplemented("DAMAGE", "MISSING_TARGET_OR_AMOUNT"));
+        }
+        return List.of(new DamageAction(targetHolomemId, amount, context.sourceActionType()));
+    }
+
+    private List<AtomicAction> resolveAddCheer(EffectContext context, JsonNode effectJson) {
+        Long cheerCardInstanceId = readLong(effectJson, "cheerCardInstanceId");
+        Long targetHolomemId = readLong(effectJson, "targetHolomemId");
+        if (cheerCardInstanceId == null || cheerCardInstanceId <= 0 || targetHolomemId == null || targetHolomemId <= 0) {
+            return List.of(unimplemented("ADD_CHEER", "MISSING_CHEER_OR_TARGET"));
+        }
+        return List.of(new SendCheerAction(cheerCardInstanceId, targetHolomemId, context.sourceActionType()));
+    }
+
+    private List<AtomicAction> resolveReduceLife(EffectContext context, JsonNode effectJson) {
+        Long targetUserId = readLong(effectJson, "targetUserId");
+        int amount = readInt(effectJson, "amount", 1);
+        Long resolvedTargetUserId = targetUserId == null || targetUserId <= 0 ? context.actorUserId() : targetUserId;
+        if (resolvedTargetUserId == null || resolvedTargetUserId <= 0 || amount <= 0) {
+            return List.of(unimplemented("REDUCE_LIFE", "MISSING_TARGET_OR_AMOUNT"));
+        }
+        return List.of(new ReduceLifeAction(resolvedTargetUserId, amount, context.sourceActionType()));
+    }
+
+    private List<AtomicAction> resolveDownExtraLife(EffectContext context, JsonNode effectJson) {
+        Long targetUserId = readLong(effectJson, "targetUserId");
+        int amount = readInt(effectJson, "amount", 1);
+        Long resolvedTargetUserId = targetUserId == null || targetUserId <= 0 ? context.actorUserId() : targetUserId;
+        if (resolvedTargetUserId == null || resolvedTargetUserId <= 0 || amount <= 0) {
+            return List.of(unimplemented("DOWN_EXTRA_LIFE", "MISSING_TARGET_OR_AMOUNT"));
+        }
+        return List.of(new ReduceLifeAction(resolvedTargetUserId, amount, "DOWN_EXTRA_LIFE"));
+    }
+
+    private List<AtomicAction> resolveBuffDebuff(EffectContext context, JsonNode effectJson) {
+        return List.of(unimplemented(readText(effectJson, "type"), "HANDLED_BY_LEGACY_EFFECT_FLOW"));
+    }
+
+    private List<AtomicAction> resolveSearch(EffectContext context, JsonNode effectJson) {
+        return List.of(unimplemented("SEARCH", "REQUIRES_INTERACTIVE_SELECTION"));
+    }
+
+    private List<AtomicAction> resolveRemoveCheer(EffectContext context, JsonNode effectJson) {
+        return List.of(unimplemented("REMOVE_CHEER", "REQUIRES_TARGET_AND_DESTINATION_RULES"));
+    }
+
+    private List<AtomicAction> resolveHeal(EffectContext context, JsonNode effectJson) {
+        return List.of(unimplemented("HEAL", "LEGACY_HEAL_PATH_NOT_SPLIT_YET"));
+    }
+
+    private List<AtomicAction> resolveRollDice(EffectContext context, JsonNode effectJson) {
+        return List.of(unimplemented("ROLL_DICE", "REQUIRES_DICE_AND_BRANCHING_FLOW"));
+    }
+
+    private UnimplementedAction unimplemented(String effectType, String reason) {
+        String normalized = normalize(effectType);
+        if (!hasText(normalized)) {
+            normalized = "UNIMPLEMENTED";
+        }
+        return new UnimplementedAction(normalized, reason);
+    }
+
+    public Set<String> firstBatchEffectTypes() {
+        return FIRST_BATCH_EFFECT_TYPES;
     }
 
     private String normalize(String value) {

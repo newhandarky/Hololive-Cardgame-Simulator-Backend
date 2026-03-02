@@ -82,6 +82,10 @@ public class MatchActionService {
     private final GameActionExecutor gameActionExecutor;
     private final SecureRandom random = new SecureRandom();
 
+    /**
+     * 對戰行為服務建構子。
+     * 聚合所有對戰指令所需元件：交易內資料更新、效果結算、事件觸發與 action pipeline。
+     */
     public MatchActionService(
         MatchRepository matchRepository,
         MatchPlayerRepository matchPlayerRepository,
@@ -102,6 +106,10 @@ public class MatchActionService {
         this.gameActionExecutor = gameActionExecutor;
     }
 
+    /**
+     * 將手牌 Holomem 放置到場上（目前僅允許 DEBUT/SPOT 且目標為 BACK）。
+     * 會建立 match_holomems 與 stack 關聯，並觸發進場 hook。
+     */
     @Transactional
     public void playToStage(Long matchId, Long userId, PlayToStageActionRequest request) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
@@ -230,6 +238,10 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 執行 Bloom（手牌 FIRST/SECOND/BUZZ 疊放到場上同名目標）。
+     * 會驗證 Bloom 順序、目標合法性、傷害繼承條件，並結算 Bloom 效果/勝負檢查。
+     */
     @Transactional
     public void bloom(Long matchId, Long userId, BloomActionRequest request) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
@@ -427,6 +439,10 @@ public class MatchActionService {
         enqueueLifeLossSendCheerInteractions(context.match, matchId, bloomEffectSummary, context.turnNumber);
     }
 
+    /**
+     * 使用 Support 卡（一般支援或附加型支援）。
+     * 會處理 LIMITED 限制、目標合法性、效果解析與後續互動決策。
+     */
     @Transactional
     public void playSupport(Long matchId, Long userId, PlaySupportActionRequest request) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
@@ -701,6 +717,10 @@ public class MatchActionService {
         enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummary, context.turnNumber);
     }
 
+    /**
+     * 解決 pending decision / interaction。
+     * 包含 TURN_START、DRAW_REVEAL、SEND_CHEER 及各種效果後續選牌流程。
+     */
     @Transactional
     public void resolveDecision(Long matchId, Long userId, ResolveDecisionRequest request) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN), true);
@@ -1035,6 +1055,10 @@ public class MatchActionService {
         enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummary, context.turnNumber);
     }
 
+    /**
+     * 執行起手調度（Mulligan），並套用「無 Debut 強制遞減重抽」規則。
+     * 當雙方完成後，會把回合交回先攻並建立 TURN_START 互動。
+     */
     @Transactional
     public void mulligan(Long matchId, Long userId, MulliganActionRequest request) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.RESET));
@@ -1112,6 +1136,10 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 執行回合抽牌（每回合一次）。
+     * 抽牌後會建立 DRAW_REVEAL 互動，供前端以 modal 呈現確認。
+     */
     @Transactional
     public void drawTurn(Long matchId, Long userId) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
@@ -1158,6 +1186,10 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 發送回合 Cheer（每回合一次）。
+     * 實際附加目標透過 SEND_CHEER pending interaction 讓玩家選擇。
+     */
     @Transactional
     public void sendTurnCheer(Long matchId, Long userId) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
@@ -1185,6 +1217,10 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 移動場上 Holomem（目前支援 BACK -> CENTER/COLLAB）。
+     * 移動到 COLLAB 時會連帶處理 holopower 與 collab 觸發效果。
+     */
     @Transactional
     public void moveStageHolomem(Long matchId, Long userId, MoveStageHolomemActionRequest request) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
@@ -1365,6 +1401,10 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 使用 Oshi 技能（NORMAL/SP）。
+     * 會檢查回合使用次數、SP 一場一次限制，並結算 holopower 成本與技能效果。
+     */
     @Transactional
     public void useOshiSkill(Long matchId, Long userId, UseOshiSkillActionRequest request) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
@@ -1521,6 +1561,10 @@ public class MatchActionService {
         enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummary, context.turnNumber);
     }
 
+    /**
+     * 執行 バトンタッチ。
+     * 來源限 CENTER/COLLAB，目標限非休息 BACK；同時套用成本修正並支付 Cheer 成本。
+     */
     @Transactional
     public void batonTouch(Long matchId, Long userId, BatonTouchActionRequest request) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
@@ -1682,6 +1726,10 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 手動附加 Cheer 到指定我方 Holomem。
+     * Cheer 來源允許 HAND/CHEER_DECK，附加後寫入 match_holomem_cheers。
+     */
     @Transactional
     public void attachCheer(Long matchId, Long userId, AttachCheerActionRequest request) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
@@ -1777,6 +1825,10 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 發動藝能攻擊（CENTER/COLLAB 各回合各一次）。
+     * 會做費用驗證、傷害與關鍵字加成計算、gift 觸發、以及 down/life/勝負結算。
+     */
     @Transactional
     public void attackArt(Long matchId, Long userId, AttackArtActionRequest request) {
         ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN, MatchPhase.PERFORMANCE));
@@ -2003,6 +2055,9 @@ public class MatchActionService {
         enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummaryForChecks, context.turnNumber);
     }
 
+    /**
+     * 解析 DAMAGE_REDIRECT 類行動鎖效果，必要時回傳改向目標並消耗該效果。
+     */
     private DamageRedirectTarget resolveDamageRedirectTarget(Long matchId, Long affectedUserId, int currentTurn) {
         if (matchId == null || affectedUserId == null || currentTurn <= 0) {
             return null;
@@ -2048,6 +2103,9 @@ public class MatchActionService {
         return null;
     }
 
+    /**
+     * 依 holomemId 載入可用目標資訊（match_card_id 與主色）。
+     */
     private TargetHolomem loadTargetHolomemById(Long matchId, Long ownerUserId, Long holomemId) {
         if (matchId == null || ownerUserId == null || holomemId == null || holomemId <= 0) {
             return null;
@@ -2075,6 +2133,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 計算本回合對攻擊方生效的傷害加成（非受傷減免類）。
+     */
     private int resolveTurnArtDamageModifier(Long matchId, Long userId, int currentTurn) {
         if (matchId == null || userId == null || currentTurn <= 0) {
             return 0;
@@ -2098,6 +2159,9 @@ public class MatchActionService {
         return modifier == null ? 0 : modifier;
     }
 
+    /**
+     * 計算本回合對受擊方生效的受傷減免總和。
+     */
     private int resolveIncomingDamageReduction(Long matchId, Long targetUserId, int currentTurn) {
         if (matchId == null || targetUserId == null || currentTurn <= 0) {
             return 0;
@@ -2123,6 +2187,10 @@ public class MatchActionService {
         return reduction == null ? 0 : reduction;
     }
 
+    /**
+     * 結束目前回合並交棒給對手。
+     * 會先驗證必要回合動作（抽牌、吶喊）是否完成，再重置狀態與建立對手 TURN_START 互動。
+     */
     @Transactional
     public void endTurn(Long matchId, Long userId) {
         ActionContext context = loadActionContext(
@@ -2211,6 +2279,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 回合開始重置對手休息狀態（受 UNREST 鎖定者不重置）。
+     */
     private int resetRestedHolomemsForTurnStart(Long matchId, Long userId, int currentTurn) {
         if (matchId == null || userId == null || currentTurn <= 0) {
             return 0;
@@ -2255,6 +2326,10 @@ public class MatchActionService {
         return resetCount;
     }
 
+    /**
+     * 投降並立即結束對戰。
+     * 以當前玩家為敗北方，reason 為 CONCEDE。
+     */
     @Transactional
     public void concede(Long matchId, Long userId) {
         MatchEntity match = matchRepository.findByIdForUpdate(matchId)
@@ -2275,10 +2350,16 @@ public class MatchActionService {
         matchRepository.saveAndFlush(match);
     }
 
+    /**
+     * 載入行為執行上下文（預設不允許有 pending decision 阻擋）。
+     */
     private ActionContext loadActionContext(Long matchId, Long userId, Set<MatchPhase> allowedPhases) {
         return loadActionContext(matchId, userId, allowedPhases, false);
     }
 
+    /**
+     * 載入並驗證操作上下文：對戰狀態、回合歸屬、phase 合法性、pending 阻擋。
+     */
     private ActionContext loadActionContext(
         Long matchId,
         Long userId,
@@ -2333,6 +2414,9 @@ public class MatchActionService {
         return new ActionContext(match, phase, turnNumber, opponentUserId, false);
     }
 
+    /**
+     * 開場 RESET 自動收斂流程：自動完成必要 mulligan 規則檢查並建立先攻 TURN_START。
+     */
     private void autoResolveOpeningResetAndStartTurn(Long matchId, MatchEntity match) {
         if (matchId == null || match == null || parsePhase(match.getCurrentPhase()) != MatchPhase.RESET) {
             return;
@@ -2398,6 +2482,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 判斷本回合是否已執行過抽牌動作。
+     */
     private boolean hasDrawTurnAction(Long matchId, Long userId, int turnNumber) {
         if (matchId == null || userId == null || turnNumber <= 0) {
             return false;
@@ -2420,6 +2507,9 @@ public class MatchActionService {
         return count != null && count > 0;
     }
 
+    /**
+     * END_TURN 前中心補位循環：當 CENTER 空缺時，嘗試由 BACK 自動補上。
+     */
     private Map<String, Object> resolveEndTurnCenterReplenishCycle(Long matchId, Long userId) {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("applied", false);
@@ -2466,6 +2556,9 @@ public class MatchActionService {
         return summary;
     }
 
+    /**
+     * 執行一次 BACK -> CENTER 自動補位，並回傳本次步驟摘要。
+     */
     private Map<String, Object> autoReplenishCenterFromBackOnce(Long matchId, Long userId) {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("applied", false);
@@ -2549,6 +2642,9 @@ public class MatchActionService {
         return summary;
     }
 
+    /**
+     * 判斷我方是否存在 CENTER Holomem。
+     */
     private boolean hasCenterHolomem(Long matchId, Long userId) {
         Integer centerCount = jdbcTemplate.queryForObject(
             """
@@ -2565,6 +2661,9 @@ public class MatchActionService {
         return centerCount != null && centerCount > 0;
     }
 
+    /**
+     * 判斷本回合是否已執行 TURN_CHEER。
+     */
     private boolean hasTurnCheerAction(Long matchId, Long userId, int turnNumber) {
         if (matchId == null || userId == null || turnNumber <= 0) {
             return false;
@@ -2587,6 +2686,9 @@ public class MatchActionService {
         return count != null && count > 0;
     }
 
+    /**
+     * 判斷是否具備執行回合 Cheer 的必要條件（牌庫有 Cheer 且場上有 Holomem）。
+     */
     private boolean canPerformTurnCheerAction(Long matchId, Long userId) {
         if (matchId == null || userId == null) {
             return false;
@@ -2621,6 +2723,9 @@ public class MatchActionService {
         return stageHolomemCount != null && stageHolomemCount > 0;
     }
 
+    /**
+     * 判斷本回合是否已使用過 COLLAB。
+     */
     private boolean hasUsedCollabThisTurn(Long matchId, Long userId, int turnNumber) {
         if (matchId == null || userId == null || turnNumber <= 0) {
             return false;
@@ -2642,6 +2747,9 @@ public class MatchActionService {
         return count != null && count > 0;
     }
 
+    /**
+     * 判斷本回合是否已使用過バトンタッチ。
+     */
     private boolean hasUsedBatonTouchThisTurn(Long matchId, Long userId, int turnNumber) {
         if (matchId == null || userId == null || turnNumber <= 0) {
             return false;
@@ -2664,6 +2772,9 @@ public class MatchActionService {
         return count != null && count > 0;
     }
 
+    /**
+     * 查詢額外 Bloom 許可效果 id（同回合二次 Bloom 例外）。
+     */
     private Long findExtraBloomAllowanceId(Long matchId, Long userId, int turnNumber, Long targetHolomemId) {
         if (matchId == null || userId == null || turnNumber <= 0 || targetHolomemId == null) {
             return null;
@@ -2688,6 +2799,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 消耗一筆額外 Bloom 許可效果。
+     */
     private void consumeExtraBloomAllowance(Long allowanceId, Long matchId, Long userId) {
         if (allowanceId == null || matchId == null || userId == null) {
             return;
@@ -2706,6 +2820,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 將指定牌庫卡移到牌庫底部。
+     */
     private void moveDeckCardToBottom(Long matchId, Long userId, Long cardInstanceId) {
         if (matchId == null || userId == null || cardInstanceId == null || cardInstanceId <= 0) {
             return;
@@ -2739,6 +2856,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 驗證牌庫底排序提交內容（數量、唯一性、候選一致性）。
+     */
     private void validateDeckBottomReorderSelection(List<Long> orderedCardInstanceIds, List<Long> candidateCardInstanceIds) {
         List<Long> ordered = orderedCardInstanceIds == null ? List.of() : orderedCardInstanceIds;
         List<Long> candidates = candidateCardInstanceIds == null ? List.of() : candidateCardInstanceIds;
@@ -2755,6 +2875,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 將牌庫頂卡移到 HOLOPOWER。
+     */
     private Long moveTopDeckCardToHolopower(Long matchId, Long userId) {
         Long deckCardInstanceId = jdbcTemplate.query(
             """
@@ -2805,6 +2928,9 @@ public class MatchActionService {
         return moved == 1 ? deckCardInstanceId : null;
     }
 
+    /**
+     * 載入玩家可用的 Oshi 技能資料（NORMAL / SP）。
+     */
     private Map<String, Object> loadOwnedOshiSkill(Long matchId, Long userId, String requestedSkillType) {
         return jdbcTemplate.query(
             """
@@ -2847,6 +2973,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 從 effect json 解析主 effectType。
+     */
     private String resolvePrimaryEffectType(String effectJson) {
         JsonNode node = parseJson(effectJson);
         if (node != null && node.isObject()) {
@@ -2858,6 +2987,9 @@ public class MatchActionService {
         return "UNIMPLEMENTED";
     }
 
+    /**
+     * 從 effect json 解析 targetType。
+     */
     private String resolveEffectTargetType(String effectJson) {
         JsonNode node = parseJson(effectJson);
         if (node == null || !node.isObject()) {
@@ -2874,6 +3006,9 @@ public class MatchActionService {
         return "";
     }
 
+    /**
+     * 支付並歸檔 Holopower 成本。
+     */
     private Map<String, Object> consumeHolopowerCostToArchive(Long matchId, Long userId, int holopowerCost) {
         int required = Math.max(holopowerCost, 0);
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -2955,6 +3090,9 @@ public class MatchActionService {
         return summary;
     }
 
+    /**
+     * 將 COLLAB Holomem 退回 BACK 並設為休息。
+     */
     private void returnCollabToBackAsRested(Long matchId, Long userId) {
         if (matchId == null || userId == null) {
             return;
@@ -2974,6 +3112,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 載入指定卡片實例（需為該玩家持有）。
+     */
     private Map<String, Object> loadOwnedCardInstance(Long matchId, Long userId, Long cardInstanceId) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
             """
@@ -2993,6 +3134,9 @@ public class MatchActionService {
         return rows.get(0);
     }
 
+    /**
+     * 推導下一位應執行 mulligan 的玩家。
+     */
     private Long resolveNextMulliganUser(MatchEntity match, List<MatchPlayerEntity> players) {
         if (match == null || players == null || players.isEmpty()) {
             return null;
@@ -3008,6 +3152,9 @@ public class MatchActionService {
         return null;
     }
 
+    /**
+     * 判斷指定玩家是否已完成 mulligan。
+     */
     private boolean isMulliganDone(List<MatchPlayerEntity> players, Long userId) {
         if (players == null || userId == null) {
             return true;
@@ -3020,6 +3167,9 @@ public class MatchActionService {
         return true;
     }
 
+    /**
+     * 將手牌洗回牌庫並重抽指定張數。
+     */
     private void redrawOpeningHand(Long matchId, Long userId, int drawCount) {
         jdbcTemplate.update(
             """
@@ -3106,6 +3256,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 從牌庫頂抽 1 張到手牌。
+     */
     private Long drawTopDeckCardToHand(Long matchId, Long userId) {
         Long deckCardInstanceId = jdbcTemplate.query(
             """
@@ -3152,6 +3305,9 @@ public class MatchActionService {
         return deckCardInstanceId;
     }
 
+    /**
+     * 計算指定 zone 卡片數量。
+     */
     private int countCardsInZone(Long matchId, Long userId, String zone) {
         Integer count = jdbcTemplate.queryForObject(
             """
@@ -3169,6 +3325,10 @@ public class MatchActionService {
         return count == null ? 0 : count;
     }
 
+    /**
+     * 強制開場 Debut 規則：
+     * 若手牌無 Debut，則遞減重抽直到有 Debut 或手牌降到 1。
+     */
     private MulliganResolution enforceOpeningDebutRule(Long matchId, Long userId) {
         int forcedRedrawCount = 0;
         List<Integer> forcedDrawSequence = new ArrayList<>();
@@ -3188,6 +3348,9 @@ public class MatchActionService {
         return new MulliganResolution(forcedRedrawCount, forcedDrawSequence, true, handCount);
     }
 
+    /**
+     * 判斷手牌是否含有 Debut Holomem。
+     */
     private boolean hasDebutMemberInHand(Long matchId, Long userId) {
         Integer count = jdbcTemplate.queryForObject(
             """
@@ -3206,6 +3369,9 @@ public class MatchActionService {
         return count != null && count > 0;
     }
 
+    /**
+     * 以敗北方式結束對戰，並統一寫入 MATCH_FINISHED 與 RULE_EVENT。
+     */
     private void finishMatchByDefeat(MatchEntity match, Long loserUserId, String reason, int turnNumber) {
         Long winnerUserId = resolveOpponent(match, loserUserId);
         String reasonCode = standardizeReasonCode(reason);
@@ -3241,6 +3407,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 以平手方式結束對戰，並統一寫入 MATCH_FINISHED 與 RULE_EVENT。
+     */
     private void finishMatchAsDraw(MatchEntity match, Long actorUserId, String reason, int turnNumber) {
         String reasonCode = standardizeReasonCode(reason);
         match.setStatus("finished");
@@ -3276,6 +3445,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 依「場上無 Holomem」規則判斷是否終局。
+     */
     private boolean evaluateNoHolomemDefeat(MatchEntity match, Long actorUserId, int turnNumber) {
         if (match == null || !"active".equalsIgnoreCase(asString(match.getStatus()))) {
             return false;
@@ -3299,6 +3471,9 @@ public class MatchActionService {
         return true;
     }
 
+    /**
+     * 依「Life 歸零」規則判斷是否終局。
+     */
     private boolean evaluateLifeDefeat(MatchEntity match, Long actorUserId, int turnNumber) {
         if (match == null || !"active".equalsIgnoreCase(asString(match.getStatus()))) {
             return false;
@@ -3322,6 +3497,9 @@ public class MatchActionService {
         return true;
     }
 
+    /**
+     * 計算場上 Holomem 數量（CENTER/COLLAB/BACK）。
+     */
     private int countStageHolomems(Long matchId, Long userId) {
         Integer count = jdbcTemplate.queryForObject(
             """
@@ -3337,6 +3515,9 @@ public class MatchActionService {
         return count == null ? 0 : count;
     }
 
+    /**
+     * 從效果摘要遞迴判斷是否存在 down 事件。
+     */
     private boolean hasHolomemDowned(Object summaryObject) {
         if (summaryObject == null) {
             return false;
@@ -3358,6 +3539,9 @@ public class MatchActionService {
         return false;
     }
 
+    /**
+     * 從效果摘要遞迴判斷是否存在 life 減少事件。
+     */
     private boolean hasLifeReduced(Object summaryObject) {
         if (summaryObject == null) {
             return false;
@@ -3381,6 +3565,9 @@ public class MatchActionService {
         return false;
     }
 
+    /**
+     * 合併主效果與附加效果摘要，供後續勝負檢查共用。
+     */
     private Map<String, Object> mergeEffectSummaryForChecks(
         Map<String, Object> primary,
         List<Map<String, Object>> additionalEffects
@@ -3400,6 +3587,9 @@ public class MatchActionService {
         return merged;
     }
 
+    /**
+     * 根據 life 減少結果建立補發 Cheer 互動（例如被擊倒失去 life 後）。
+     */
     private void enqueueLifeLossSendCheerInteractions(
         MatchEntity match,
         Long matchId,
@@ -3452,12 +3642,18 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 從摘要中收集所有 lost life 的卡片實例 id。
+     */
     private List<Long> collectLostLifeCardInstanceIds(Object summaryObject) {
         LinkedHashSet<Long> ids = new LinkedHashSet<>();
         collectLostLifeCardInstanceIdsRecursive(summaryObject, ids);
         return new ArrayList<>(ids);
     }
 
+    /**
+     * 遞迴版本：支援巢狀 executedEffects / list 結構。
+     */
     private void collectLostLifeCardInstanceIdsRecursive(Object summaryObject, Set<Long> sink) {
         if (summaryObject == null || sink == null) {
             return;
@@ -3491,6 +3687,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 若卡片效果直接定義勝負，於此統一結算入口處理。
+     */
     private boolean evaluateCardEffectMatchFinish(
         MatchEntity match,
         Long actorUserId,
@@ -3528,6 +3727,9 @@ public class MatchActionService {
         return true;
     }
 
+    /**
+     * 從效果摘要中抽出可用的 matchResult 結構（含巢狀搜尋）。
+     */
     private Map<String, Object> extractMatchResult(Object summaryObject) {
         if (!(summaryObject instanceof Map<?, ?> map)) {
             return null;
@@ -3557,6 +3759,9 @@ public class MatchActionService {
         return null;
     }
 
+    /**
+     * 載入 MEMBER 卡規格資訊。
+     */
     private Map<String, Object> loadMemberCardSpec(String cardId) {
         return jdbcTemplate.query(
             """
@@ -3581,6 +3786,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 載入 Bloom 目標資料（目前堆疊頂卡與受傷狀態）。
+     */
     private BloomTarget loadOwnedBloomTarget(Long matchId, Long userId, Long targetHolomemCardInstanceId) {
         return jdbcTemplate.query(
             """
@@ -3619,11 +3827,17 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 判斷是否為不可 Bloom 的特殊等級。
+     */
     private boolean isSpecialOrUnbloomableLevel(String levelType) {
         String normalized = normalizeLevel(levelType);
         return "SPOT".equals(normalized);
     }
 
+    /**
+     * 判斷 Bloom 階級是否為合法遞進。
+     */
     private boolean isBloomLevelNextStep(String targetLevel, String bloomLevel) {
         int targetRank = resolveBloomLevelRank(targetLevel);
         int bloomRank = resolveBloomLevelRank(bloomLevel);
@@ -3633,6 +3847,9 @@ public class MatchActionService {
         return bloomRank == targetRank + 1;
     }
 
+    /**
+     * 將等級文字映射成可比較序位。
+     */
     private int resolveBloomLevelRank(String levelType) {
         String normalized = normalizeLevel(levelType);
         return switch (normalized) {
@@ -3644,6 +3861,9 @@ public class MatchActionService {
         };
     }
 
+    /**
+     * 記錄 Holomem 疊牌關聯（match_holomem_stack_cards）。
+     */
     private void recordHolomemStackCard(Long matchHolomemId, Long matchCardId) {
         if (matchHolomemId == null || matchCardId == null) {
             return;
@@ -3669,6 +3889,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 計算 Holomem 堆疊深度。
+     */
     private int countHolomemStackDepth(Long matchHolomemId) {
         if (matchHolomemId == null) {
             return 0;
@@ -3681,6 +3904,9 @@ public class MatchActionService {
         return depth == null || depth <= 0 ? 1 : depth;
     }
 
+    /**
+     * 解析對手 userId。
+     */
     private Long resolveOpponent(MatchEntity match, Long userId) {
         if (match.getPlayerAId() != null && !match.getPlayerAId().equals(userId)) {
             return match.getPlayerAId();
@@ -3691,6 +3917,9 @@ public class MatchActionService {
         throw new IllegalStateException("找不到對手玩家");
     }
 
+    /**
+     * 解析 phase 字串成 enum。
+     */
     private MatchPhase parsePhase(String text) {
         if (!StringUtils.hasText(text)) {
             return MatchPhase.RESET;
@@ -3702,6 +3931,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 驗證 id 必須為正數。
+     */
     private Long requirePositiveId(Long value, String fieldName) {
         if (value == null || value <= 0) {
             throw new IllegalArgumentException(fieldName + " 不可為空");
@@ -3709,6 +3941,9 @@ public class MatchActionService {
         return value;
     }
 
+    /**
+     * 字串正規化（trim + uppercase）。
+     */
     private String normalizeZone(Object value) {
         if (value == null) {
             return "";
@@ -3716,6 +3951,9 @@ public class MatchActionService {
         return value.toString().trim().toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * 等級文字正規化。
+     */
     private String normalizeLevel(String levelType) {
         String normalized = normalizeZone(levelType);
         if (
@@ -3730,10 +3968,16 @@ public class MatchActionService {
         return "DEBUT";
     }
 
+    /**
+     * 安全轉字串。
+     */
     private String asString(Object value) {
         return value == null ? null : value.toString();
     }
 
+    /**
+     * 安全轉 Long。
+     */
     private Long asLong(Object value) {
         if (value == null) {
             return null;
@@ -3748,6 +3992,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 安全轉 int。
+     */
     private int asInt(Object value) {
         if (value == null) {
             return 0;
@@ -3762,6 +4009,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 安全轉 boolean。
+     */
     private boolean toBoolean(Object value) {
         if (value == null) {
             return false;
@@ -3772,6 +4022,9 @@ public class MatchActionService {
         return Boolean.parseBoolean(value.toString());
     }
 
+    /**
+     * 判斷是否存在會阻擋操作的 pending 決策。
+     */
     private boolean hasBlockingPendingDecision(Long matchId, Long userId) {
         Integer count = jdbcTemplate.queryForObject(
             """
@@ -3789,6 +4042,9 @@ public class MatchActionService {
         return count != null && count > 0;
     }
 
+    /**
+     * 判斷是否存在任何 pending 決策。
+     */
     private boolean hasAnyPendingDecision(Long matchId, Long userId) {
         Integer count = jdbcTemplate.queryForObject(
             """
@@ -3806,6 +4062,9 @@ public class MatchActionService {
         return count != null && count > 0;
     }
 
+    /**
+     * 建立 TURN_START 互動，要求玩家確認回合開始。
+     */
     private Long createTurnStartPendingInteraction(Long matchId, Long userId, int turnNumber) {
         if (matchId == null || userId == null || userId <= 0) {
             return null;
@@ -3848,6 +4107,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 建立 DRAW_REVEAL 互動，用於顯示本回合抽到的牌。
+     */
     private Long createDrawRevealPendingInteraction(Long matchId, Long userId, Long drawnCardInstanceId) {
         if (drawnCardInstanceId == null || drawnCardInstanceId <= 0) {
             return null;
@@ -3926,6 +4188,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 建立回合 Cheer 互動（來源為 Cheer 牌庫頂牌）。
+     */
     private Long createTurnSendCheerPendingInteraction(Long matchId, Long userId) {
         if (userId == null || userId <= 0) {
             return null;
@@ -3957,6 +4222,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 通用 SEND_CHEER 互動建立器，可指定來源 action 與提示文案。
+     */
     private Long createSendCheerPendingInteraction(
         Long matchId,
         Long userId,
@@ -4094,6 +4362,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 建立通用 CARD_SELECTION 決策，供搜尋/選牌等效果共用。
+     */
     private Long createCardSelectionPendingDecision(
         Long matchId,
         Long userId,
@@ -4168,6 +4439,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 根據效果摘要判斷是否要產生 follow-up 互動（LOOK_TOP_DECK/REORDER 等）。
+     */
     private FollowupInteractionDecision createFollowupInteractionPendingDecisionIfNeeded(
         Long matchId,
         Long userId,
@@ -4239,6 +4513,9 @@ public class MatchActionService {
         return new FollowupInteractionDecision(decisionId, interaction.decisionType());
     }
 
+    /**
+     * 載入決策候選卡片資料，若查無完整資料則回傳 fallback 結構。
+     */
     private Map<String, Object> loadCardCandidateForDecision(
         Long matchId,
         Long viewerUserId,
@@ -4299,6 +4576,9 @@ public class MatchActionService {
         return fallback;
     }
 
+    /**
+     * 正規化決策中的 placement 欄位（例如 TOP/BOTTOM）。
+     */
     private String normalizeDecisionPlacement(String placement) {
         if (!StringUtils.hasText(placement)) {
             return null;
@@ -4306,6 +4586,9 @@ public class MatchActionService {
         return placement.trim().toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * 從效果摘要萃取 follow-up 互動上下文（含候選卡、提示訊息、可選數量）。
+     */
     private FollowupInteractionContext extractFollowupInteractionDecisionContext(
         Long matchId,
         Long userId,
@@ -4420,7 +4703,13 @@ public class MatchActionService {
         return null;
     }
 
+    /**
+     * 建立 LOOK_* 類互動的候選卡清單（唯讀展示用途）。
+     */
     @SuppressWarnings("unchecked")
+    /**
+     * 建立 LOOK 類決策的候選卡片顯示資料。
+     */
     private List<Map<String, Object>> buildLookZoneCandidateCards(
         Long matchId,
         Long viewerUserId,
@@ -4454,6 +4743,9 @@ public class MatchActionService {
         return cards;
     }
 
+    /**
+     * 將 follow-up decision id/type 寫回 action payload，便於前端串接 modal。
+     */
     private void putFollowupDecisionPayload(Map<String, Object> payload, FollowupInteractionDecision followupDecision) {
         if (payload == null || followupDecision == null || followupDecision.decisionId() == null) {
             return;
@@ -4465,6 +4757,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 載入並鎖定 pending decision，避免同一決策被重複處理。
+     */
     private PendingDecision loadPendingDecisionForUpdate(Long matchId, Long userId, Long decisionId) {
         return jdbcTemplate.query(
             """
@@ -4515,6 +4810,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 將 pending decision 標記為 RESOLVED。
+     */
     private void markDecisionResolved(Long decisionId) {
         int updated = jdbcTemplate.update(
             """
@@ -4532,6 +4830,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 清洗選牌輸入：去重、過濾無效 id（null/<=0）。
+     */
     private List<Long> sanitizeSelectedCardInstanceIds(List<Long> selectedCardInstanceIds) {
         if (selectedCardInstanceIds == null || selectedCardInstanceIds.isEmpty()) {
             return List.of();
@@ -4546,6 +4847,9 @@ public class MatchActionService {
         return normalized;
     }
 
+    /**
+     * 驗證選牌結果是否完全落在候選集合中。
+     */
     private void validateSelectedCardsWithinCandidates(List<Long> selected, List<Long> candidates) {
         if (selected == null || selected.isEmpty() || candidates == null || candidates.isEmpty()) {
             return;
@@ -4558,6 +4862,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 解析 JSON 字串，失敗回傳 null node。
+     */
     private JsonNode parseJson(String json) {
         if (!StringUtils.hasText(json)) {
             return objectMapper.nullNode();
@@ -4569,6 +4876,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 從 JsonNode 取 Long 欄位。
+     */
     private Long extractJsonLong(JsonNode node, String fieldName) {
         if (node == null || node.isNull() || !StringUtils.hasText(fieldName)) {
             return null;
@@ -4590,6 +4900,9 @@ public class MatchActionService {
         return null;
     }
 
+    /**
+     * 從 JsonNode 取文字欄位。
+     */
     private String extractJsonText(JsonNode node, String fieldName) {
         if (node == null || node.isNull() || !StringUtils.hasText(fieldName)) {
             return null;
@@ -4602,6 +4915,9 @@ public class MatchActionService {
         return text.isEmpty() ? null : text;
     }
 
+    /**
+     * 從 JsonNode 取布林欄位。
+     */
     private boolean extractJsonBoolean(JsonNode node, String fieldName) {
         if (node == null || node.isNull() || !StringUtils.hasText(fieldName)) {
             return false;
@@ -4619,6 +4935,9 @@ public class MatchActionService {
         return false;
     }
 
+    /**
+     * 從 JsonNode 取 Long 列表欄位。
+     */
     private List<Long> extractJsonLongList(JsonNode node, String fieldName) {
         if (node == null || node.isNull() || !StringUtils.hasText(fieldName)) {
             return List.of();
@@ -4647,6 +4966,9 @@ public class MatchActionService {
         return result;
     }
 
+    /**
+     * 檢查 support 定義是否標記 LIMITED。
+     */
     private boolean hasSupportDefinitionLimitedFlag(String cardId) {
         if (!StringUtils.hasText(cardId)) {
             return false;
@@ -4664,6 +4986,9 @@ public class MatchActionService {
         return limited != null && limited;
     }
 
+    /**
+     * 解析支援牌附加類型（MASCOT/TOOL/FAN/OTHER）。
+     */
     private String resolveSupportAttachmentType(String effectJsonText) {
         if (!StringUtils.hasText(effectJsonText)) {
             return SUPPORT_TYPE_OTHER;
@@ -4692,6 +5017,9 @@ public class MatchActionService {
         return SUPPORT_TYPE_OTHER;
     }
 
+    /**
+     * 判斷是否為可附加型支援。
+     */
     private boolean isAttachableSupportType(String supportType) {
         String normalized = normalizeZone(supportType);
         return SUPPORT_TYPE_MASCOT.equals(normalized)
@@ -4699,6 +5027,9 @@ public class MatchActionService {
             || SUPPORT_TYPE_FAN.equals(normalized);
     }
 
+    /**
+     * 透過卡片實例解析我方 Holomem id。
+     */
     private Long resolveOwnedHolomemIdByCardInstance(Long matchId, Long userId, Long holomemCardInstanceId) {
         if (matchId == null || userId == null || holomemCardInstanceId == null || holomemCardInstanceId <= 0) {
             return null;
@@ -4719,6 +5050,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 驗證同一 Holomem 的可附加支援上限。
+     */
     private void validateAttachableSupportLimit(Long matchHolomemId, String supportType) {
         String normalized = normalizeZone(supportType);
         if (!SUPPORT_TYPE_MASCOT.equals(normalized) && !SUPPORT_TYPE_TOOL.equals(normalized)) {
@@ -4741,6 +5075,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 判斷對戰是否處於 active + STARTED。
+     */
     private boolean isMatchActive(MatchEntity match) {
         if (match == null) {
             return false;
@@ -4748,6 +5085,9 @@ public class MatchActionService {
         return "active".equalsIgnoreCase(asString(match.getStatus()));
     }
 
+    /**
+     * 判斷本回合是否已使用過 LIMITED support。
+     */
     private boolean hasUsedLimitedSupportThisTurn(Long matchId, Long userId, int turnNumber) {
         Integer usedCount = jdbcTemplate.query(
             """
@@ -4769,6 +5109,9 @@ public class MatchActionService {
         return usedCount != null && usedCount > 0;
     }
 
+    /**
+     * 統計本回合指定區位的 ATTACK_ART 使用次數。
+     */
     private int countArtUsedByZoneThisTurn(Long matchId, Long userId, int turnNumber, String zone) {
         String normalizedZone = normalizeZone(zone);
         Integer used = jdbcTemplate.query(
@@ -4790,6 +5133,9 @@ public class MatchActionService {
         return used == null ? 0 : used;
     }
 
+    /**
+     * 判斷是否仍有可發動藝能的攻擊者（決定是否維持 PERFORMANCE phase）。
+     */
     private boolean hasAvailableArtAttacker(Long matchId, Long userId, int turnNumber) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
             """
@@ -4812,6 +5158,9 @@ public class MatchActionService {
         return false;
     }
 
+    /**
+     * 載入主要藝能資料；優先回傳可解析出傷害的藝能。
+     */
     private Map<String, Object> loadPrimaryArt(String cardId) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
             """
@@ -4836,6 +5185,9 @@ public class MatchActionService {
         return rows.get(0);
     }
 
+    /**
+     * 解析藝能傷害值（JSON 解析優先，失敗時文字 fallback）。
+     */
     private int resolveArtDamage(String effectJsonText) {
         if (!StringUtils.hasText(effectJsonText)) {
             return 0;
@@ -4852,6 +5204,9 @@ public class MatchActionService {
         return extractFirstNumber(effectJsonText);
     }
 
+    /**
+     * 從藝能 effect JSON 節點解析傷害數值。
+     */
     private int resolveArtDamageFromEffectJson(JsonNode node) {
         if (node == null || node.isNull()) {
             return 0;
@@ -4885,6 +5240,9 @@ public class MatchActionService {
         return extractFirstNumber(node.path("rawText").asText(""));
     }
 
+    /**
+     * 解析藝能 Cheer 成本（有色與 COLORLESS）。
+     */
     private Map<String, Integer> resolveArtCheerCost(String costCheerJsonText) {
         Map<String, Integer> cost = new LinkedHashMap<>();
         if (!StringUtils.hasText(costCheerJsonText)) {
@@ -4908,6 +5266,9 @@ public class MatchActionService {
         return cost;
     }
 
+    /**
+     * 驗證藝能費用是否足夠支付（目前僅驗證，不扣除附加 Cheer）。
+     */
     private Map<String, Object> payArtCost(
         Long matchId,
         Long ownerUserId,
@@ -5003,6 +5364,9 @@ public class MatchActionService {
         return summary;
     }
 
+    /**
+     * 取得バトンタッチ無色成本修正值（來自 match_turn_effects）。
+     */
     private int resolveBatonTouchColorlessModifier(Long matchId, Long ownerUserId, Long sourceHolomemId, int currentTurn) {
         if (matchId == null || ownerUserId == null || sourceHolomemId == null || currentTurn <= 0) {
             return 0;
@@ -5026,6 +5390,9 @@ public class MatchActionService {
         return modifier == null ? 0 : modifier;
     }
 
+    /**
+     * 判斷指定場上行為是否被 ACTION_LOCK 封鎖。
+     */
     private boolean isStageActionLocked(
         Long matchId,
         Long userId,
@@ -5076,6 +5443,9 @@ public class MatchActionService {
         return false;
     }
 
+    /**
+     * ACTION_LOCK 的 action 條件比對。
+     */
     private boolean matchesLockAction(JsonNode payload, String actionKey) {
         JsonNode actions = payload.get("actions");
         if (actions == null || !actions.isArray() || actions.isEmpty()) {
@@ -5089,6 +5459,9 @@ public class MatchActionService {
         return false;
     }
 
+    /**
+     * ACTION_LOCK 的 zone 條件比對。
+     */
     private boolean matchesLockZone(JsonNode payload, String zone) {
         JsonNode zones = payload.get("zones");
         if (zones == null || !zones.isArray() || zones.isEmpty()) {
@@ -5102,6 +5475,9 @@ public class MatchActionService {
         return false;
     }
 
+    /**
+     * ACTION_LOCK 的特定 Holomem 目標條件比對。
+     */
     private boolean matchesLockTargetHolomem(JsonNode payload, Long holomemId) {
         JsonNode targetHolomemId = payload.get("targetHolomemId");
         if (targetHolomemId == null || targetHolomemId.isNull()) {
@@ -5114,6 +5490,9 @@ public class MatchActionService {
         return holomemId != null && holomemId.equals(expected);
     }
 
+    /**
+     * 支付バトンタッチ成本：實際扣除 Cheer 並移送 ARCHIVE。
+     */
     private Map<String, Object> payBatonTouchCost(
         Long matchId,
         Long ownerUserId,
@@ -5188,6 +5567,9 @@ public class MatchActionService {
         return summary;
     }
 
+    /**
+     * 在 Cheer 列表中找第一張指定顏色的位置索引。
+     */
     private int findFirstCheerIndexByColor(List<Map<String, Object>> rows, String color) {
         for (int i = 0; i < rows.size(); i++) {
             if (color.equals(normalizeZone(rows.get(i).get("color")))) {
@@ -5197,6 +5579,9 @@ public class MatchActionService {
         return -1;
     }
 
+    /**
+     * 將場上的指定 Cheer 卡歸檔到 ARCHIVE。
+     */
     private Long archiveStageCheerCard(Long matchId, Long ownerUserId, String cheerCardId) {
         Long cheerCardInstanceId = jdbcTemplate.query(
             """
@@ -5249,6 +5634,9 @@ public class MatchActionService {
         return updated == 1 ? cheerCardInstanceId : null;
     }
 
+    /**
+     * 解析藝能文本中的屬性色剋加成（例如紅+50）。
+     */
     private ArtCritical resolveArtCritical(String effectJsonText) {
         if (!StringUtils.hasText(effectJsonText)) {
             return null;
@@ -5284,6 +5672,10 @@ public class MatchActionService {
         return new ArtCritical(color, bonus);
     }
 
+    /**
+     * 解析攻擊目標 Holomem：
+     * 有指定目標則優先驗證，否則依站位預設優先順序挑選。
+     */
     private TargetHolomem resolveOpponentTargetHolomem(
         Long matchId,
         Long opponentUserId,
@@ -5337,6 +5729,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 將日文顏色 token 轉為系統色碼。
+     */
     private String mapJapaneseColorToken(String token) {
         return switch (token) {
             case "赤" -> "RED";
@@ -5349,6 +5744,9 @@ public class MatchActionService {
         };
     }
 
+    /**
+     * 抽取字串中的第一個整數；找不到或解析失敗回傳 0。
+     */
     private int extractFirstNumber(String text) {
         if (!StringUtils.hasText(text)) {
             return 0;
@@ -5364,6 +5762,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 讓指定玩家失去 1 點 life，回傳失去的 life 卡片實例 id。
+     */
     private Long loseLifeOnce(Long matchId, Long ownerUserId) {
         EffectContext effectContext = EffectContext.system(matchId, ownerUserId, ACTION_TYPE_RULE_EVENT);
         ReduceLifeAction reduceLifeAction = new ReduceLifeAction(ownerUserId, 1, "LOSE_LIFE_ONCE");
@@ -5389,6 +5790,9 @@ public class MatchActionService {
         return null;
     }
 
+    /**
+     * 將 payload map 序列化為 JSON 字串，失敗時回傳空物件字串。
+     */
     private String toJson(Map<String, Object> payload) {
         try {
             return objectMapper.writeValueAsString(payload);
@@ -5397,6 +5801,9 @@ public class MatchActionService {
         }
     }
 
+    /**
+     * 將 reason 正規化為可追蹤 reason code（大寫、底線、去除非法字元）。
+     */
     private String standardizeReasonCode(String reason) {
         if (!StringUtils.hasText(reason)) {
             return "UNKNOWN";
@@ -5408,6 +5815,9 @@ public class MatchActionService {
         return StringUtils.hasText(normalized) ? normalized : "UNKNOWN";
     }
 
+    /**
+     * 統一寫入 RULE_EVENT action（含 eventType/reasonCode/details）。
+     */
     private void appendRuleEvent(
         MatchEntity match,
         Long userId,
@@ -5437,6 +5847,9 @@ public class MatchActionService {
         );
     }
 
+    /**
+     * 建立觸發結算順序資訊，供前端顯示與除錯追蹤。
+     */
     private List<Map<String, Object>> buildTriggeredResolutionOrder(
         String firstStep,
         int firstPriority,
@@ -5460,6 +5873,9 @@ public class MatchActionService {
         return order;
     }
 
+    /**
+     * 寫入一筆 match_actions 紀錄並自動計算 action_order。
+     */
     private void appendAction(
         MatchEntity match,
         Long userId,
@@ -5478,6 +5894,9 @@ public class MatchActionService {
         matchActionRepository.save(action);
     }
 
+    /**
+     * 更新 match.updatedAt 時戳。
+     */
     private void touchUpdatedAt(MatchEntity match) {
         match.setUpdatedAt(LocalDateTime.now());
     }

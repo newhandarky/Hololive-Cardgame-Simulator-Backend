@@ -52,6 +52,7 @@ public class MatchEffectService {
     );
     private static final Pattern BATON_TOUCH_COST_MODIFIER_PATTERN = Pattern.compile("バトンタッチに必要な無色\\s*[+＋]\\s*(\\d+)");
     private static final Pattern DOWN_EXTRA_LIFE_PATTERN = Pattern.compile("ライフを\\s*(\\d+)\\s*つ?減ら");
+    private static final Pattern DOWN_EXTRA_LIFE_MINUS_PATTERN = Pattern.compile("ライフ\\s*[ー\\-−]\\s*(\\d+)");
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -59,6 +60,9 @@ public class MatchEffectService {
     private final EffectResolver effectResolver;
     private final GameActionExecutor gameActionExecutor;
 
+    /**
+     * 效果結算服務建構子。
+     */
     public MatchEffectService(
         JdbcTemplate jdbcTemplate,
         ObjectMapper objectMapper,
@@ -73,6 +77,9 @@ public class MatchEffectService {
         this.gameActionExecutor = gameActionExecutor;
     }
 
+    /**
+     * 支援卡效果總入口：解析 effectType 並依序執行，回傳完整摘要。
+     */
     public Map<String, Object> applySupportEffect(
         Long matchId,
         Long userId,
@@ -250,6 +257,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 建立支援卡的選牌決策計畫（若效果需要互動選牌）。
+     */
     public SupportDecisionPlan buildSupportDecisionPlan(
         Long matchId,
         Long userId,
@@ -277,6 +287,9 @@ public class MatchEffectService {
         return null;
     }
 
+    /**
+     * 套用藝能造成的直接傷害。
+     */
     public Map<String, Object> applyArtDamage(
         Long matchId,
         Long userId,
@@ -297,6 +310,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 處理藝能後由 Gift/被動觸發的追加效果。
+     */
     public List<Map<String, Object>> applyGiftTriggeredEffectsOnArt(
         Long matchId,
         Long userId,
@@ -482,14 +498,23 @@ public class MatchEffectService {
         return triggered;
     }
 
+    /**
+     * 計算附加支援造成的 HP 加成總和。
+     */
     public int resolveAttachedSupportHpBonus(Long matchId, Long matchHolomemId) {
         return resolveAttachedSupportStatBonus(matchId, matchHolomemId, ATTACHED_SUPPORT_HP_PATTERN);
     }
 
+    /**
+     * 計算附加支援造成的藝能傷害加成總和。
+     */
     public int resolveAttachedSupportArtBonus(Long matchId, Long matchHolomemId) {
         return resolveAttachedSupportStatBonus(matchId, matchHolomemId, ATTACHED_SUPPORT_ARTS_PATTERN);
     }
 
+    /**
+     * Bloom 觸發效果入口（含條件判斷、執行結果摘要）。
+     */
     public Map<String, Object> applyBloomTriggeredEffects(
         Long matchId,
         Long userId,
@@ -693,6 +718,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * Collab 觸發效果入口（含條件判斷、執行結果摘要）。
+     */
     public Map<String, Object> applyCollabTriggeredEffects(
         Long matchId,
         Long userId,
@@ -896,6 +924,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行抽牌效果，優先走 Action Pipeline，失敗時回退到既有 SQL 流程。
+     */
     private Map<String, Object> executeDrawEffect(
         Long matchId,
         Long userId,
@@ -996,6 +1027,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行檢索效果：從牌庫/牌庫頂範圍挑選卡片加入手牌，並回傳重排需求。
+     */
     private Map<String, Object> executeSearchEffect(
         Long matchId,
         Long userId,
@@ -1105,6 +1139,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 將指定牌庫卡移到牌庫最底，用於檢索後的剩餘牌重排流程。
+     */
     private void moveDeckCardToBottom(Long matchId, Long userId, Long cardInstanceId) {
         if (matchId == null || userId == null || cardInstanceId == null || cardInstanceId <= 0) {
             return;
@@ -1138,6 +1175,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 執行回手效果：從場上或指定區域挑選卡片返回手牌。
+     */
     private Map<String, Object> executeReturnToHandEffect(
         Long matchId,
         Long userId,
@@ -1210,6 +1250,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行返回牌庫頂效果，並更新牌庫順序。
+     */
     private Map<String, Object> executeReturnToDeckTopEffect(
         Long matchId,
         Long userId,
@@ -1285,6 +1328,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行重新附加效果（將符合條件卡移到目標 Holomem 下方）。
+     */
     private Map<String, Object> executeReattachEffect(
         Long matchId,
         Long userId,
@@ -1497,6 +1543,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行上場效果：從手牌/檔案區等來源召喚 Holomem 到場地可用區位。
+     */
     private Map<String, Object> executeSummonToStageEffect(
         Long matchId,
         Long userId,
@@ -1614,6 +1663,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行展示後歸檔效果（Reveal -> Archive）。
+     */
     private Map<String, Object> executeRevealToArchiveEffect(
         Long matchId,
         Long userId,
@@ -1676,6 +1728,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行從 Archive Bloom 的特殊效果，並保留疊卡繼承資料。
+     */
     private Map<String, Object> executeBloomFromArchiveEffect(
         Long matchId,
         Long userId,
@@ -1873,6 +1928,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 將目標 Holomem 身上的 cheer 返回牌庫底。
+     */
     private Map<String, Object> executeReturnCheerToDeckBottomEffect(
         Long matchId,
         Long userId,
@@ -1953,6 +2011,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行棄手牌效果，支援指定卡與自動挑選。
+     */
     private Map<String, Object> executeDiscardHandEffect(
         Long matchId,
         Long userId,
@@ -2025,6 +2086,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行休息效果（將目標 Holomem 設為 rested）。
+     */
     private Map<String, Object> executeRestEffect(
         Long matchId,
         Long userId,
@@ -2093,6 +2157,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行 CENTER/BACK 交換效果。
+     */
     private Map<String, Object> executeSwapCenterBackEffect(
         Long matchId,
         Long userId,
@@ -2189,6 +2256,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行移入 Holopower 的效果（通常來自 Deck/Archive 等）。
+     */
     private Map<String, Object> executeMoveToHolopowerEffect(
         Long matchId,
         Long userId,
@@ -2252,6 +2322,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行擊倒但不扣生命的效果分支。
+     */
     private Map<String, Object> executeDownNoLifeEffect(
         Long matchId,
         Long userId,
@@ -2304,6 +2377,20 @@ public class MatchEffectService {
         if (targetHolomemId == null) {
             return executeNoOpEffect(effectType, effectNode, "目標 Holomem 資料不足");
         }
+        String targetCardId = targetCardInstanceId == null
+            ? null
+            : jdbcTemplate.query(
+                """
+                SELECT card_id
+                FROM match_cards
+                WHERE match_id = ?
+                  AND id = ?
+                LIMIT 1
+                """,
+                rs -> rs.next() ? rs.getString("card_id") : null,
+                matchId,
+                targetCardInstanceId
+            );
 
         List<Long> archivedCheerCardInstanceIds = archiveAttachedCheerCards(matchId, targetHolomemId, opponentUserId);
         List<Long> archivedSupportCardInstanceIds = archiveAttachedSupportCards(matchId, targetHolomemId, opponentUserId);
@@ -2334,6 +2421,10 @@ public class MatchEffectService {
             );
         }
 
+        int currentTurn = resolveCurrentTurnNumber(matchId);
+        Map<String, Object> downEventSummary = executeDownEvent(matchId, userId, opponentUserId, targetCardId, currentTurn);
+        List<Long> lostLifeCardInstanceIds = extractLostLifeCardInstanceIds(downEventSummary);
+
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
         summary.put("applied", true);
@@ -2341,13 +2432,19 @@ public class MatchEffectService {
         summary.put("targetHolomemCardInstanceId", targetCardInstanceId);
         summary.put("targetOwnerUserId", opponentUserId);
         summary.put("downed", true);
-        summary.put("lifeReduced", false);
+        summary.put("lifeReduced", !lostLifeCardInstanceIds.isEmpty());
+        summary.put("lostLifeCardInstanceId", lostLifeCardInstanceIds.isEmpty() ? null : lostLifeCardInstanceIds.get(0));
+        summary.put("lostLifeCardInstanceIds", lostLifeCardInstanceIds);
         summary.put("archivedCheerCardInstanceIds", archivedCheerCardInstanceIds);
         summary.put("archivedSupportCardInstanceIds", archivedSupportCardInstanceIds);
         summary.put("archivedHolomemCardInstanceIds", archivedHolomemCardInstanceIds);
+        summary.put("downEvent", downEventSummary);
         return summary;
     }
 
+    /**
+     * 執行擊倒並額外扣生命的效果分支。
+     */
     private Map<String, Object> executeDownExtraLifeEffect(
         Long matchId,
         Long userId,
@@ -2428,6 +2525,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 套用バトンタッチ費用修正，寫入當回合效果表供後續行為讀取。
+     */
     private Map<String, Object> executeBatonTouchCostModifierEffect(
         Long matchId,
         Long userId,
@@ -2511,6 +2611,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 設定本回合額外 Bloom 許可效果。
+     */
     private Map<String, Object> executeAllowExtraBloomEffect(
         Long matchId,
         Long userId,
@@ -2619,6 +2722,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 寫入 ACTION_LOCK 封鎖效果（禁止指定動作/區位/目標）。
+     */
     private Map<String, Object> executeActionLockEffect(
         Long matchId,
         Long userId,
@@ -2718,6 +2824,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行查看牌庫頂效果，產生 pending decision 所需資料。
+     */
     private Map<String, Object> executeLookTopDeckEffect(
         Long matchId,
         Long userId,
@@ -2781,6 +2890,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行查看對手手牌效果（只回傳可公開資訊）。
+     */
     private Map<String, Object> executeLookOpponentHandEffect(
         Long matchId,
         Long userId,
@@ -2802,6 +2914,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行查看 Holopower 區效果。
+     */
     private Map<String, Object> executeLookHolopowerEffect(
         Long matchId,
         Long userId,
@@ -2825,6 +2940,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 載入「查看類互動」要展示的卡片清單。
+     */
     private List<Map<String, Object>> loadCardsForLookDecision(Long matchId, Long ownerUserId, String zone) {
         return jdbcTemplate.query(
             """
@@ -2860,6 +2978,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 執行與 Collab 位互換位置效果。
+     */
     private Map<String, Object> executeSwapWithCollabEffect(
         Long matchId,
         Long userId,
@@ -2993,6 +3114,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行附加 cheer 效果，包含目標解析與來源區挑選。
+     */
     private Map<String, Object> executeAddCheerEffect(
         Long matchId,
         Long userId,
@@ -3084,6 +3208,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行傷害效果，含傷害修正、擊倒處理、附屬卡歸檔與生命扣減。
+     */
     private Map<String, Object> executeDamageEffect(
         Long matchId,
         Long userId,
@@ -3206,6 +3333,8 @@ public class MatchEffectService {
         boolean downed = hp > 0 && damageTaken >= hp;
         boolean lifeReduced = false;
         Long lostLifeCardInstanceId = null;
+        List<Long> lostLifeCardInstanceIds = new ArrayList<>();
+        Map<String, Object> downEventSummary = null;
         List<Long> archivedCheerCardInstanceIds = new ArrayList<>();
         List<Long> archivedSupportCardInstanceIds = new ArrayList<>();
         List<Long> archivedHolomemCardInstanceIds = new ArrayList<>();
@@ -3245,6 +3374,14 @@ public class MatchEffectService {
             if (!suppressLifeLoss && "CENTER".equals(targetZone)) {
                 lostLifeCardInstanceId = loseLifeOnce(matchId, targetOwnerUserId);
                 lifeReduced = lostLifeCardInstanceId != null;
+                if (lostLifeCardInstanceId != null) {
+                    lostLifeCardInstanceIds.add(lostLifeCardInstanceId);
+                }
+            }
+            downEventSummary = executeDownEvent(matchId, userId, targetOwnerUserId, targetCardId, currentTurn);
+            if (toBoolean(downEventSummary.get("lifeReduced"))) {
+                lifeReduced = true;
+                lostLifeCardInstanceIds.addAll(extractLostLifeCardInstanceIds(downEventSummary));
             }
         }
 
@@ -3264,10 +3401,17 @@ public class MatchEffectService {
         summary.put("archivedSupportCardInstanceIds", archivedSupportCardInstanceIds);
         summary.put("archivedHolomemCardInstanceIds", archivedHolomemCardInstanceIds);
         summary.put("lifeReduced", lifeReduced);
-        summary.put("lostLifeCardInstanceId", lostLifeCardInstanceId);
+        summary.put("lostLifeCardInstanceId", lostLifeCardInstanceIds.isEmpty() ? null : lostLifeCardInstanceIds.get(0));
+        summary.put("lostLifeCardInstanceIds", lostLifeCardInstanceIds);
+        if (downEventSummary != null) {
+            summary.put("downEvent", downEventSummary);
+        }
         return summary;
     }
 
+    /**
+     * 設定傷害轉移預備狀態，於回合效果表登記可替代承傷的目標。
+     */
     private Map<String, Object> executeDamageRedirectPreparationEffect(
         Long matchId,
         Long userId,
@@ -3330,6 +3474,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行回復效果，將目標傷害值下修至不低於 0。
+     */
     private Map<String, Object> executeHealEffect(
         Long matchId,
         Long userId,
@@ -3413,6 +3560,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行移除 cheer 效果，將 cheer 從 Holomem 轉移至指定區域。
+     */
     private Map<String, Object> executeRemoveCheerEffect(
         Long matchId,
         Long userId,
@@ -3484,6 +3634,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 執行區域移動效果（CENTER/BACK/COLLAB 等），含休息狀態調整。
+     */
     private Map<String, Object> executeMoveZoneEffect(
         Long matchId,
         Long userId,
@@ -3733,6 +3886,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 套用 BUFF/DEBUFF 效果，寫入回合效果並回傳修正摘要。
+     */
     private Map<String, Object> executeBuffDebuffEffect(
         Long matchId,
         Long userId,
@@ -3789,6 +3945,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 建立不執行效果（No-Op）的標準摘要。
+     */
     private Map<String, Object> executeNoOpEffect(String effectType, JsonNode effectNode, String reason) {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
@@ -3798,6 +3957,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 建立被跳過效果的摘要（用於 unsupported/exception fallback）。
+     */
     private Map<String, Object> buildSkippedEffect(String effectType, String reason) {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", normalizeEffectType(effectType));
@@ -3807,6 +3969,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 直接結算勝負效果（WIN/LOSE/MATCH_RESULT）。
+     */
     private Map<String, Object> executeMatchResultEffect(
         Long matchId,
         Long userId,
@@ -3832,6 +3997,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 解析勝負效果對應的勝者/敗者與 reason code。
+     */
     private MatchResultDecision resolveMatchResultDecision(
         String effectType,
         JsonNode effectNode,
@@ -3911,11 +4079,17 @@ public class MatchEffectService {
         return null;
     }
 
+    /**
+     * 判斷 winner/loser token 是否代表雙方（平手）。
+     */
     private boolean isBothToken(String token) {
         String normalized = normalizeEffectType(token);
         return "BOTH".equals(normalized) || "ALL".equals(normalized);
     }
 
+    /**
+     * 將 side token（SELF/OPPONENT 等）解析成實際 userId。
+     */
     private Long resolveSideUserId(String sideToken, Long actorUserId, Long opponentUserId) {
         String normalized = normalizeEffectType(sideToken);
         return switch (normalized) {
@@ -3925,6 +4099,9 @@ public class MatchEffectService {
         };
     }
 
+    /**
+     * 探測效果是否需要選牌互動，並回傳候選與數量上限。
+     */
     private SelectionProbe probeSelectionCandidates(
         Long matchId,
         Long userId,
@@ -3940,6 +4117,9 @@ public class MatchEffectService {
         };
     }
 
+    /**
+     * 探測 SEARCH 的候選清單與可選張數。
+     */
     private SelectionProbe probeSearchCandidates(Long matchId, Long userId, JsonNode effectNode) {
         int requestedCount = Math.max(resolveSearchCount(effectNode), 1);
         String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
@@ -3954,6 +4134,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 探測 RETURN_TO_HAND 的候選清單與可選張數。
+     */
     private SelectionProbe probeReturnToHandCandidates(Long matchId, Long userId, JsonNode effectNode) {
         String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, "RETURN_TO_HAND")) {
@@ -3975,6 +4158,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 探測 RETURN_TO_DECK_TOP 的候選清單與可選張數。
+     */
     private SelectionProbe probeReturnToDeckTopCandidates(Long matchId, Long userId, JsonNode effectNode) {
         String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, "RETURN_TO_DECK_TOP")) {
@@ -3995,6 +4181,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 將資料列轉成前端互動使用的 DecisionCandidate。
+     */
     private List<DecisionCandidate> mapDecisionCandidates(List<Map<String, Object>> rows, String zone) {
         if (rows == null || rows.isEmpty()) {
             return List.of();
@@ -4020,6 +4209,9 @@ public class MatchEffectService {
         return candidates;
     }
 
+    /**
+     * 載入指定成員卡的 passive effect JSON 文字。
+     */
     private String loadPassiveEffectText(String bloomCardId) {
         if (!StringUtils.hasText(bloomCardId)) {
             return null;
@@ -4036,6 +4228,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 解析 Bloom 效果計畫，優先結構化 JSON，否則回退文案推斷。
+     */
     private BloomEffectPlan resolveBloomEffectPlan(String bloomCardId) {
         String passiveText = loadPassiveEffectText(bloomCardId);
         if (!StringUtils.hasText(passiveText)) {
@@ -4069,6 +4264,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 解析 Collab 效果計畫，優先結構化 JSON，否則回退文案推斷。
+     */
     private BloomEffectPlan resolveCollabEffectPlan(String collabCardId) {
         String passiveText = loadPassiveEffectText(collabCardId);
         if (!StringUtils.hasText(passiveText)) {
@@ -4102,6 +4300,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 由結構化 passive JSON 解析 Bloom 效果計畫。
+     */
     private BloomEffectPlan resolveStructuredBloomEffectPlan(JsonNode passiveNode) {
         if (passiveNode == null || passiveNode.isNull() || !passiveNode.isObject()) {
             return null;
@@ -4153,6 +4354,9 @@ public class MatchEffectService {
         return new BloomEffectPlan(true, effectTypes, objectMapper.valueToTree(payload), rawText, diceRoll);
     }
 
+    /**
+     * 由結構化 passive JSON 解析 Collab 效果計畫。
+     */
     private BloomEffectPlan resolveStructuredCollabEffectPlan(JsonNode passiveNode) {
         if (passiveNode == null || passiveNode.isNull() || !passiveNode.isObject()) {
             return null;
@@ -4204,6 +4408,9 @@ public class MatchEffectService {
         return new BloomEffectPlan(true, effectTypes, objectMapper.valueToTree(payload), rawText, diceRoll);
     }
 
+    /**
+     * 從被動文本中提取 Bloom 專用描述文字。
+     */
     private String loadBloomEffectText(String passiveText) {
         if (!StringUtils.hasText(passiveText) || !passiveText.contains("ブルームエフェクト")) {
             return null;
@@ -4211,6 +4418,9 @@ public class MatchEffectService {
         return normalizeBloomText(passiveText);
     }
 
+    /**
+     * 從被動文本中提取 Collab 專用描述文字。
+     */
     private String loadCollabEffectText(String passiveText) {
         if (!StringUtils.hasText(passiveText) || !passiveText.contains("コラボエフェクト")) {
             return null;
@@ -4218,6 +4428,9 @@ public class MatchEffectService {
         return normalizeCollabText(passiveText);
     }
 
+    /**
+     * 從被動文本中提取 Gift 專用描述文字。
+     */
     private String loadGiftEffectText(String passiveText) {
         if (!StringUtils.hasText(passiveText) || !passiveText.contains("ギフト")) {
             return null;
@@ -4225,6 +4438,9 @@ public class MatchEffectService {
         return normalizeGiftText(passiveText);
     }
 
+    /**
+     * 正規化 Bloom 文案內容（去除不必要片段並統一格式）。
+     */
     private String normalizeBloomText(String passiveText) {
         if (!StringUtils.hasText(passiveText)) {
             return "";
@@ -4252,6 +4468,9 @@ public class MatchEffectService {
         return trimmed.substring(0, end).trim();
     }
 
+    /**
+     * 正規化 Collab 文案內容。
+     */
     private String normalizeCollabText(String passiveText) {
         if (!StringUtils.hasText(passiveText)) {
             return "";
@@ -4279,6 +4498,9 @@ public class MatchEffectService {
         return trimmed.substring(0, end).trim();
     }
 
+    /**
+     * 正規化 Gift 文案內容。
+     */
     private String normalizeGiftText(String passiveText) {
         if (!StringUtils.hasText(passiveText)) {
             return "";
@@ -4306,6 +4528,9 @@ public class MatchEffectService {
         return trimmed.substring(0, end).trim();
     }
 
+    /**
+     * 從 Bloom/Collab 文案推斷效果類型列表。
+     */
     private List<String> inferBloomEffectTypes(String bloomText) {
         Set<String> effectTypes = new LinkedHashSet<>();
         String text = normalizeDigits(bloomText == null ? "" : bloomText);
@@ -4430,6 +4655,9 @@ public class MatchEffectService {
         return new ArrayList<>(effectTypes);
     }
 
+    /**
+     * 依效果類型推斷 Bloom 目標側（SELF/ENEMY）。
+     */
     private String inferBloomTargetType(String effectType) {
         return switch (effectType) {
             case "DAMAGE", "DEBUFF", "MOVE_ZONE", "REST", "DOWN_NO_LIFE", "DOWN_EXTRA_LIFE" -> "ENEMY";
@@ -4437,6 +4665,9 @@ public class MatchEffectService {
         };
     }
 
+    /**
+     * 取得指定區域下一個 order_index。
+     */
     private int nextZoneOrder(Long matchId, Long userId, String zone) {
         Integer next = jdbcTemplate.queryForObject(
             """
@@ -4454,6 +4685,9 @@ public class MatchEffectService {
         return next == null ? 1 : next;
     }
 
+    /**
+     * 清除已過期的回合性效果（expires_turn <= currentTurn）。
+     */
     public int clearExpiredTurnEffects(Long matchId, int currentTurn) {
         return jdbcTemplate.update(
             """
@@ -4466,6 +4700,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 合併 effectType 與 effectJson.effects，輸出去重後的效果類型列表。
+     */
     private List<String> resolveEffectTypes(String effectType, JsonNode effectNode) {
         Set<String> effectTypes = new LinkedHashSet<>();
         boolean hasStructuredEffects = false;
@@ -4495,6 +4732,9 @@ public class MatchEffectService {
         return new ArrayList<>(effectTypes);
     }
 
+    /**
+     * 解析檢索可選數量，優先讀結構化欄位，否則回退文字規則推斷。
+     */
     private int resolveSearchCount(JsonNode effectNode) {
         int fromFields = extractInt(effectNode, 0, "value", "cards", "amount");
         if (fromFields > 0) {
@@ -4516,6 +4756,9 @@ public class MatchEffectService {
         return text.contains("手札に加える") ? 1 : 0;
     }
 
+    /**
+     * 解析「看牌庫頂」的觀察張數，支援欄位值與原文正則推斷。
+     */
     private int resolveSearchLookTopCount(JsonNode effectNode, String rawText) {
         int fromFields = extractInt(effectNode, 0, "lookTopCount", "lookCount", "peekCount");
         if (fromFields > 0) {
@@ -4533,6 +4776,9 @@ public class MatchEffectService {
         return 0;
     }
 
+    /**
+     * 解析通用動作張數（如回手/棄牌），不足時用關鍵字與預設值補齊。
+     */
     private int resolveActionCount(JsonNode effectNode, String fallbackToken, int defaultValue) {
         int fromFields = extractInt(effectNode, 0, "value", "cards", "amount");
         if (fromFields > 0) {
@@ -4557,6 +4803,9 @@ public class MatchEffectService {
         return defaultValue;
     }
 
+    /**
+     * 當 Bloom 文案包含骰子條件時擲骰，否則回傳 null。
+     */
     private Integer resolveBloomDiceRoll(String bloomText) {
         String text = normalizeDigits(bloomText);
         if (!StringUtils.hasText(text) || !text.contains("サイコロ")) {
@@ -4565,6 +4814,9 @@ public class MatchEffectService {
         return diceService.rollD6();
     }
 
+    /**
+     * 依顯式條件或文案判斷此次效果是否命中骰子條件。
+     */
     private boolean shouldApplyByDice(String rawText, JsonNode effectNode, String effectType) {
         String explicitCondition = resolveExplicitDiceCondition(effectNode, effectType);
         if (StringUtils.hasText(explicitCondition)) {
@@ -4609,6 +4861,9 @@ public class MatchEffectService {
         return true;
     }
 
+    /**
+     * 解析 effectJson 內顯式的骰子條件（可按 effectType 區分）。
+     */
     private String resolveExplicitDiceCondition(JsonNode effectNode, String effectType) {
         if (effectNode == null || effectNode.isNull()) {
             return null;
@@ -4627,6 +4882,9 @@ public class MatchEffectService {
         return normalizeEffectType(readText(effectNode, "diceCondition", "dice_condition"));
     }
 
+    /**
+     * 驗證骰值是否符合條件字串（ODD/EVEN/AT_LEAST/AT_MOST/EXACT/BETWEEN）。
+     */
     private boolean evaluateDiceCondition(String condition, int diceRoll) {
         if (!StringUtils.hasText(condition)) {
             return true;
@@ -4678,6 +4936,9 @@ public class MatchEffectService {
         return true;
     }
 
+    /**
+     * 取得本次效果要使用的骰值，並回填到 effectNode 供後續摘要使用。
+     */
     private int resolveDiceRoll(JsonNode effectNode) {
         int fromNode = extractInt(effectNode, 0, "diceRoll");
         if (fromNode >= 1 && fromNode <= 6) {
@@ -4692,6 +4953,9 @@ public class MatchEffectService {
         return resolution.chosenRoll();
     }
 
+    /**
+     * 執行多次擲骰與挑選策略（FIRST/MAX/MIN/LAST），產出最終骰值。
+     */
     private DiceResolution resolveDiceResolution(JsonNode effectNode) {
         int rollCount = resolveDiceRollCount(effectNode);
         String strategy = resolveDicePickStrategy(effectNode);
@@ -4719,6 +4983,9 @@ public class MatchEffectService {
         return new DiceResolution(chosen, rolls, strategy, fixedDiceValue != null);
     }
 
+    /**
+     * 解析擲骰次數，包含欄位讀取與文案推斷，並限制最大次數。
+     */
     private int resolveDiceRollCount(JsonNode effectNode) {
         int fromField = extractInt(effectNode, 0, "diceRollCount", "diceCount", "rollCount");
         if (fromField > 0) {
@@ -4739,6 +5006,9 @@ public class MatchEffectService {
         return 1;
     }
 
+    /**
+     * 解析多骰取值策略（如取大/取小），預設使用 FIRST。
+     */
     private String resolveDicePickStrategy(JsonNode effectNode) {
         String explicit = normalizeEffectType(readText(effectNode, "dicePickStrategy", "dicePick", "diceSelect"));
         if (StringUtils.hasText(explicit)) {
@@ -4754,6 +5024,9 @@ public class MatchEffectService {
         return "FIRST";
     }
 
+    /**
+     * 解析固定骰值效果（如「視為 X」）。
+     */
     private Integer resolveFixedDiceValue(JsonNode effectNode) {
         int fromField = extractInt(effectNode, 0, "fixedDiceValue", "diceFixedValue", "forcedDiceValue");
         if (fromField >= 1 && fromField <= 6) {
@@ -4774,12 +5047,18 @@ public class MatchEffectService {
         return null;
     }
 
+    /**
+     * 解析單一檢索條件入口，支援結構化條件與原文推斷。
+     */
     private SearchCriteria resolveSearchCriteria(JsonNode effectNode) {
         JsonNode criteriaNode = effectNode == null ? null : effectNode.get("searchCriteria");
         String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
         return resolveSearchCriteriaNode(criteriaNode, rawText, true);
     }
 
+    /**
+     * 將 JSON 條件節點轉為 SearchCriteria，必要時從 rawText 補齊缺欄。
+     */
     private SearchCriteria resolveSearchCriteriaNode(JsonNode criteriaNode, String rawText, boolean allowRawInference) {
         String cardType = normalizeCardType(readText(criteriaNode, "cardType"));
         String levelType = normalizeLevelType(readText(criteriaNode, "level", "levelType"));
@@ -4865,6 +5144,9 @@ public class MatchEffectService {
         return new SearchCriteria(cardType, levelType, tag, nameContains, color, rested, minRemainHp, maxRemainHp, allOf, anyOf);
     }
 
+    /**
+     * 解析 criteria 子條件陣列（allOf/anyOf）。
+     */
     private List<SearchCriteria> resolveCriteriaList(JsonNode criteriaArrayNode, String rawText) {
         if (criteriaArrayNode == null || !criteriaArrayNode.isArray() || criteriaArrayNode.isEmpty()) {
             return List.of();
@@ -4879,6 +5161,9 @@ public class MatchEffectService {
         return criteriaList;
     }
 
+    /**
+     * 以資料庫已知 tag 清單從原文推斷最可能的 tag。
+     */
     private String resolveTagFromKnownTags(String rawText) {
         if (!StringUtils.hasText(rawText) || !rawText.contains("#")) {
             return null;
@@ -4901,6 +5186,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 依單一條件載入可檢索候選清單（預設來源為 DECK）。
+     */
     private List<Map<String, Object>> loadSearchCandidates(
         Long matchId,
         Long userId,
@@ -4909,6 +5197,9 @@ public class MatchEffectService {
         return loadCandidatesFromZone(matchId, userId, "DECK", criteria, false);
     }
 
+    /**
+     * 讀取牌庫頂 N 張窗口，供 LOOK_TOP_DECK/SEARCH_TOP_WINDOW 使用。
+     */
     private List<Map<String, Object>> loadTopDeckWindow(Long matchId, Long userId, int count) {
         if (count <= 0) {
             return List.of();
@@ -4962,6 +5253,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 依多重條件載入可檢索候選清單。
+     */
     private List<Map<String, Object>> loadSearchCandidates(
         Long matchId,
         Long userId,
@@ -4973,6 +5267,9 @@ public class MatchEffectService {
         return loadSearchCandidates(matchId, userId, new SearchCriteria(cardType, levelType, tag, nameContains));
     }
 
+    /**
+     * 從指定區域載入候選卡（可帶條件過濾）。
+     */
     private List<Map<String, Object>> loadCandidatesFromZone(
         Long matchId,
         Long userId,
@@ -5051,6 +5348,9 @@ public class MatchEffectService {
         return filterCandidatesByCriteria(rows, resolved);
     }
 
+    /**
+     * 從多區域載入候選卡並保留原始排序。
+     */
     private List<Map<String, Object>> loadCandidatesFromZone(
         Long matchId,
         Long userId,
@@ -5070,6 +5370,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 套用 SearchCriteria 到候選清單。
+     */
     private List<Map<String, Object>> filterCandidatesByCriteria(List<Map<String, Object>> rows, SearchCriteria criteria) {
         if (rows == null || rows.isEmpty()) {
             return List.of();
@@ -5086,6 +5389,9 @@ public class MatchEffectService {
         return filtered;
     }
 
+    /**
+     * 驗證單一卡片資料列是否符合完整條件（含 allOf/anyOf）。
+     */
     private boolean matchesSearchCriteria(Map<String, Object> row, SearchCriteria criteria) {
         if (!matchesBasicSearchCriteria(row, criteria)) {
             return false;
@@ -5108,6 +5414,9 @@ public class MatchEffectService {
         return true;
     }
 
+    /**
+     * 驗證單一卡片資料列是否符合基本條件（不含巢狀組合）。
+     */
     private boolean matchesBasicSearchCriteria(Map<String, Object> row, SearchCriteria criteria) {
         String cardType = normalize(asText(row.get("card_type")));
         if (StringUtils.hasText(criteria.cardType()) && !criteria.cardType().equals(cardType)) {
@@ -5151,6 +5460,9 @@ public class MatchEffectService {
         return true;
     }
 
+    /**
+     * 判斷 tags_json 是否包含指定 tag。
+     */
     private boolean rowTagsContains(String tagsJson, String targetTag) {
         if (!StringUtils.hasText(tagsJson) || !StringUtils.hasText(targetTag)) {
             return false;
@@ -5170,6 +5482,9 @@ public class MatchEffectService {
         return false;
     }
 
+    /**
+     * 檢查卡片主/副色或 cheer 色是否命中指定顏色。
+     */
     private boolean matchesAnyColor(Map<String, Object> row, String color) {
         if (!StringUtils.hasText(color)) {
             return true;
@@ -5183,6 +5498,9 @@ public class MatchEffectService {
             || expected.equals(normalizeColorType(asText(row.get("cheer_color"))));
     }
 
+    /**
+     * 依玩家指定或預設策略挑選最終檢索卡片。
+     */
     private List<Map<String, Object>> selectSearchCards(
         List<Map<String, Object>> candidates,
         List<Long> selectedCardInstanceIds,
@@ -5224,6 +5542,9 @@ public class MatchEffectService {
         return selected;
     }
 
+    /**
+     * 依欄位順序讀取第一個有效文字值。
+     */
     private String readText(JsonNode node, String... fields) {
         if (node == null || fields == null) {
             return null;
@@ -5237,6 +5558,9 @@ public class MatchEffectService {
         return null;
     }
 
+    /**
+     * 依欄位順序讀取布林值（支援 true/false 字串）。
+     */
     private Boolean readBoolean(JsonNode node, String... fields) {
         if (node == null || fields == null) {
             return null;
@@ -5265,6 +5589,9 @@ public class MatchEffectService {
         return null;
     }
 
+    /**
+     * 將查詢列欄位值轉為 Boolean。
+     */
     private Boolean readRowBoolean(Object value) {
         if (value == null) {
             return null;
@@ -5287,6 +5614,9 @@ public class MatchEffectService {
         return null;
     }
 
+    /**
+     * 讀取可為 null 的整數欄位。
+     */
     private Integer extractNullableInt(JsonNode node, String... fieldNames) {
         if (node == null || fieldNames == null) {
             return null;
@@ -5310,6 +5640,9 @@ public class MatchEffectService {
         return null;
     }
 
+    /**
+     * 將 SearchCriteria 轉成可回傳前端的摘要結構。
+     */
     private Map<String, Object> buildCriteriaSummary(SearchCriteria criteria) {
         SearchCriteria resolved = criteria == null ? SearchCriteria.empty() : criteria;
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -5338,6 +5671,9 @@ public class MatchEffectService {
         return summary;
     }
 
+    /**
+     * 正規化卡片類型字串。
+     */
     private String normalizeCardType(String cardType) {
         String normalized = normalize(cardType);
         if ("MEMBER".equals(normalized) || "SUPPORT".equals(normalized) || "CHEER".equals(normalized)) {
@@ -5346,6 +5682,9 @@ public class MatchEffectService {
         return "";
     }
 
+    /**
+     * 正規化顏色字串為系統常量值。
+     */
     private String normalizeColorType(String color) {
         String normalized = normalize(color);
         return switch (normalized) {
@@ -5354,6 +5693,9 @@ public class MatchEffectService {
         };
     }
 
+    /**
+     * 正規化 Holomem 等級字串（含 1st/2nd 同義詞）。
+     */
     private String normalizeLevelType(String levelType) {
         String normalized = normalize(levelType);
         return switch (normalized) {
@@ -5364,6 +5706,9 @@ public class MatchEffectService {
         };
     }
 
+    /**
+     * 正規化為 Holomem 場上可用等級，未知值回 DEBUT。
+     */
     private String normalizeHolomemLevel(String levelType) {
         String normalized = normalizeLevelType(levelType);
         if ("FIRST".equals(normalized) || "SECOND".equals(normalized) || "SPOT".equals(normalized) || "BUZZ".equals(normalized)) {
@@ -5372,6 +5717,9 @@ public class MatchEffectService {
         return "DEBUT";
     }
 
+    /**
+     * 轉換 Bloom 等級排序值，供升階合法性比較。
+     */
     private int resolveBloomLevelRank(String levelType) {
         String normalized = normalizeHolomemLevel(levelType);
         return switch (normalized) {
@@ -5383,6 +5731,9 @@ public class MatchEffectService {
         };
     }
 
+    /**
+     * 從日文文案推斷 cheer 顏色過濾條件。
+     */
     private String resolveCheerColorFilter(String rawText) {
         if (!StringUtils.hasText(rawText)) {
             return "";
@@ -5408,10 +5759,16 @@ public class MatchEffectService {
         return "";
     }
 
+    /**
+     * null 安全字串轉換，回傳去頭尾空白後內容。
+     */
     private String nullToEmpty(String value) {
         return value == null ? "" : value.trim();
     }
 
+    /**
+     * 檢查指定行動是否被回合效果 ACTION_LOCK 封鎖。
+     */
     private boolean isActionLockActive(
         Long matchId,
         Long affectedUserId,
@@ -5462,6 +5819,9 @@ public class MatchEffectService {
         return false;
     }
 
+    /**
+     * 驗證單筆 ACTION_LOCK payload 是否命中目前行動上下文。
+     */
     private boolean matchesActionLockEntry(JsonNode payload, String actionKey, String zone, Long holomemId) {
         JsonNode actionsNode = payload.get("actions");
         if (actionsNode != null && actionsNode.isArray() && !actionsNode.isEmpty()) {
@@ -5499,6 +5859,9 @@ public class MatchEffectService {
         return expectedHolomemId == null || expectedHolomemId <= 0 || (holomemId != null && holomemId.equals(expectedHolomemId));
     }
 
+    /**
+     * 依 targetType、指定卡 instance 與預設策略解析效果目標 Holomem。
+     */
     private Long resolveEffectTargetHolomemId(
         Long matchId,
         Long userId,
@@ -5542,10 +5905,16 @@ public class MatchEffectService {
         return resolveOpponentTargetHolomemId(matchId, opponentUserId, requestedTargetCardInstanceId);
     }
 
+    /**
+     * 判斷 targetType 是否指向對手側。
+     */
     private boolean isOpponentTargetType(String targetType) {
         return targetType.contains("ENEMY") || targetType.contains("OPPONENT");
     }
 
+    /**
+     * 讀取指定場上 Holomem 的擁有者 userId。
+     */
     private Long resolveHolomemOwner(Long matchId, Long holomemId) {
         if (holomemId == null) {
             return null;
@@ -5563,6 +5932,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 解析抽牌數量，支援欄位讀值與文案推斷。
+     */
     private int resolveDrawCount(JsonNode effectNode) {
         int fromFields = extractInt(effectNode, 0, "value", "cards", "amount");
         if (fromFields > 0) {
@@ -5580,6 +5952,9 @@ public class MatchEffectService {
         return text.contains("引く") ? 1 : 0;
     }
 
+    /**
+     * 解析 BUFF/DEBUFF 修正值並依效果類型修正正負號。
+     */
     private int resolveBuffDebuffModifier(JsonNode effectNode, String effectType) {
         int fromFields = extractInt(effectNode, 0, "modifier", "damageModifier", "amount", "value");
         if (fromFields != 0) {
@@ -5599,6 +5974,9 @@ public class MatchEffectService {
         return 0;
     }
 
+    /**
+     * 正規化修正值符號：DEBUFF 強制為負值。
+     */
     private int normalizeModifierSign(int modifier, String effectType) {
         if (modifier == 0) {
             return 0;
@@ -5608,6 +5986,9 @@ public class MatchEffectService {
             : modifier;
     }
 
+    /**
+     * 依 targetType 決定受影響玩家清單（自己、對手或雙方）。
+     */
     private List<Long> resolveAffectedUserIds(Long matchId, Long userId, String targetType) {
         String normalizedTargetType = normalize(targetType);
         Long opponentUserId = resolveOpponentUserId(matchId, userId);
@@ -5630,6 +6011,9 @@ public class MatchEffectService {
         return affected;
     }
 
+    /**
+     * 取得當前回合數，無值時回傳 1。
+     */
     private int resolveCurrentTurnNumber(Long matchId) {
         Integer turn = jdbcTemplate.query(
             "SELECT turn_number FROM matches WHERE id = ?",
@@ -5642,6 +6026,9 @@ public class MatchEffectService {
         return turn;
     }
 
+    /**
+     * 彙總目前生效中的傷害修正值（match_turn_effects）。
+     */
     private int resolveActiveDamageModifier(Long matchId, Long affectedUserId, int currentTurn) {
         if (affectedUserId == null || affectedUserId <= 0) {
             return 0;
@@ -5663,6 +6050,9 @@ public class MatchEffectService {
         return modifier == null ? 0 : modifier;
     }
 
+    /**
+     * 彙總附屬支援卡提供的指定數值加成（HP/ARTS）。
+     */
     private int resolveAttachedSupportStatBonus(Long matchId, Long matchHolomemId, Pattern pattern) {
         if (matchId == null || matchHolomemId == null || pattern == null) {
             return 0;
@@ -5691,6 +6081,9 @@ public class MatchEffectService {
         return total;
     }
 
+    /**
+     * 由支援卡效果文案擷取對應加成值（可累加多段）。
+     */
     private int extractAttachedSupportStatBonus(String effectJsonText, Pattern pattern) {
         if (!StringUtils.hasText(effectJsonText) || pattern == null) {
             return 0;
@@ -5709,6 +6102,9 @@ public class MatchEffectService {
         return total;
     }
 
+    /**
+     * 解析支援效果 JSON 並抽取可判讀的 raw text。
+     */
     private String extractAttachedSupportRawText(String effectJsonText) {
         try {
             JsonNode node = objectMapper.readTree(effectJsonText);
@@ -5718,6 +6114,9 @@ public class MatchEffectService {
         }
     }
 
+    /**
+     * 解析帶正負號的數字字串（全形符號相容）。
+     */
     private int parseSignedNumber(String token) {
         if (!StringUtils.hasText(token)) {
             return 0;
@@ -5730,6 +6129,9 @@ public class MatchEffectService {
         }
     }
 
+    /**
+     * 檢查來源字串是否包含候選名稱中的任一項。
+     */
     private boolean containsAnyName(String source, List<String> candidates) {
         if (!StringUtils.hasText(source) || candidates == null || candidates.isEmpty()) {
             return false;
@@ -5742,6 +6144,9 @@ public class MatchEffectService {
         return false;
     }
 
+    /**
+     * 解析 cheer 張數，若無法判讀則回傳預設值。
+     */
     private int resolveCheerCount(JsonNode effectNode, int defaultValue) {
         int fromFields = extractInt(effectNode, 0, "value", "cards", "amount");
         if (fromFields > 0) {
@@ -5754,6 +6159,9 @@ public class MatchEffectService {
         return defaultValue;
     }
 
+    /**
+     * 解析回復值，支援 heal 欄位與 HP 文案。
+     */
     private int resolveHealValue(JsonNode effectNode) {
         int fromFields = extractInt(effectNode, 0, "value", "amount", "heal");
         if (fromFields > 0) {
@@ -5762,6 +6170,9 @@ public class MatchEffectService {
         return extractByPattern(normalizeDigits(extractText(effectNode, "rawText", "rawEffect")), HEAL_PATTERN);
     }
 
+    /**
+     * 解析移動目的區（CENTER/COLLAB/BACK），預設 BACK。
+     */
     private String resolveMoveDestinationZone(JsonNode effectNode) {
         String explicit = normalizeEffectType(extractText(effectNode, "toZone", "targetZone"));
         if (StringUtils.hasText(explicit)) {
@@ -5780,11 +6191,17 @@ public class MatchEffectService {
         return "BACK";
     }
 
+    /**
+     * 判斷移動後是否需改為休息狀態。
+     */
     private boolean shouldRestAfterMove(JsonNode effectNode) {
         String text = extractText(effectNode, "rawText", "rawEffect");
         return text.contains("お休み");
     }
 
+    /**
+     * 在場地容量限制下，解析可放置的實際舞台區位。
+     */
     private String resolveAvailableStageZone(Long matchId, Long userId, String preferredZone) {
         String preferred = normalize(preferredZone);
         int centerCount = countHolomemsInZone(matchId, userId, "CENTER");
@@ -5805,6 +6222,9 @@ public class MatchEffectService {
         return "";
     }
 
+    /**
+     * 計算玩家在指定區位的 Holomem 數量。
+     */
     private int countHolomemsInZone(Long matchId, Long userId, String zone) {
         Integer count = jdbcTemplate.queryForObject(
             """
@@ -5822,6 +6242,9 @@ public class MatchEffectService {
         return count == null ? 0 : count;
     }
 
+    /**
+     * 將指定 Holomem 身上的 cheer 全部歸檔，回傳成功移動的卡 instance id。
+     */
     private List<Long> archiveAttachedCheerCards(Long matchId, Long matchHolomemId, Long ownerUserId) {
         if (matchHolomemId == null || ownerUserId == null) {
             return List.of();
@@ -5849,6 +6272,9 @@ public class MatchEffectService {
         return archived;
     }
 
+    /**
+     * 將指定 Holomem 身上的支援卡全部歸檔。
+     */
     private List<Long> archiveAttachedSupportCards(Long matchId, Long matchHolomemId, Long ownerUserId) {
         if (matchHolomemId == null || ownerUserId == null) {
             return List.of();
@@ -5876,6 +6302,9 @@ public class MatchEffectService {
         return archived;
     }
 
+    /**
+     * 記錄 Holomem 疊卡關聯與堆疊順序（Bloom 繼承用）。
+     */
     private void recordHolomemStackCard(Long matchHolomemId, Long matchCardId) {
         if (matchHolomemId == null || matchCardId == null) {
             return;
@@ -5901,6 +6330,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 將 Holomem 疊卡序列整批歸檔，並保留由上到下順序。
+     */
     private List<Long> archiveHolomemStackCards(Long matchId, Long matchHolomemId, Long ownerUserId) {
         if (matchHolomemId == null || ownerUserId == null) {
             return List.of();
@@ -5949,6 +6381,9 @@ public class MatchEffectService {
         return archived;
     }
 
+    /**
+     * 將指定 cheer card_id 的場上實例移入 ARCHIVE，回傳該 instance id。
+     */
     private Long moveCheerCardInstanceToArchive(Long matchId, Long ownerUserId, String cheerCardId) {
         if (!StringUtils.hasText(cheerCardId)) {
             return null;
@@ -5993,6 +6428,9 @@ public class MatchEffectService {
         return updated == 1 ? cheerCardInstanceId : null;
     }
 
+    /**
+     * 將指定支援卡實例由 STAGE 移入 ARCHIVE。
+     */
     private Long moveSupportCardInstanceToArchive(Long matchId, Long ownerUserId, Long supportCardInstanceId) {
         if (supportCardInstanceId == null || supportCardInstanceId <= 0) {
             return null;
@@ -6018,6 +6456,9 @@ public class MatchEffectService {
         return updated == 1 ? supportCardInstanceId : null;
     }
 
+    /**
+     * 解析己方目標 Holomem：優先指定卡，其次 CENTER，最後任一可用場上目標。
+     */
     private Long resolveTargetHolomemId(Long matchId, Long userId, Long targetHolomemCardInstanceId) {
         if (targetHolomemCardInstanceId != null && targetHolomemCardInstanceId > 0) {
             return jdbcTemplate.query(
@@ -6066,6 +6507,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 由 match_holomems.id 反查對應的 match_cards.id。
+     */
     private Long resolveHolomemCardInstanceId(Long matchHolomemId) {
         if (matchHolomemId == null) {
             return null;
@@ -6077,6 +6521,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 檢查同一張 Gift 是否在本回合已觸發過（turn once）。
+     */
     private boolean isGiftAlreadyUsedThisTurn(Long matchId, Long userId, int turnNumber, Long holderHolomemId) {
         if (matchId == null || userId == null || turnNumber <= 0 || holderHolomemId == null || holderHolomemId <= 0) {
             return false;
@@ -6100,6 +6547,9 @@ public class MatchEffectService {
         return used != null && used > 0;
     }
 
+    /**
+     * 取得可附加的 cheer 卡候選，依 CHEER_DECK > ARCHIVE > HAND 優先。
+     */
     private Map<String, Object> findAttachableCheerCard(Long matchId, Long userId) {
         return jdbcTemplate.query(
             """
@@ -6128,6 +6578,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 從指定區域挑選一張 cheer 卡候選。
+     */
     private Map<String, Object> findCheerCardFromZone(Long matchId, Long userId, String zone) {
         String normalizedZone = normalize(zone);
         if (!"CHEER_DECK".equals(normalizedZone) && !"ARCHIVE".equals(normalizedZone) && !"STAGE".equals(normalizedZone)) {
@@ -6160,6 +6613,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 由 matches 的 player_a/player_b 解析對手 userId。
+     */
     private Long resolveOpponentUserId(Long matchId, Long userId) {
         return jdbcTemplate.query(
             """
@@ -6185,6 +6641,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 解析對手側目標 Holomem：優先指定卡，其次 CENTER，最後任一場上目標。
+     */
     private Long resolveOpponentTargetHolomemId(
         Long matchId,
         Long opponentUserId,
@@ -6240,6 +6699,9 @@ public class MatchEffectService {
         );
     }
 
+    /**
+     * 執行一次失去生命：LIFE 頂牌移到 ARCHIVE，並同步扣減 current_life。
+     */
     private Long loseLifeOnce(Long matchId, Long ownerUserId) {
         Long lifeCardInstanceId = jdbcTemplate.query(
             """
@@ -6290,6 +6752,139 @@ public class MatchEffectService {
         return lifeCardInstanceId;
     }
 
+    /**
+     * 結算 Down 觸發的額外效果（例如 Buzz 的額外失去生命），走 Action Pipeline。
+     */
+    private Map<String, Object> executeDownEvent(
+        Long matchId,
+        Long actorUserId,
+        Long downedOwnerUserId,
+        String downedCardId,
+        int currentTurn
+    ) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("triggered", false);
+        summary.put("effectType", "DOWN_EVENT");
+        summary.put("downedCardId", downedCardId);
+        if (matchId == null || downedOwnerUserId == null || !StringUtils.hasText(downedCardId)) {
+            return summary;
+        }
+        String passiveText = loadPassiveEffectText(downedCardId);
+        String extraText = loadExtraEffectText(passiveText);
+        if (!StringUtils.hasText(extraText)) {
+            summary.put("reason", "NO_EXTRA_EFFECT");
+            return summary;
+        }
+        String normalizedExtraText = normalizeDigits(extraText);
+        if (!normalizedExtraText.contains("ダウンした時")) {
+            summary.put("reason", "EXTRA_NOT_DOWN_TRIGGER");
+            return summary;
+        }
+
+        int requestedLifeLoss = resolveDownExtraLifeCount(
+            objectMapper.valueToTree(Map.of("rawText", normalizedExtraText))
+        );
+        if (requestedLifeLoss <= 0) {
+            summary.put("reason", "NO_EXTRA_LIFE_LOSS");
+            return summary;
+        }
+
+        EffectContext context = new EffectContext(
+            matchId,
+            actorUserId,
+            Math.max(currentTurn, 1),
+            "DOWN_EVENT",
+            null,
+            downedCardId
+        );
+        ReduceLifeAction reduceLifeAction = new ReduceLifeAction(
+            downedOwnerUserId,
+            requestedLifeLoss,
+            "DOWN_EVENT_EXTRA_LIFE"
+        );
+        List<ActionResult> results = gameActionExecutor.execute(context, List.of(reduceLifeAction));
+        List<Long> lostLifeCardInstanceIds = new ArrayList<>();
+        if (!results.isEmpty() && results.get(0).success()) {
+            lostLifeCardInstanceIds.addAll(extractLostLifeCardInstanceIds(results.get(0).details()));
+        }
+
+        summary.put("triggered", true);
+        summary.put("rawText", extraText);
+        summary.put("requestedLifeLoss", requestedLifeLoss);
+        summary.put("appliedLifeLoss", lostLifeCardInstanceIds.size());
+        summary.put("lifeReduced", !lostLifeCardInstanceIds.isEmpty());
+        summary.put("lostLifeCardInstanceId", lostLifeCardInstanceIds.isEmpty() ? null : lostLifeCardInstanceIds.get(0));
+        summary.put("lostLifeCardInstanceIds", lostLifeCardInstanceIds);
+        return summary;
+    }
+
+    /**
+     * 從被動效果 JSON/文字中抽出「エクストラ」欄位文字。
+     */
+    private String loadExtraEffectText(String passiveText) {
+        if (!StringUtils.hasText(passiveText)) {
+            return null;
+        }
+        JsonNode passiveNode = parseEffectJson(passiveText);
+        if (passiveNode != null && passiveNode.isObject()) {
+            JsonNode extraNode = passiveNode.get("エクストラ");
+            if (extraNode != null && extraNode.isTextual() && StringUtils.hasText(extraNode.asText())) {
+                return extraNode.asText();
+            }
+            JsonNode extraEffectNode = passiveNode.get("extraEffect");
+            if (extraEffectNode != null && extraEffectNode.isTextual() && StringUtils.hasText(extraEffectNode.asText())) {
+                return extraEffectNode.asText();
+            }
+            if (extraEffectNode != null && extraEffectNode.isObject()) {
+                String rawText = readText(extraEffectNode, "rawText", "rawEffect", "text");
+                if (StringUtils.hasText(rawText)) {
+                    return rawText;
+                }
+            }
+        }
+        if (passiveText.contains("エクストラ")) {
+            return passiveText;
+        }
+        return null;
+    }
+
+    /**
+     * 從效果摘要中抽取所有生命牌 instance id（兼容多種鍵名）。
+     */
+    private List<Long> extractLostLifeCardInstanceIds(Map<String, Object> effectSummary) {
+        if (effectSummary == null || effectSummary.isEmpty()) {
+            return List.of();
+        }
+        List<Long> ids = new ArrayList<>();
+        Long single = asLong(effectSummary.get("lostLifeCardInstanceId"));
+        if (single != null && single > 0) {
+            ids.add(single);
+        }
+        Object listObject = effectSummary.get("lostLifeCardInstanceIds");
+        if (listObject instanceof List<?> list) {
+            for (Object value : list) {
+                Long id = asLong(value);
+                if (id != null && id > 0 && !ids.contains(id)) {
+                    ids.add(id);
+                }
+            }
+        }
+        // ActionResult(REDUCE_LIFE) uses lifeCardInstanceIds; down-event summary uses lostLifeCardInstanceIds.
+        Object actionListObject = effectSummary.get("lifeCardInstanceIds");
+        if (actionListObject instanceof List<?> list) {
+            for (Object value : list) {
+                Long id = asLong(value);
+                if (id != null && id > 0 && !ids.contains(id)) {
+                    ids.add(id);
+                }
+            }
+        }
+        return ids;
+    }
+
+    /**
+     * 判斷此次擊倒是否屬於「不減生命」例外。
+     */
     private boolean isDownWithoutLifeLoss(JsonNode effectNode) {
         if (effectNode != null && effectNode.has("downDoesNotReduceLife")) {
             return effectNode.path("downDoesNotReduceLife").asBoolean(false);
@@ -6298,6 +6893,9 @@ public class MatchEffectService {
         return StringUtils.hasText(merged) && merged.contains("ダウンしても相手のライフは減らない");
     }
 
+    /**
+     * 解析 Down 額外生命扣減值（支援結構化欄位與日文文案）。
+     */
     private int resolveDownExtraLifeCount(JsonNode effectNode) {
         int fromField = extractInt(effectNode, 0, "extraLifeLoss", "lifeLoss", "value", "amount");
         if (fromField > 0) {
@@ -6308,12 +6906,19 @@ public class MatchEffectService {
         if (byPattern > 0) {
             return byPattern;
         }
+        int minusPattern = extractByPattern(merged, DOWN_EXTRA_LIFE_MINUS_PATTERN);
+        if (minusPattern > 0) {
+            return minusPattern;
+        }
         if (StringUtils.hasText(merged) && merged.contains("ライフ")) {
             return 1;
         }
         return 0;
     }
 
+    /**
+     * 解析傷害數值，支援 value/amount 欄位與「ダメージ」文案。
+     */
     private int resolveDamageValue(JsonNode effectNode) {
         int fromFields = extractInt(effectNode, 0, "value", "amount", "damage");
         if (fromFields > 0) {
@@ -6331,6 +6936,9 @@ public class MatchEffectService {
         return 0;
     }
 
+    /**
+     * 使用正則擷取第一個整數群組，失敗回傳 0。
+     */
     private int extractByPattern(String value, Pattern pattern) {
         if (!StringUtils.hasText(value)) {
             return 0;
@@ -6346,6 +6954,9 @@ public class MatchEffectService {
         }
     }
 
+    /**
+     * 合併多個文字欄位並以換行串接，供文案規則解析使用。
+     */
     private String extractText(JsonNode node, String... fieldNames) {
         if (node == null || fieldNames == null) {
             return "";
@@ -6363,6 +6974,9 @@ public class MatchEffectService {
         return merged.toString();
     }
 
+    /**
+     * 安全解析 effectJson，格式錯誤時回傳 null 讓上層走保守路徑。
+     */
     private JsonNode parseEffectJson(String effectJson) {
         if (!StringUtils.hasText(effectJson)) {
             return null;
@@ -6374,6 +6988,9 @@ public class MatchEffectService {
         }
     }
 
+    /**
+     * 安全序列化 JSON 字串，失敗時回傳空物件字串。
+     */
     private String toJsonString(Object value) {
         try {
             return objectMapper.writeValueAsString(value);
@@ -6382,6 +6999,9 @@ public class MatchEffectService {
         }
     }
 
+    /**
+     * 依欄位順序讀取整數，支援數字與字串格式，讀不到時回傳預設值。
+     */
     private int extractInt(JsonNode node, int defaultValue, String... fieldNames) {
         if (node == null || fieldNames == null) {
             return defaultValue;
@@ -6405,6 +7025,9 @@ public class MatchEffectService {
         return defaultValue;
     }
 
+    /**
+     * 將全形數字轉半形，便於正則與整數解析。
+     */
     private String normalizeDigits(String value) {
         if (!StringUtils.hasText(value)) {
             return "";
@@ -6420,6 +7043,9 @@ public class MatchEffectService {
         return builder.toString();
     }
 
+    /**
+     * 正規化 effect type 字串（trim + upper + 空白轉底線）。
+     */
     private String normalizeEffectType(String value) {
         if (!StringUtils.hasText(value)) {
             return "";
@@ -6427,6 +7053,9 @@ public class MatchEffectService {
         return value.trim().toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * 通用字串正規化：null 安全、trim、轉大寫。
+     */
     private String normalize(Object value) {
         if (value == null) {
             return "";
@@ -6434,6 +7063,9 @@ public class MatchEffectService {
         return value.toString().trim().toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * 安全轉 Long，支援 Number 與字串輸入。
+     */
     private Long asLong(Object value) {
         if (value instanceof Number number) {
             return number.longValue();
@@ -6448,6 +7080,9 @@ public class MatchEffectService {
         return null;
     }
 
+    /**
+     * 安全轉 int，失敗時回 0。
+     */
     private int asInt(Object value) {
         if (value instanceof Number number) {
             return number.intValue();
@@ -6462,6 +7097,9 @@ public class MatchEffectService {
         return 0;
     }
 
+    /**
+     * null 安全字串轉換。
+     */
     private String asText(Object value) {
         if (value == null) {
             return null;
@@ -6469,6 +7107,9 @@ public class MatchEffectService {
         return value.toString();
     }
 
+    /**
+     * 寬鬆布林轉換（Boolean/Number/String）。
+     */
     private boolean toBoolean(Object value) {
         if (value instanceof Boolean booleanValue) {
             return booleanValue;
@@ -6486,6 +7127,9 @@ public class MatchEffectService {
         return false;
     }
 
+    /**
+     * 檢索條件模型，支援單條件與 allOf 組合條件。
+     */
     private record SearchCriteria(
         String cardType,
         String levelType,
@@ -6498,6 +7142,9 @@ public class MatchEffectService {
         List<SearchCriteria> allOf,
         List<SearchCriteria> anyOf
     ) {
+        /**
+         * 建立 SearchCriteria 並正規化欄位與子條件集合。
+         */
         private SearchCriteria {
             cardType = normalizeToken(cardType);
             levelType = normalizeToken(levelType);
@@ -6508,18 +7155,30 @@ public class MatchEffectService {
             anyOf = anyOf == null ? List.of() : List.copyOf(anyOf);
         }
 
+        /**
+         * 建立簡化版 SearchCriteria（僅常用四欄位）。
+         */
         private SearchCriteria(String cardType, String levelType, String tag, String nameContains) {
             this(cardType, levelType, tag, nameContains, "", null, null, null, List.of(), List.of());
         }
 
+        /**
+         * 回傳空條件物件。
+         */
         private static SearchCriteria empty() {
             return new SearchCriteria("", "", "", "", "", null, null, null, List.of(), List.of());
         }
 
+        /**
+         * 正規化條件字串 token。
+         */
         private static String normalizeToken(String value) {
             return value == null ? "" : value.trim();
         }
 
+        /**
+         * 判斷是否為完全空條件。
+         */
         private boolean isEmpty() {
             return cardType.isEmpty()
                 && levelType.isEmpty()
@@ -6534,6 +7193,9 @@ public class MatchEffectService {
         }
     }
 
+    /**
+     * 前端決策候選卡資料模型。
+     */
     public record DecisionCandidate(
         Long cardInstanceId,
         String cardId,
@@ -6543,6 +7205,9 @@ public class MatchEffectService {
         String zone
     ) {}
 
+    /**
+     * 支援卡互動決策計畫（effectType、選牌數、候選列表）。
+     */
     public record SupportDecisionPlan(
         String effectType,
         int minSelect,
@@ -6550,11 +7215,17 @@ public class MatchEffectService {
         List<DecisionCandidate> candidates
     ) {}
 
+    /**
+     * 內部探測結果：候選列表與需求數量。
+     */
     private record SelectionProbe(
         int requestedCount,
         List<DecisionCandidate> candidates
     ) {}
 
+    /**
+     * Bloom/Collab 解析後的效果計畫模型。
+     */
     private record BloomEffectPlan(
         boolean hasBloomEffect,
         List<String> effectTypes,
@@ -6563,6 +7234,9 @@ public class MatchEffectService {
         Integer diceRoll
     ) {}
 
+    /**
+     * 勝負效果決策模型（勝負方、reason 與敘述）。
+     */
     private record MatchResultDecision(
         boolean draw,
         Long winnerUserId,
@@ -6570,6 +7244,9 @@ public class MatchEffectService {
         String reason
     ) {}
 
+    /**
+     * 骰子解析結果（最終值、所有擲骰、挑選策略與是否固定值）。
+     */
     private record DiceResolution(
         int chosenRoll,
         List<Integer> rolls,

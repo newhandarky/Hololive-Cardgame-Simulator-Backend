@@ -47,6 +47,12 @@ public class GameActionExecutor {
         if (action instanceof SendCheerAction sendCheerAction) {
             return executeSendCheer(context, sendCheerAction);
         }
+        if (action instanceof UnimplementedAction unimplementedAction) {
+            return ActionResult.failure(
+                unimplementedAction.effectType() == null ? "UNIMPLEMENTED" : unimplementedAction.effectType(),
+                unimplementedAction.reason() == null ? "NOT_IMPLEMENTED_YET" : unimplementedAction.reason()
+            );
+        }
         return ActionResult.failure("UNKNOWN", "UNSUPPORTED_ACTION");
     }
 

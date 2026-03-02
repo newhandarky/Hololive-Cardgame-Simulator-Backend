@@ -20,6 +20,7 @@ import com.hololive.cardgame.error.GameRuleException;
 import com.hololive.cardgame.entity.User;
 import com.hololive.cardgame.model.LobbyMatch;
 import com.hololive.cardgame.repository.UserRepository;
+import com.hololive.cardgame.support.AbstractPostgresIntegrationTest;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -35,7 +36,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 @SpringBootTest
 @Transactional
-class MatchActionServiceIntegrationTest {
+class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest {
 
     @Autowired
     private LobbyMatchService lobbyMatchService;
@@ -2618,6 +2619,99 @@ class MatchActionServiceIntegrationTest {
     }
 
     @Test
+    void attackArtShouldTriggerDownedHolomemExtraLifeLoss() {
+        StartedMatchContext context = createStartedMatch("down-event-extra-host", "down-event-extra-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id IN (?, ?)
+            """,
+            matchId,
+            hostId,
+            guestId
+        );
+
+        Long hostCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            200,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220,\"rawHeader\":\"測試藝能 220\"}",
+            0,
+            "RED",
+            "down-event-host-center"
+        );
+        String guestCenterCardId = createMemberCardDefinition(
+            "TDOWN_EVENT_EXTRA_CENTER",
+            "Down Event Extra 測試目標",
+            "DEBUT",
+            120,
+            "BLUE",
+            "{\"エクストラ\":\"このホロメンがダウンした時、自分のライフ-2\"}"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            guestCenterCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+
+        int lifeBefore = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeBefore).isGreaterThanOrEqualTo(3);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_phase = 'MAIN',
+                current_turn_player_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        int lifeAfter = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfter).isEqualTo(lifeBefore - 3);
+
+        String payloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+        assertThat(payloadText).containsPattern("\"downEvent\"\\s*:\\s*\\{");
+        assertThat(payloadText).containsPattern("\"appliedLifeLoss\"\\s*:\\s*2");
+    }
+
+    @Test
     void bloomShouldTriggerReturnToHandEffectFromPassiveText() {
         StartedMatchContext context = createStartedMatch("bloom-return-host", "bloom-return-guest");
         Long matchId = context.matchId();
@@ -4648,6 +4742,91 @@ class MatchActionServiceIntegrationTest {
         );
         assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*30");
         assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*30");
+    }
+
+    @Test
+    void attackArtShouldRequireSpecificColorBeforeColorlessCost() {
+        StartedMatchContext context = createStartedMatch("attack-cost-color-host", "attack-cost-color-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            50,
+            "{\"RED\":1,\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":50}",
+            0,
+            "RED",
+            "TCOST_COLOR_HOST_CENTER"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            guestId,
+            "CENTER",
+            200,
+            "BLUE",
+            20,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":20}",
+            0,
+            "BLUE",
+            "TCOST_COLOR_GUEST_CENTER"
+        );
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TURN_START");
+        matchActionService.drawTurn(matchId, hostId);
+        resolvePendingInteractionIfExists(matchId, hostId, "DRAW_REVEAL");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 3,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        Long hostHolomemId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        assertThat(hostHolomemId).isNotNull();
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostHolomemId);
+        jdbcTemplate.update(
+            "INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down) VALUES (?, 'HY04-001', FALSE)",
+            hostHolomemId
+        );
+        jdbcTemplate.update(
+            "INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down) VALUES (?, 'HY04-001', FALSE)",
+            hostHolomemId
+        );
+
+        AttackArtActionRequest request = new AttackArtActionRequest();
+        request.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        request.setTargetCardInstanceId(guestCenterCardInstanceId);
+        assertThatThrownBy(() -> matchActionService.attackArt(matchId, hostId, request))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("需要 RED Cheer x1");
     }
 
     @Test
@@ -7187,6 +7366,94 @@ class MatchActionServiceIntegrationTest {
         assertThatThrownBy(() -> matchActionService.batonTouch(matchId, hostId, second))
             .isInstanceOf(GameRuleException.class)
             .satisfies(ex -> assertThat(((GameRuleException) ex).getCode()).isEqualTo(GameErrorCode.BATON_TOUCH_ALREADY_USED_THIS_TURN));
+    }
+
+    @Test
+    void batonTouchShouldApplyColorlessModifierBeforeCostValidation() {
+        StartedMatchContext context = createStartedMatch("baton-modifier-host", "baton-modifier-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long centerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            30,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":30}",
+            1,
+            "RED",
+            "TBATON_MOD_CENTER"
+        );
+        Long backCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "BACK",
+            170,
+            "GREEN",
+            20,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":20}",
+            1,
+            "GREEN",
+            "TBATON_MOD_BACK"
+        );
+        Long sourceHolomemId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId,
+            centerCardInstanceId
+        );
+        assertThat(sourceHolomemId).isNotNull();
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 3,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_turn_effects (
+                match_id,
+                source_user_id,
+                affected_user_id,
+                effect_type,
+                stat_type,
+                modifier_value,
+                expires_turn,
+                payload
+            ) VALUES (?, ?, ?, 'BATON_TOUCH_COST_MODIFIER', 'BATON_TOUCH_COLORLESS_MODIFIER', 1, 3, CAST(? AS jsonb))
+            """,
+            matchId,
+            hostId,
+            hostId,
+            "{\"targetHolomemId\":" + sourceHolomemId + "}"
+        );
+
+        BatonTouchActionRequest batonTouch = new BatonTouchActionRequest();
+        batonTouch.setSourceHolomemCardInstanceId(centerCardInstanceId);
+        batonTouch.setTargetBackHolomemCardInstanceId(backCardInstanceId);
+        assertThatThrownBy(() -> matchActionService.batonTouch(matchId, hostId, batonTouch))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("需要無色 Cheer x2");
     }
 
     @Test

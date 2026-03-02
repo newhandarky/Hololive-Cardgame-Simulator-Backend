@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+./mvnw -q \
+  -Dtest=\
+HardNpcServiceIntegrationTest#executeHardNpcTurnShouldPerformDrawBeforeTurnCheer,\
+HardNpcServiceIntegrationTest#executeHardNpcTurnShouldEndTurnWhenNoExecutableActionsRemain,\
+HardNpcServiceIntegrationTest#executeHardNpcTurnShouldAttackWhenUsableArtExists,\
+MatchActionServiceIntegrationTest#endTurnShouldNotFinishMatchWhenOpponentHasNoHolomem,\
+MatchActionServiceIntegrationTest#attackArtShouldTriggerDownedHolomemExtraLifeLoss,\
+MatchActionServiceIntegrationTest#attackArtShouldRequireSpecificColorBeforeColorlessCost,\
+MatchActionServiceIntegrationTest#batonTouchShouldApplyColorlessModifierBeforeCostValidation \
+  test
