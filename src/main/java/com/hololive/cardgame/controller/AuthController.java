@@ -23,6 +23,9 @@ public class AuthController {
     private final UserRepository userRepository;
     private final DeckService deckService;
 
+    /**
+     * 認證控制器，負責 LINE 登入與 JWT 簽發。
+     */
     public AuthController(
         LineTokenVerifier lineTokenVerifier,
         JwtTokenProvider jwtTokenProvider,
@@ -36,6 +39,9 @@ public class AuthController {
     }
 
     @PostMapping("/line-login")
+    /**
+     * 以 LINE idToken 登入，必要時建立新使用者並回傳 JWT。
+     */
     public ResponseEntity<LineLoginResponse> lineLogin(@RequestBody LineLoginRequest request) {
         String lineUserId = lineTokenVerifier.verifyIdToken(request.getIdToken());
 
@@ -75,12 +81,18 @@ public class AuthController {
         return ResponseEntity.ok(new LineLoginResponse(token, user.getId(), user.getDisplayName()));
     }
 
+    /**
+     * 以 lineUserId 查找使用者，若不存在則建立。
+     */
     private UserUpsertResult findOrCreateUser(String lineUserId, LineLoginRequest request) {
         return userRepository.findByLineUserId(lineUserId)
             .map(user -> new UserUpsertResult(user, false))
             .orElseGet(() -> createUserWithRaceFallback(lineUserId, request));
     }
 
+    /**
+     * 建立新使用者並處理並發下的唯一鍵衝突回退。
+     */
     private UserUpsertResult createUserWithRaceFallback(String lineUserId, LineLoginRequest request) {
         User newUser = new User();
         newUser.setLineUserId(lineUserId);

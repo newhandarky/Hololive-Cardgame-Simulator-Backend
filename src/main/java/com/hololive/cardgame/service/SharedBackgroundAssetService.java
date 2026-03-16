@@ -17,11 +17,17 @@ public class SharedBackgroundAssetService {
 
     private final SharedBackgroundAssetRepository sharedBackgroundAssetRepository;
 
+    /**
+     * 共用背景素材服務，處理素材查詢與新增去重。
+     */
     public SharedBackgroundAssetService(SharedBackgroundAssetRepository sharedBackgroundAssetRepository) {
         this.sharedBackgroundAssetRepository = sharedBackgroundAssetRepository;
     }
 
     @Transactional(readOnly = true)
+    /**
+     * 依素材類別查詢背景素材列表（新到舊）。
+     */
     public List<SharedBackgroundAssetResponse> listByCategory(BackgroundAssetCategory category) {
         return sharedBackgroundAssetRepository.findByCategoryOrderByIdDesc(category.name())
             .stream()
@@ -30,6 +36,9 @@ public class SharedBackgroundAssetService {
     }
 
     @Transactional
+    /**
+     * 新增背景素材；若同分類同 URL 已存在則直接回傳既有資料。
+     */
     public SharedBackgroundAssetResponse create(
         BackgroundAssetCategory category,
         String imageUrl,
@@ -52,6 +61,9 @@ public class SharedBackgroundAssetService {
             });
     }
 
+    /**
+     * 檢查並正規化背景圖片 URL（僅允許 http/https）。
+     */
     private String normalizeImageUrl(String imageUrl) {
         if (imageUrl == null || imageUrl.isBlank()) {
             throw new IllegalArgumentException("imageUrl 不可為空");
@@ -63,6 +75,9 @@ public class SharedBackgroundAssetService {
         return normalized;
     }
 
+    /**
+     * Entity 轉 DTO。
+     */
     private SharedBackgroundAssetResponse toResponse(SharedBackgroundAssetEntity entity) {
         SharedBackgroundAssetResponse response = new SharedBackgroundAssetResponse();
         response.setId(entity.getId());

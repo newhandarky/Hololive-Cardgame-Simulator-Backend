@@ -17,12 +17,17 @@ public class UserController {
     private UserRepository userRepository;
 
     @GetMapping
+    /**
+     * 取得所有使用者資料（目前主要用於開發期檢查）。
+     */
     public List<User> getAll() {
         return userRepository.findAll();
     }
 
-    // 測試用：建立一筆假資料
     @PostMapping("/test")
+    /**
+     * 建立測試用使用者資料。
+     */
     public User createTestUser() {
         User u = new User();
         u.setLineUserId("test_line_" + System.currentTimeMillis());
@@ -31,4 +36,3 @@ public class UserController {
         return userRepository.save(u);
     }
 }
-

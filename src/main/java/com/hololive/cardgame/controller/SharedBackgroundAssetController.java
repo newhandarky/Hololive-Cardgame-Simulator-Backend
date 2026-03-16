@@ -24,6 +24,9 @@ public class SharedBackgroundAssetController {
     private final SharedBackgroundAssetService sharedBackgroundAssetService;
     private final AuthUserResolver authUserResolver;
 
+    /**
+     * 共用背景素材 API 控制器（場地/卡背/エール背景）。
+     */
     public SharedBackgroundAssetController(
         SharedBackgroundAssetService sharedBackgroundAssetService,
         AuthUserResolver authUserResolver
@@ -33,6 +36,9 @@ public class SharedBackgroundAssetController {
     }
 
     @GetMapping
+    /**
+     * 依素材類別查詢背景素材清單。
+     */
     public List<SharedBackgroundAssetResponse> listByCategory(@RequestParam String category) {
         try {
             return sharedBackgroundAssetService.listByCategory(BackgroundAssetCategory.parse(category));
@@ -43,6 +49,9 @@ public class SharedBackgroundAssetController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
+    /**
+     * 新增共用背景素材。
+     */
     public SharedBackgroundAssetResponse create(@Valid @RequestBody CreateSharedBackgroundAssetRequest request) {
         try {
             return sharedBackgroundAssetService.create(

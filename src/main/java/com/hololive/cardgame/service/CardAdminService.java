@@ -19,6 +19,9 @@ public class CardAdminService {
     private final CardRepository cardRepository;
     private final CardEffectValidator cardEffectValidator;
 
+    /**
+     * 卡片後台管理服務，負責新增各類卡片與子表資料。
+     */
     public CardAdminService(
         JdbcTemplate jdbcTemplate,
         CardRepository cardRepository,
@@ -30,6 +33,9 @@ public class CardAdminService {
     }
 
     @Transactional
+    /**
+     * 建立卡片主檔並依 cardType 寫入對應子表。
+     */
     public Card createCard(AdminCreateCardRequest request) {
         String cardId = normalize(request.getCardId());
         String cardType = normalize(request.getCardType());
@@ -79,6 +85,9 @@ public class CardAdminService {
             .orElseThrow(() -> new IllegalStateException("卡片建立後讀取失敗"));
     }
 
+    /**
+     * 建立 OSHI 子表資料。
+     */
     private void createOshi(String cardId, AdminCreateCardRequest request, Timestamp ts) {
         if (request.getLife() == null || !StringUtils.hasText(request.getMainColor())) {
             throw new IllegalArgumentException("OSHI 需提供 life、mainColor");
@@ -97,6 +106,9 @@ public class CardAdminService {
         );
     }
 
+    /**
+     * 建立 MEMBER 子表資料。
+     */
     private void createMember(String cardId, AdminCreateCardRequest request, Timestamp ts) {
         if (request.getHp() == null || !StringUtils.hasText(request.getLevelType())
             || !StringUtils.hasText(request.getMainColor())) {
@@ -125,6 +137,9 @@ public class CardAdminService {
         );
     }
 
+    /**
+     * 建立 SUPPORT 子表資料。
+     */
     private void createSupport(String cardId, AdminCreateCardRequest request, Timestamp ts) {
         if (!StringUtils.hasText(request.getEffectType())
             || !StringUtils.hasText(request.getEffectJson())
@@ -155,6 +170,9 @@ public class CardAdminService {
         );
     }
 
+    /**
+     * 建立 CHEER 子表資料。
+     */
     private void createCheer(String cardId, AdminCreateCardRequest request, Timestamp ts) {
         if (!StringUtils.hasText(request.getColor())) {
             throw new IllegalArgumentException("CHEER 需提供 color");
@@ -171,10 +189,16 @@ public class CardAdminService {
         );
     }
 
+    /**
+     * 驗證是否為允許的 cardType。
+     */
     private boolean isAllowedCardType(String type) {
         return "OSHI".equals(type) || "MEMBER".equals(type) || "SUPPORT".equals(type) || "CHEER".equals(type);
     }
 
+    /**
+     * 字串正規化（trim + uppercase）。
+     */
     private String normalize(String value) {
         if (value == null) {
             return null;
@@ -182,6 +206,9 @@ public class CardAdminService {
         return value.trim().toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * 可空字串正規化，空值回傳 null。
+     */
     private String normalizeNullable(String value) {
         if (!StringUtils.hasText(value)) {
             return null;
@@ -189,6 +216,9 @@ public class CardAdminService {
         return normalize(value);
     }
 
+    /**
+     * 去除前後空白，空值回傳 null。
+     */
     private String trimOrNull(String value) {
         if (!StringUtils.hasText(value)) {
             return null;
@@ -196,6 +226,9 @@ public class CardAdminService {
         return value.trim();
     }
 
+    /**
+     * 空白 JSON 回退為空物件。
+     */
     private String defaultJson(String value) {
         if (!StringUtils.hasText(value)) {
             return "{}";
@@ -203,6 +236,9 @@ public class CardAdminService {
         return value;
     }
 
+    /**
+     * 空白 JSON 回傳 null。
+     */
     private String nullableJson(String value) {
         if (!StringUtils.hasText(value)) {
             return null;

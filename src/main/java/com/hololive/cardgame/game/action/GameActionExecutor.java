@@ -13,10 +13,16 @@ public class GameActionExecutor {
 
     private final JdbcTemplate jdbcTemplate;
 
+    /**
+     * 建立原子動作執行器，透過 JdbcTemplate 直接操作對戰資料。
+     */
     public GameActionExecutor(JdbcTemplate jdbcTemplate) {
         this.jdbcTemplate = jdbcTemplate;
     }
 
+    /**
+     * 依序執行原子動作列表，並回傳每步執行結果。
+     */
     public List<ActionResult> execute(EffectContext context, List<AtomicAction> actions) {
         if (actions == null || actions.isEmpty()) {
             return List.of();
@@ -28,6 +34,9 @@ public class GameActionExecutor {
         return results;
     }
 
+    /**
+     * 根據動作型別分派到對應的執行方法。
+     */
     private ActionResult executeOne(EffectContext context, AtomicAction action) {
         if (action instanceof MoveZoneAction moveZoneAction) {
             return executeMoveZone(context, moveZoneAction);
@@ -56,6 +65,9 @@ public class GameActionExecutor {
         return ActionResult.failure("UNKNOWN", "UNSUPPORTED_ACTION");
     }
 
+    /**
+     * 執行抽牌動作：由 fromZone 移動到 toZone。
+     */
     private ActionResult executeDraw(EffectContext context, DrawAction action) {
         if (context == null || context.matchId() == null || action == null || action.ownerUserId() == null) {
             return ActionResult.failure("DRAW", "INVALID_ARGUMENTS");
@@ -131,6 +143,9 @@ public class GameActionExecutor {
         return ActionResult.success("DRAW", details);
     }
 
+    /**
+     * 執行卡片區位移動（match_cards）。
+     */
     private ActionResult executeMoveZone(EffectContext context, MoveZoneAction action) {
         if (
             context == null ||
@@ -193,6 +208,9 @@ public class GameActionExecutor {
         );
     }
 
+    /**
+     * 執行 holomem 區位移動（match_holomems）。
+     */
     private ActionResult executeHolomemMoveZone(EffectContext context, HolomemMoveZoneAction action) {
         if (context == null || context.matchId() == null || action == null || action.holomemId() == null) {
             return ActionResult.failure("MOVE_ZONE", "INVALID_ARGUMENTS");
@@ -235,6 +253,9 @@ public class GameActionExecutor {
         );
     }
 
+    /**
+     * 對指定 holomem 累加 damage_taken。
+     */
     private ActionResult executeDamage(EffectContext context, DamageAction action) {
         if (context == null || context.matchId() == null || action == null || action.targetHolomemId() == null) {
             return ActionResult.failure("DAMAGE", "INVALID_ARGUMENTS");
@@ -268,6 +289,9 @@ public class GameActionExecutor {
         );
     }
 
+    /**
+     * 讓目標玩家失去生命：LIFE -> ARCHIVE 並同步扣 current_life。
+     */
     private ActionResult executeReduceLife(EffectContext context, ReduceLifeAction action) {
         if (context == null || context.matchId() == null || action == null || action.targetUserId() == null) {
             return ActionResult.failure("REDUCE_LIFE", "INVALID_ARGUMENTS");
@@ -355,6 +379,9 @@ public class GameActionExecutor {
         );
     }
 
+    /**
+     * 將 cheer 卡片移到 STAGE 並建立 match_holomem_cheers 關聯。
+     */
     private ActionResult executeSendCheer(EffectContext context, SendCheerAction action) {
         if (
             context == null ||
@@ -462,6 +489,9 @@ public class GameActionExecutor {
         );
     }
 
+    /**
+     * 區位名稱正規化（trim + uppercase）。
+     */
     private String normalizeZone(String zone) {
         if (zone == null) {
             return "";

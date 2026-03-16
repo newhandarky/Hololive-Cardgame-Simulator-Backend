@@ -32,6 +32,9 @@ public class DeckController {
     private final DeckService deckService;
     private final AuthUserResolver authUserResolver;
 
+    /**
+     * 牌組 API 控制器，處理使用者牌組管理與快速建立牌組流程。
+     */
     public DeckController(
         DeckService deckService,
         AuthUserResolver authUserResolver
@@ -41,6 +44,9 @@ public class DeckController {
     }
 
     @GetMapping("/me/list")
+    /**
+     * 取得目前登入使用者的牌組摘要清單。
+     */
     public List<DeckSummaryResponse> listMyDecks() {
         Long userId = authUserResolver.currentUserId();
         return deckService.listDeckSummaries(userId);
@@ -48,6 +54,9 @@ public class DeckController {
 
     @PostMapping("/me")
     @ResponseStatus(HttpStatus.CREATED)
+    /**
+     * 建立新牌組。
+     */
     public DeckDetailResponse createDeck(@Valid @RequestBody CreateDeckRequest request) {
         Long userId = authUserResolver.currentUserId();
         try {
@@ -58,6 +67,9 @@ public class DeckController {
     }
 
     @GetMapping("/me/{deckId}")
+    /**
+     * 取得指定牌組詳情。
+     */
     public DeckDetailResponse getMyDeckDetail(@PathVariable Long deckId) {
         Long userId = authUserResolver.currentUserId();
         try {
@@ -68,6 +80,9 @@ public class DeckController {
     }
 
     @PatchMapping("/me/{deckId}")
+    /**
+     * 重新命名指定牌組。
+     */
     public DeckDetailResponse renameDeck(@PathVariable Long deckId, @Valid @RequestBody UpdateDeckMetaRequest request) {
         Long userId = authUserResolver.currentUserId();
         try {
@@ -78,6 +93,9 @@ public class DeckController {
     }
 
     @PostMapping("/me/{deckId}/activate")
+    /**
+     * 啟用指定牌組。
+     */
     public DeckDetailResponse activateDeck(@PathVariable Long deckId) {
         Long userId = authUserResolver.currentUserId();
         try {
@@ -88,6 +106,9 @@ public class DeckController {
     }
 
     @PostMapping("/me/{deckId}/validate")
+    /**
+     * 驗證指定牌組是否符合規範。
+     */
     public DeckValidationResponse validateDeck(@PathVariable Long deckId) {
         Long userId = authUserResolver.currentUserId();
         try {
@@ -98,18 +119,27 @@ public class DeckController {
     }
 
     @GetMapping("/me")
+    /**
+     * 取得目前 active 牌組的卡片列表。
+     */
     public List<DeckCardResponse> getMyDeck() {
         Long userId = authUserResolver.currentUserId();
         return deckService.getActiveDeckCards(userId);
     }
 
     @GetMapping("/starter-presets")
+    /**
+     * 取得可用官方起始牌組預設清單。
+     */
     public List<StarterDeckPresetResponse> listStarterDeckPresets() {
         return deckService.listStarterDeckPresets();
     }
 
     @PostMapping("/me/bootstrap-starter-decks")
     @ResponseStatus(HttpStatus.OK)
+    /**
+     * 為目前使用者補齊官方起始牌組。
+     */
     public List<DeckSummaryResponse> bootstrapStarterDecksForCurrentUser() {
         Long userId = authUserResolver.currentUserId();
         return deckService.bootstrapStarterDecksForUser(userId);
@@ -117,6 +147,9 @@ public class DeckController {
 
     @PutMapping("/me/cards/{cardId}")
     @ResponseStatus(HttpStatus.OK)
+    /**
+     * 更新目前 active 牌組中的某張卡片張數。
+     */
     public DeckCardResponse updateDeckCard(
         @PathVariable String cardId,
         @Valid @RequestBody UpdateDeckCardRequest request
@@ -131,6 +164,9 @@ public class DeckController {
 
     @PutMapping("/me/{deckId}/cards/{cardId}")
     @ResponseStatus(HttpStatus.OK)
+    /**
+     * 更新指定牌組中的某張卡片張數。
+     */
     public DeckCardResponse updateDeckCardInSpecificDeck(
         @PathVariable Long deckId,
         @PathVariable String cardId,

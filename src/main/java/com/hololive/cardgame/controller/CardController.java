@@ -23,12 +23,18 @@ public class CardController {
     private final CardCatalogQueryService cardCatalogQueryService;
     private final AuthUserResolver authUserResolver;
 
+    /**
+     * 卡片圖鑑 API 控制器，提供卡片查詢與變體偏好設定。
+     */
     public CardController(CardCatalogQueryService cardCatalogQueryService, AuthUserResolver authUserResolver) {
         this.cardCatalogQueryService = cardCatalogQueryService;
         this.authUserResolver = authUserResolver;
     }
 
     @GetMapping
+    /**
+     * 依條件查詢卡片列表。
+     */
     public List<CardSearchResponse> listCards(
         @RequestParam(required = false) String keyword,
         @RequestParam(required = false) String type,
@@ -56,11 +62,17 @@ public class CardController {
     }
 
     @GetMapping("/tags")
+    /**
+     * 取得目前卡表可用的所有標籤。
+     */
     public List<String> listAvailableTags() {
         return cardCatalogQueryService.getAvailableTags();
     }
 
     @GetMapping("/{cardId}")
+    /**
+     * 取得單一卡片完整詳情。
+     */
     public CardDetailResponse getCardDetail(@PathVariable String cardId) {
         try {
             Long userId = authUserResolver.currentUserId();
@@ -71,6 +83,9 @@ public class CardController {
     }
 
     @PutMapping("/{cardId}/preferred-variant")
+    /**
+     * 設定目前使用者對指定卡片的偏好圖像變體。
+     */
     public CardDetailResponse updatePreferredVariant(
         @PathVariable String cardId,
         @RequestBody UpdatePreferredVariantRequest request

@@ -532,7 +532,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             matchId
         );
         entityManager.clear();
-        executeRequiredTurnActions(matchId, hostId, centerCardInstanceId);
+        advanceToPerformancePhase(matchId, hostId, centerCardInstanceId);
 
         AttackArtActionRequest attackArt = new AttackArtActionRequest();
         attackArt.setAttackerCardInstanceId(centerCardInstanceId);
@@ -701,7 +701,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         );
         entityManager.clear();
 
-        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
 
         AttackArtActionRequest request = new AttackArtActionRequest();
         request.setAttackerCardInstanceId(hostCenterCardInstanceId);
@@ -1107,6 +1107,12 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             guestId
         );
         assertThat(payloadText).containsPattern("\"interactionType\"\\s*:\\s*\"DRAW_REVEAL\"");
+        String phaseAfterResolve = jdbcTemplate.queryForObject(
+            "SELECT current_phase FROM matches WHERE id = ?",
+            String.class,
+            matchId
+        );
+        assertThat(phaseAfterResolve).isEqualTo("CHEER");
     }
 
     @Test
@@ -1699,6 +1705,303 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             sourceCheerCardInstanceId
         );
         assertThat(sourceCardZone).isEqualTo("STAGE");
+        String phaseAfterSendCheer = jdbcTemplate.queryForObject(
+            "SELECT current_phase FROM matches WHERE id = ?",
+            String.class,
+            matchId
+        );
+        assertThat(phaseAfterSendCheer).isEqualTo("MAIN");
+    }
+
+    @Test
+    void resolveDecisionShouldMoveTurnStartToDrawPhase() {
+        StartedMatchContext context = createStartedMatch("turn-start-draw-host", "turn-start-draw-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+        String debutCardId = findMemberCardIdByLevel("DEBUT");
+
+        Long hostCenterCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, debutCardId, "CENTER", "DEBUT", 0);
+        createStageHolomemWithSingleCard(matchId, guestId, debutCardId, "CENTER", "DEBUT", 0);
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 1,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        matchActionService.endTurn(matchId, hostId);
+
+        Long decisionId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TURN_START'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            guestId
+        );
+        assertThat(decisionId).isNotNull();
+
+        ResolveDecisionRequest request = new ResolveDecisionRequest();
+        request.setDecisionId(decisionId);
+        matchActionService.resolveDecision(matchId, guestId, request);
+
+        String phaseAfterResolve = jdbcTemplate.queryForObject(
+            "SELECT current_phase FROM matches WHERE id = ?",
+            String.class,
+            matchId
+        );
+        assertThat(phaseAfterResolve).isEqualTo("DRAW");
+    }
+
+    @Test
+    void advancePhaseShouldMoveMainToPerformanceAndThenEnd() {
+        StartedMatchContext context = createStartedMatch("advance-phase-host", "advance-phase-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            40,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":40}",
+            0,
+            "RED",
+            "TADV_PHASE_HOST_CENTER"
+        );
+        createStageHolomemWithSingleCard(matchId, guestId, findMemberCardIdByLevel("DEBUT"), "CENTER", "DEBUT", 0);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 3,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        matchActionService.advancePhase(matchId, hostId);
+        assertThat(jdbcTemplate.queryForObject("SELECT current_phase FROM matches WHERE id = ?", String.class, matchId))
+            .isEqualTo("PERFORMANCE");
+
+        matchActionService.advancePhase(matchId, hostId);
+        assertThat(jdbcTemplate.queryForObject("SELECT current_phase FROM matches WHERE id = ?", String.class, matchId))
+            .isEqualTo("END");
+    }
+
+    @Test
+    void advancePhaseShouldSkipPerformanceForFirstPlayerFirstTurn() {
+        StartedMatchContext context = createStartedMatch("advance-phase-first-host", "advance-phase-first-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        String debutCardId = findMemberCardIdByLevel("DEBUT");
+        Long hostCenterCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, debutCardId, "CENTER", "DEBUT", 0);
+        createStageHolomemWithSingleCard(matchId, context.guestId(), debutCardId, "CENTER", "DEBUT", 0);
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 1,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        matchActionService.advancePhase(matchId, hostId);
+
+        assertThat(jdbcTemplate.queryForObject("SELECT current_phase FROM matches WHERE id = ?", String.class, matchId))
+            .isEqualTo("END");
+    }
+
+    @Test
+    void attackArtShouldRejectMainPhaseAfterTurnActionsComplete() {
+        StartedMatchContext context = createStartedMatch("attack-main-reject-host", "attack-main-reject-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            60,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":60}",
+            0,
+            "RED",
+            "TATTACK_MAIN_REJECT_HOST"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 3,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest request = new AttackArtActionRequest();
+        request.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        request.setTargetCardInstanceId(guestCenterCardInstanceId);
+
+        assertThatThrownBy(() -> matchActionService.attackArt(matchId, hostId, request))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("表演階段");
+    }
+
+    @Test
+    void attackArtShouldRequireTurnDrawAndCheerBeforeUse() {
+        StartedMatchContext context = createStartedMatch("attack-phase-host", "attack-phase-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            60,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":60}",
+            0,
+            "RED",
+            "TPHASE_HOST_CENTER"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            guestId,
+            "CENTER",
+            180,
+            "BLUE",
+            20,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":20}",
+            0,
+            "BLUE",
+            "TPHASE_GUEST_CENTER"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 3,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        AttackArtActionRequest request = new AttackArtActionRequest();
+        request.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        request.setTargetCardInstanceId(guestCenterCardInstanceId);
+
+        assertThatThrownBy(() -> matchActionService.attackArt(matchId, hostId, request))
+            .isInstanceOf(GameRuleException.class)
+            .satisfies(ex -> assertThat(((GameRuleException) ex).getCode()).isEqualTo(GameErrorCode.TURN_ACTIONS_INCOMPLETE))
+            .hasMessageContaining("抽卡");
+
+        matchActionService.drawTurn(matchId, hostId);
+        resolvePendingInteractionIfExists(matchId, hostId, "DRAW_REVEAL");
+
+        assertThatThrownBy(() -> matchActionService.attackArt(matchId, hostId, request))
+            .isInstanceOf(GameRuleException.class)
+            .satisfies(ex -> assertThat(((GameRuleException) ex).getCode()).isEqualTo(GameErrorCode.TURN_ACTIONS_INCOMPLETE))
+            .hasMessageContaining("發送吶喊");
+
+        matchActionService.sendTurnCheer(matchId, hostId);
+        Long sendCheerDecisionId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'SEND_CHEER'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId
+        );
+        assertThat(sendCheerDecisionId).isNotNull();
+        ResolveDecisionRequest resolveSendCheer = new ResolveDecisionRequest();
+        resolveSendCheer.setDecisionId(sendCheerDecisionId);
+        resolveSendCheer.setSelectedCardInstanceIds(List.of(hostCenterCardInstanceId));
+        matchActionService.resolveDecision(matchId, hostId, resolveSendCheer);
+        matchActionService.advancePhase(matchId, hostId);
+
+        matchActionService.attackArt(matchId, hostId, request);
+
+        Integer guestDamageTaken = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(damage_taken, 0)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        assertThat(guestDamageTaken).isEqualTo(60);
     }
 
     @Test
@@ -1860,6 +2163,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         executeRequiredTurnActions(matchId, guestId, guestCenterCardInstanceId);
         matchActionService.endTurn(matchId, guestId);
         resolvePendingInteractionIfExists(matchId, hostId, "TURN_START");
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
 
         AttackArtActionRequest attackArt = new AttackArtActionRequest();
         attackArt.setAttackerCardInstanceId(hostCenterCardInstanceId);
@@ -2019,6 +2323,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         executeRequiredTurnActions(matchId, guestId, guestCenterCardInstanceId);
         matchActionService.endTurn(matchId, guestId);
         resolvePendingInteractionIfExists(matchId, hostId, "TURN_START");
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
 
         AttackArtActionRequest attackArt = new AttackArtActionRequest();
         attackArt.setAttackerCardInstanceId(hostCenterCardInstanceId);
@@ -2175,6 +2480,8 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         request.setBloomCardInstanceId(bloomCardInstanceId);
         request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
         matchActionService.bloom(matchId, hostId, request);
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
 
         Map<String, Object> top = jdbcTemplate.queryForMap(
             """
@@ -2420,7 +2727,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             FROM match_actions
             WHERE match_id = ?
               AND user_id = ?
-              AND action_type = 'BLOOM'
+              AND action_type = 'RESOLVE_DECISION'
             ORDER BY id DESC
             LIMIT 1
             """,
@@ -2665,6 +2972,8 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             "DEBUT",
             0
         );
+        String guestBackCardId = createMemberCardDefinition("TDOWN_EVENT_EXTRA_BACK", "Down Event Extra 後排", "DEBUT", 100, "WHITE");
+        createStageHolomemWithSingleCard(matchId, guestId, guestBackCardId, "BACK", "DEBUT", 0);
 
         int lifeBefore = countZone(matchId, guestId, "LIFE");
         assertThat(lifeBefore).isGreaterThanOrEqualTo(3);
@@ -2683,15 +2992,38 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         );
         entityManager.clear();
 
-        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
 
         AttackArtActionRequest attack = new AttackArtActionRequest();
         attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
         attack.setTargetCardInstanceId(guestCenterCardInstanceId);
         matchActionService.attackArt(matchId, hostId, attack);
 
-        int lifeAfter = countZone(matchId, guestId, "LIFE");
-        assertThat(lifeAfter).isEqualTo(lifeBefore - 3);
+        int lifeAfterAttack = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterAttack).isEqualTo(lifeBefore - 1);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("\"triggerSections\"");
+        assertThat(pendingContextText).containsPattern("\"sectionType\"\\s*:\\s*\"DOWN_EVENT\"");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int lifeAfterConfirm = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterConfirm).isEqualTo(lifeBefore - 3);
 
         String payloadText = jdbcTemplate.query(
             """
@@ -2708,7 +3040,8 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             hostId
         );
         assertThat(payloadText).containsPattern("\"downEvent\"\\s*:\\s*\\{");
-        assertThat(payloadText).containsPattern("\"appliedLifeLoss\"\\s*:\\s*2");
+        assertThat(payloadText).containsPattern("\"deferred\"\\s*:\\s*true");
+        assertThat(payloadText).containsPattern("\"appliedLifeLoss\"\\s*:\\s*0");
     }
 
     @Test
@@ -3267,6 +3600,1312 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
     }
 
     @Test
+    void collabHsd01015ShouldChooseAzkiBranchOnly() {
+        StartedMatchContext context = createStartedMatch("collab-hsd01015-azki-host", "collab-hsd01015-azki-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String centerAzkiCardId = createMemberCardDefinition("TCOLLAB_AZKI_CENTER", "AZKi", "DEBUT", 120, "WHITE");
+        Long centerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            centerAzkiCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        String collabCardId = createMemberCardDefinition(
+            "HSD01-015",
+            "分支連動測試",
+            "DEBUT",
+            120,
+            "WHITE",
+            "{\"キーワード\":\"コラボエフェクト分岐テスト \\nセンターホロメンが〈AZKi〉なら、このホロメンを含む自分のホロメン1人に自分のエールデッキの上から1枚を送る。センターホロメンが〈ときのそら〉なら、自分のデッキを1枚引く。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        Long centerHolomemId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId,
+            centerCardInstanceId
+        );
+        assertThat(centerHolomemId).isNotNull();
+        int centerCheerBefore = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            centerHolomemId
+        );
+        int deckBefore = countZone(matchId, hostId, "DECK");
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        @SuppressWarnings("unchecked")
+        List<String> requestedEffects = (List<String>) summary.get("requestedEffects");
+        assertThat(requestedEffects).containsExactly("ADD_CHEER");
+
+        int centerCheerAfter = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            centerHolomemId
+        );
+        int deckAfter = countZone(matchId, hostId, "DECK");
+        assertThat(centerCheerAfter).isEqualTo(centerCheerBefore + 1);
+        assertThat(deckAfter).isEqualTo(deckBefore);
+    }
+
+    @Test
+    void collabHsd01015ShouldChooseSoraBranchOnly() {
+        StartedMatchContext context = createStartedMatch("collab-hsd01015-sora-host", "collab-hsd01015-sora-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String centerSoraCardId = createMemberCardDefinition("TCOLLAB_SORA_CENTER", "ときのそら", "DEBUT", 120, "WHITE");
+        Long centerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            centerSoraCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        String collabCardId = createMemberCardDefinition(
+            "HSD01-015",
+            "分支連動測試",
+            "DEBUT",
+            120,
+            "WHITE",
+            "{\"キーワード\":\"コラボエフェクト分岐テスト \\nセンターホロメンが〈AZKi〉なら、このホロメンを含む自分のホロメン1人に自分のエールデッキの上から1枚を送る。センターホロメンが〈ときのそら〉なら、自分のデッキを1枚引く。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        Long centerHolomemId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId,
+            centerCardInstanceId
+        );
+        assertThat(centerHolomemId).isNotNull();
+        int centerCheerBefore = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            centerHolomemId
+        );
+        int deckBefore = countZone(matchId, hostId, "DECK");
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        @SuppressWarnings("unchecked")
+        List<String> requestedEffects = (List<String>) summary.get("requestedEffects");
+        assertThat(requestedEffects).containsExactly("DRAW");
+
+        int centerCheerAfter = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            centerHolomemId
+        );
+        int deckAfter = countZone(matchId, hostId, "DECK");
+        assertThat(centerCheerAfter).isEqualTo(centerCheerBefore);
+        assertThat(deckAfter).isEqualTo(deckBefore - 1);
+    }
+
+    @Test
+    void collabHsd13009ShouldTriggerOnlyOnSecondPlayerFirstTurn() {
+        StartedMatchContext context = createStartedMatch("collab-hsd13009-host", "collab-hsd13009-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String collabCardId = createMemberCardDefinition(
+            "HSD13-009",
+            "後攻首回合連動測試",
+            "DEBUT",
+            120,
+            "YELLOW",
+            "{\"キーワード\":\"コラボエフェクトイタズラ増殖！ \\n自分が後攻で最初のターンなら、自分のデッキから、#Justiceを持つ1stホロメン1枚を公開し、ステージに出す。そしてデッキをシャッフルする。\"}"
+        );
+        Long hostCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+        Long guestCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            collabCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 1,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        Map<String, Object> hostSummary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            hostCardInstanceId
+        );
+        assertThat(hostSummary.get("hasCollabEffect")).isEqualTo(false);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            guestId,
+            matchId
+        );
+        Map<String, Object> guestSummary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            guestId,
+            collabCardId,
+            guestCardInstanceId
+        );
+        assertThat(guestSummary.get("hasCollabEffect")).isEqualTo(true);
+        @SuppressWarnings("unchecked")
+        List<String> requestedEffects = (List<String>) guestSummary.get("requestedEffects");
+        assertThat(requestedEffects).contains("SUMMON_TO_STAGE");
+    }
+
+    @Test
+    void collabHsd01009ShouldSendCheerAndMoveSelfToBackWhenDiceIsOne() {
+        Mockito.when(diceService.rollD6()).thenReturn(1);
+        StartedMatchContext context = createStartedMatch("collab-hsd01009-roll1-host", "collab-hsd01009-roll1-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String backTargetCardId = createMemberCardDefinition("TCOLLAB_HSD01009_BACK", "回收目標 BACK", "DEBUT", 120, "GREEN");
+        Long backTargetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            backTargetCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+        String collabCardId = createMemberCardDefinition(
+            "HSD01-009",
+            "廣がる地図測試",
+            "DEBUT",
+            120,
+            "GREEN",
+            "{\"キーワード\":\"コラボエフェクト広がる地図 \\nサイコロを１回振れる：４以下の時、自分のエールデッキの上から１枚を、自分のバックホロメンに送る。１の時、さらに、このホロメンをバックポジションに移動できる。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+
+        Long backTargetHolomemId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId,
+            backTargetCardInstanceId
+        );
+        assertThat(backTargetHolomemId).isNotNull();
+        int backCheerBefore = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            backTargetHolomemId
+        );
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        assertThat(summary.get("diceRoll")).isEqualTo(1);
+        @SuppressWarnings("unchecked")
+        List<String> requestedEffects = (List<String>) summary.get("requestedEffects");
+        assertThat(requestedEffects).containsExactly("ADD_CHEER", "MOVE_ZONE");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> executedEffects = (List<Map<String, Object>>) summary.get("executedEffects");
+        Map<String, Object> addCheerEffect = executedEffects.stream()
+            .filter(effect -> "ADD_CHEER".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+        Map<String, Object> moveZoneEffect = executedEffects.stream()
+            .filter(effect -> "MOVE_ZONE".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+
+        assertThat(addCheerEffect).isNotNull();
+        assertThat(((Number) addCheerEffect.get("attachApplied")).intValue()).isEqualTo(1);
+        assertThat(moveZoneEffect).isNotNull();
+        assertThat(moveZoneEffect.get("moved")).isEqualTo(true);
+        assertThat(moveZoneEffect.get("fromZone")).isEqualTo("COLLAB");
+        assertThat(moveZoneEffect.get("toZone")).isEqualTo("BACK");
+
+        int backCheerAfter = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            backTargetHolomemId
+        );
+        assertThat(backCheerAfter).isEqualTo(backCheerBefore + 1);
+
+        String collabZoneAfter = jdbcTemplate.queryForObject(
+            """
+            SELECT zone
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId,
+            collabCardInstanceId
+        );
+        assertThat(collabZoneAfter).isEqualTo("BACK");
+    }
+
+    @Test
+    void collabHsd01009ShouldSkipBothEffectsWhenDiceAboveFour() {
+        Mockito.when(diceService.rollD6()).thenReturn(5);
+        StartedMatchContext context = createStartedMatch("collab-hsd01009-roll5-host", "collab-hsd01009-roll5-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String backTargetCardId = createMemberCardDefinition("TCOLLAB_HSD01009_BACK_FAIL", "回收目標 BACK", "DEBUT", 120, "GREEN");
+        Long backTargetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            backTargetCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+        String collabCardId = createMemberCardDefinition(
+            "HSD01-009",
+            "廣がる地図測試",
+            "DEBUT",
+            120,
+            "GREEN",
+            "{\"キーワード\":\"コラボエフェクト広がる地図 \\nサイコロを１回振れる：４以下の時、自分のエールデッキの上から１枚を、自分のバックホロメンに送る。１の時、さらに、このホロメンをバックポジションに移動できる。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+
+        Long backTargetHolomemId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId,
+            backTargetCardInstanceId
+        );
+        assertThat(backTargetHolomemId).isNotNull();
+        int backCheerBefore = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            backTargetHolomemId
+        );
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        assertThat(summary.get("diceRoll")).isEqualTo(5);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> executedEffects = (List<Map<String, Object>>) summary.get("executedEffects");
+        assertThat(executedEffects).isNotEmpty();
+        assertThat(executedEffects).allSatisfy(effect -> assertThat(effect.get("applied")).isEqualTo(false));
+
+        int backCheerAfter = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            backTargetHolomemId
+        );
+        assertThat(backCheerAfter).isEqualTo(backCheerBefore);
+
+        String collabZoneAfter = jdbcTemplate.queryForObject(
+            """
+            SELECT zone
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId,
+            collabCardInstanceId
+        );
+        assertThat(collabZoneAfter).isEqualTo("COLLAB");
+    }
+
+    @Test
+    void collabHsd10008ShouldSkipDrawWhenOpponentHandHasNoSupport() {
+        StartedMatchContext context = createStartedMatch("collab-hsd10008-host", "collab-hsd10008-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String collabCardId = createMemberCardDefinition(
+            "HSD10-008",
+            "看手牌後抽牌測試",
+            "DEBUT",
+            120,
+            "BLUE",
+            "{\"キーワード\":\"コラボエフェクトテスト \\n相手の手札を見る。相手の手札にサポートがあるなら、自分のデッキを1枚引く。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'DECK',
+                order_index = COALESCE(order_index, 0) + 1000,
+                is_face_down = TRUE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            matchId,
+            guestId
+        );
+        moveOneMemberFromDeckToHand(matchId, guestId);
+
+        int deckBefore = countZone(matchId, hostId, "DECK");
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+        int deckAfter = countZone(matchId, hostId, "DECK");
+
+        @SuppressWarnings("unchecked")
+        List<String> requestedEffects = (List<String>) summary.get("requestedEffects");
+        assertThat(requestedEffects).contains("LOOK_OPPONENT_HAND");
+        assertThat(requestedEffects).doesNotContain("DRAW");
+        assertThat(deckAfter).isEqualTo(deckBefore);
+    }
+
+    @Test
+    void collabHsd10009ShouldUseOpponentHandCountAsLookTopCount() {
+        StartedMatchContext context = createStartedMatch("collab-hsd10009-host", "collab-hsd10009-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String collabCardId = createMemberCardDefinition(
+            "HSD10-009",
+            "按對手手牌看牌庫頂測試",
+            "DEBUT",
+            120,
+            "BLUE",
+            "{\"キーワード\":\"コラボエフェクトテスト \\n相手の手札の枚数ぶん、自分のデッキの上からカードを見る。その中から1枚を手札に加える。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'DECK',
+                order_index = COALESCE(order_index, 0) + 1000,
+                is_face_down = TRUE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            matchId,
+            guestId
+        );
+        moveOneMemberFromDeckToHand(matchId, guestId);
+        moveOneMemberFromDeckToHand(matchId, guestId);
+        moveOneMemberFromDeckToHand(matchId, guestId);
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> executedEffects = (List<Map<String, Object>>) summary.get("executedEffects");
+        Map<String, Object> searchEffect = executedEffects.stream()
+            .filter(effect -> "SEARCH".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+        assertThat(searchEffect).isNotNull();
+        assertThat(((Number) searchEffect.get("lookTopCount")).intValue()).isEqualTo(3);
+    }
+
+    @Test
+    void collabHbp01031ShouldTakeOneCardFromHolopowerThenRefillFromDeckTop() {
+        StartedMatchContext context = createStartedMatch("collab-hbp01031-host", "collab-hbp01031-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = COALESCE(order_index, 0) + 1000,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HOLOPOWER'
+            """,
+            matchId,
+            hostId
+        );
+
+        String collabCardId = createMemberCardDefinition(
+            "HBP01-031",
+            "希望の庭園測試",
+            "SECOND",
+            200,
+            "WHITE",
+            "{\"キーワード\":\"コラボエフェクト希望の庭園 \\n自分のホロパワーを見る。その中から１枚を公開し、手札に加える。そして自分のデッキの上から１枚をホロパワーにする。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "SECOND",
+            0
+        );
+
+        String holopowerPickCardId = createMemberCardDefinition("TCOLLAB_HBP01031_PICK", "Holopower Pick", "DEBUT", 90, "WHITE");
+        String holopowerStayCardId = createMemberCardDefinition("TCOLLAB_HBP01031_STAY", "Holopower Stay", "DEBUT", 90, "WHITE");
+        String deckRefillCardId = createMemberCardDefinition("TCOLLAB_HBP01031_REFILL", "Deck Refill", "DEBUT", 90, "WHITE");
+
+        Long holopowerPickInstanceId = insertCardIntoDeckTop(matchId, hostId, holopowerPickCardId);
+        Long holopowerStayInstanceId = insertCardIntoDeckTop(matchId, hostId, holopowerStayCardId);
+        Long deckRefillInstanceId = insertCardIntoDeckTop(matchId, hostId, deckRefillCardId);
+        assertThat(holopowerPickInstanceId).isNotNull();
+        assertThat(holopowerStayInstanceId).isNotNull();
+        assertThat(deckRefillInstanceId).isNotNull();
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'HOLOPOWER',
+                order_index = 1,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            holopowerPickInstanceId,
+            matchId,
+            hostId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'HOLOPOWER',
+                order_index = 2,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            holopowerStayInstanceId,
+            matchId,
+            hostId
+        );
+
+        int handBefore = countZone(matchId, hostId, "HAND");
+        int holopowerBefore = countZone(matchId, hostId, "HOLOPOWER");
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        @SuppressWarnings("unchecked")
+        List<String> requestedEffects = (List<String>) summary.get("requestedEffects");
+        assertThat(requestedEffects).containsExactly("LOOK_HOLOPOWER", "SEARCH", "MOVE_TO_HOLOPOWER");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> executedEffects = (List<Map<String, Object>>) summary.get("executedEffects");
+        Map<String, Object> searchEffect = executedEffects.stream()
+            .filter(effect -> "SEARCH".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+        Map<String, Object> moveToHolopowerEffect = executedEffects.stream()
+            .filter(effect -> "MOVE_TO_HOLOPOWER".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+
+        assertThat(searchEffect).isNotNull();
+        assertThat(searchEffect.get("searchSourceZone")).isEqualTo("HOLOPOWER");
+        assertThat(((Number) searchEffect.get("searchApplied")).intValue()).isEqualTo(1);
+        assertThat(moveToHolopowerEffect).isNotNull();
+        assertThat(((Number) moveToHolopowerEffect.get("moveApplied")).intValue()).isEqualTo(1);
+
+        int handAfter = countZone(matchId, hostId, "HAND");
+        int holopowerAfter = countZone(matchId, hostId, "HOLOPOWER");
+        assertThat(handAfter).isEqualTo(handBefore + 1);
+        assertThat(holopowerAfter).isEqualTo(holopowerBefore);
+
+        String pickedCardZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ? AND match_id = ? AND owner_user_id = ?",
+            String.class,
+            holopowerPickInstanceId,
+            matchId,
+            hostId
+        );
+        String refillCardZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ? AND match_id = ? AND owner_user_id = ?",
+            String.class,
+            deckRefillInstanceId,
+            matchId,
+            hostId
+        );
+        assertThat(pickedCardZone).isEqualTo("HAND");
+        assertThat(refillCardZone).isEqualTo("HOLOPOWER");
+    }
+
+    @Test
+    void collabHbp01031ShouldStillMoveDeckTopToHolopowerWhenNoHolopowerCardToPick() {
+        StartedMatchContext context = createStartedMatch("collab-hbp01031-empty-host", "collab-hbp01031-empty-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = COALESCE(order_index, 0) + 1000,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HOLOPOWER'
+            """,
+            matchId,
+            hostId
+        );
+
+        String collabCardId = createMemberCardDefinition(
+            "HBP01-031",
+            "希望の庭園測試",
+            "SECOND",
+            200,
+            "WHITE",
+            "{\"キーワード\":\"コラボエフェクト希望の庭園 \\n自分のホロパワーを見る。その中から１枚を公開し、手札に加える。そして自分のデッキの上から１枚をホロパワーにする。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "SECOND",
+            0
+        );
+
+        String deckRefillCardId = createMemberCardDefinition("TCOLLAB_HBP01031_REFILL_ONLY", "Deck Refill Only", "DEBUT", 90, "WHITE");
+        Long deckRefillInstanceId = insertCardIntoDeckTop(matchId, hostId, deckRefillCardId);
+        assertThat(deckRefillInstanceId).isNotNull();
+
+        int handBefore = countZone(matchId, hostId, "HAND");
+        int holopowerBefore = countZone(matchId, hostId, "HOLOPOWER");
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> executedEffects = (List<Map<String, Object>>) summary.get("executedEffects");
+        Map<String, Object> searchEffect = executedEffects.stream()
+            .filter(effect -> "SEARCH".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+        Map<String, Object> moveToHolopowerEffect = executedEffects.stream()
+            .filter(effect -> "MOVE_TO_HOLOPOWER".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+
+        assertThat(searchEffect).isNotNull();
+        assertThat(searchEffect.get("searchSourceZone")).isEqualTo("HOLOPOWER");
+        assertThat(((Number) searchEffect.get("searchApplied")).intValue()).isEqualTo(0);
+        assertThat(moveToHolopowerEffect).isNotNull();
+        assertThat(((Number) moveToHolopowerEffect.get("moveApplied")).intValue()).isEqualTo(1);
+
+        int handAfter = countZone(matchId, hostId, "HAND");
+        int holopowerAfter = countZone(matchId, hostId, "HOLOPOWER");
+        assertThat(handAfter).isEqualTo(handBefore);
+        assertThat(holopowerAfter).isEqualTo(holopowerBefore + 1);
+
+        String refillCardZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ? AND match_id = ? AND owner_user_id = ?",
+            String.class,
+            deckRefillInstanceId,
+            matchId,
+            hostId
+        );
+        assertThat(refillCardZone).isEqualTo("HOLOPOWER");
+    }
+
+    @Test
+    void collabHsd04011ShouldTakeFromHolopowerThenSendOneHandCardToHolopower() {
+        StartedMatchContext context = createStartedMatch("collab-hsd04011-host", "collab-hsd04011-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = COALESCE(order_index, 0) + 1000,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone IN ('HAND','HOLOPOWER')
+            """,
+            matchId,
+            hostId
+        );
+
+        String collabCardId = createMemberCardDefinition(
+            "HSD04-011",
+            "ちょこてんて～測試",
+            "SPOT",
+            60,
+            "COLORLESS",
+            "{\"キーワード\":\"コラボエフェクトちょこてんて～ \\n自分のホロパワーを見る。その中から1枚を公開し、手札に加える。そして自分の手札1枚をホロパワーにする。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "SPOT",
+            0
+        );
+
+        String holopowerPickCardId = createMemberCardDefinition("TCOLLAB_HSD04011_PICK", "Holopower Pick", "DEBUT", 80, "WHITE");
+        String handSeedCardId = createMemberCardDefinition("TCOLLAB_HSD04011_HAND", "Hand Seed", "DEBUT", 80, "WHITE");
+
+        Long holopowerPickInstanceId = insertCardIntoDeckTop(matchId, hostId, holopowerPickCardId);
+        Long handSeedInstanceId = insertCardIntoHand(matchId, hostId, handSeedCardId);
+        assertThat(holopowerPickInstanceId).isNotNull();
+        assertThat(handSeedInstanceId).isNotNull();
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'HOLOPOWER',
+                order_index = 1,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            holopowerPickInstanceId,
+            matchId,
+            hostId
+        );
+
+        int handBefore = countZone(matchId, hostId, "HAND");
+        int holopowerBefore = countZone(matchId, hostId, "HOLOPOWER");
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        @SuppressWarnings("unchecked")
+        List<String> requestedEffects = (List<String>) summary.get("requestedEffects");
+        assertThat(requestedEffects).containsExactly("LOOK_HOLOPOWER", "SEARCH", "MOVE_TO_HOLOPOWER");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> executedEffects = (List<Map<String, Object>>) summary.get("executedEffects");
+        Map<String, Object> searchEffect = executedEffects.stream()
+            .filter(effect -> "SEARCH".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+        Map<String, Object> moveToHolopowerEffect = executedEffects.stream()
+            .filter(effect -> "MOVE_TO_HOLOPOWER".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+
+        assertThat(searchEffect).isNotNull();
+        assertThat(searchEffect.get("searchSourceZone")).isEqualTo("HOLOPOWER");
+        assertThat(((Number) searchEffect.get("searchApplied")).intValue()).isEqualTo(1);
+        assertThat(moveToHolopowerEffect).isNotNull();
+        assertThat(moveToHolopowerEffect.get("sourceZone")).isEqualTo("HAND");
+        assertThat(((Number) moveToHolopowerEffect.get("moveApplied")).intValue()).isEqualTo(1);
+
+        int handAfter = countZone(matchId, hostId, "HAND");
+        int holopowerAfter = countZone(matchId, hostId, "HOLOPOWER");
+        assertThat(handAfter).isEqualTo(handBefore);
+        assertThat(holopowerAfter).isEqualTo(holopowerBefore);
+
+        String pickedCardZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ? AND match_id = ? AND owner_user_id = ?",
+            String.class,
+            holopowerPickInstanceId,
+            matchId,
+            hostId
+        );
+        String handSeedCardZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ? AND match_id = ? AND owner_user_id = ?",
+            String.class,
+            handSeedInstanceId,
+            matchId,
+            hostId
+        );
+        assertThat(pickedCardZone).isEqualTo("HAND");
+        assertThat(handSeedCardZone).isEqualTo("HOLOPOWER");
+    }
+
+    @Test
+    void collabHsd04011ShouldMoveHandToHolopowerEvenWhenNoHolopowerCardToPick() {
+        StartedMatchContext context = createStartedMatch("collab-hsd04011-empty-host", "collab-hsd04011-empty-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = COALESCE(order_index, 0) + 1000,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone IN ('HAND','HOLOPOWER')
+            """,
+            matchId,
+            hostId
+        );
+
+        String collabCardId = createMemberCardDefinition(
+            "HSD04-011",
+            "ちょこてんて～測試",
+            "SPOT",
+            60,
+            "COLORLESS",
+            "{\"キーワード\":\"コラボエフェクトちょこてんて～ \\n自分のホロパワーを見る。その中から1枚を公開し、手札に加える。そして自分の手札1枚をホロパワーにする。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "SPOT",
+            0
+        );
+
+        String handSeedCardId = createMemberCardDefinition("TCOLLAB_HSD04011_HAND_ONLY", "Hand Seed", "DEBUT", 80, "WHITE");
+        Long handSeedInstanceId = insertCardIntoHand(matchId, hostId, handSeedCardId);
+        assertThat(handSeedInstanceId).isNotNull();
+
+        int handBefore = countZone(matchId, hostId, "HAND");
+        int holopowerBefore = countZone(matchId, hostId, "HOLOPOWER");
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> executedEffects = (List<Map<String, Object>>) summary.get("executedEffects");
+        Map<String, Object> searchEffect = executedEffects.stream()
+            .filter(effect -> "SEARCH".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+        Map<String, Object> moveToHolopowerEffect = executedEffects.stream()
+            .filter(effect -> "MOVE_TO_HOLOPOWER".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+
+        assertThat(searchEffect).isNotNull();
+        assertThat(searchEffect.get("searchSourceZone")).isEqualTo("HOLOPOWER");
+        assertThat(((Number) searchEffect.get("searchApplied")).intValue()).isEqualTo(0);
+        assertThat(moveToHolopowerEffect).isNotNull();
+        assertThat(moveToHolopowerEffect.get("sourceZone")).isEqualTo("HAND");
+        assertThat(((Number) moveToHolopowerEffect.get("moveApplied")).intValue()).isEqualTo(1);
+
+        int handAfter = countZone(matchId, hostId, "HAND");
+        int holopowerAfter = countZone(matchId, hostId, "HOLOPOWER");
+        assertThat(handAfter).isEqualTo(handBefore - 1);
+        assertThat(holopowerAfter).isEqualTo(holopowerBefore + 1);
+
+        String handSeedCardZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ? AND match_id = ? AND owner_user_id = ?",
+            String.class,
+            handSeedInstanceId,
+            matchId,
+            hostId
+        );
+        assertThat(handSeedCardZone).isEqualTo("HOLOPOWER");
+    }
+
+    @Test
+    void collabHbp06078ShouldPayAttachedCheerCostThenSearchOshiSameNameDebut() {
+        StartedMatchContext context = createStartedMatch("collab-hbp06078-host", "collab-hbp06078-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String oshiName = jdbcTemplate.query(
+            """
+            SELECT c.name
+            FROM match_players mp
+            JOIN cards c ON c.card_id = mp.oshi_card_id
+            WHERE mp.match_id = ?
+              AND mp.user_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("name") : null,
+            matchId,
+            hostId
+        );
+        assertThat(oshiName).isNotBlank();
+
+        String collabCardId = createMemberCardDefinition(
+            "HBP06-078",
+            "地球&テラ測試",
+            "DEBUT",
+            100,
+            "YELLOW",
+            "{\"キーワード\":\"コラボエフェクト地球&テラ \\nこのホロメンのエール1枚をアーカイブできる：自分のデッキから、自分の推しホロメンと同じカード名のDebutホロメン1枚を公開し、手札に加える。そしてデッキをシャッフルする。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+        Long collabHolomemId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId,
+            collabCardInstanceId
+        );
+        assertThat(collabHolomemId).isNotNull();
+
+        String cheerCardId = "TCOLLAB_HBP06078_CHEER_" + System.nanoTime();
+        jdbcTemplate.update(
+            """
+            INSERT INTO cards (card_id, name, card_type, created_at, updated_at)
+            VALUES (?, ?, 'CHEER', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            cheerCardId,
+            "測試 Cheer 成本"
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO cheer_cards (card_id, color, created_at, updated_at)
+            VALUES (?, 'YELLOW', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            cheerCardId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
+            VALUES (?, ?, ?, 'STAGE', NULL, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            matchId,
+            hostId,
+            cheerCardId
+        );
+        Long attachedCheerInstanceId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND card_id = ?
+              AND zone = 'STAGE'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId,
+            cheerCardId
+        );
+        assertThat(attachedCheerInstanceId).isNotNull();
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, FALSE)
+            """,
+            collabHolomemId,
+            cheerCardId
+        );
+
+        String searchableCardId = createMemberCardDefinition("TCOLLAB_HBP06078_TARGET", oshiName, "DEBUT", 100, "YELLOW");
+        Long searchableInstanceId = insertCardIntoDeckTop(matchId, hostId, searchableCardId);
+        assertThat(searchableInstanceId).isNotNull();
+
+        int handBefore = countZone(matchId, hostId, "HAND");
+        int archiveBefore = countZone(matchId, hostId, "ARCHIVE");
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        @SuppressWarnings("unchecked")
+        List<String> requestedEffects = (List<String>) summary.get("requestedEffects");
+        assertThat(requestedEffects).containsExactly("REMOVE_CHEER", "SEARCH");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> executedEffects = (List<Map<String, Object>>) summary.get("executedEffects");
+        Map<String, Object> removeCheerEffect = executedEffects.stream()
+            .filter(effect -> "REMOVE_CHEER".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+        Map<String, Object> searchEffect = executedEffects.stream()
+            .filter(effect -> "SEARCH".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+
+        assertThat(removeCheerEffect).isNotNull();
+        assertThat(((Number) removeCheerEffect.get("removeApplied")).intValue()).isEqualTo(1);
+        assertThat(searchEffect).isNotNull();
+        assertThat(((Number) searchEffect.get("searchApplied")).intValue()).isEqualTo(1);
+
+        int handAfter = countZone(matchId, hostId, "HAND");
+        int archiveAfter = countZone(matchId, hostId, "ARCHIVE");
+        assertThat(handAfter).isEqualTo(handBefore + 1);
+        assertThat(archiveAfter).isEqualTo(archiveBefore + 1);
+
+        String searchableZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ? AND match_id = ? AND owner_user_id = ?",
+            String.class,
+            searchableInstanceId,
+            matchId,
+            hostId
+        );
+        String attachedCheerZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ? AND match_id = ? AND owner_user_id = ?",
+            String.class,
+            attachedCheerInstanceId,
+            matchId,
+            hostId
+        );
+        assertThat(searchableZone).isEqualTo("HAND");
+        assertThat(attachedCheerZone).isEqualTo("ARCHIVE");
+    }
+
+    @Test
+    void collabHbp06078ShouldSkipSearchWhenNoAttachedCheerCost() {
+        StartedMatchContext context = createStartedMatch("collab-hbp06078-empty-host", "collab-hbp06078-empty-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String oshiName = jdbcTemplate.query(
+            """
+            SELECT c.name
+            FROM match_players mp
+            JOIN cards c ON c.card_id = mp.oshi_card_id
+            WHERE mp.match_id = ?
+              AND mp.user_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("name") : null,
+            matchId,
+            hostId
+        );
+        assertThat(oshiName).isNotBlank();
+
+        String collabCardId = createMemberCardDefinition(
+            "HBP06-078",
+            "地球&テラ測試",
+            "DEBUT",
+            100,
+            "YELLOW",
+            "{\"キーワード\":\"コラボエフェクト地球&テラ \\nこのホロメンのエール1枚をアーカイブできる：自分のデッキから、自分の推しホロメンと同じカード名のDebutホロメン1枚を公開し、手札に加える。そしてデッキをシャッフルする。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        String searchableCardId = createMemberCardDefinition("TCOLLAB_HBP06078_TARGET_EMPTY", oshiName, "DEBUT", 100, "YELLOW");
+        Long searchableInstanceId = insertCardIntoDeckTop(matchId, hostId, searchableCardId);
+        assertThat(searchableInstanceId).isNotNull();
+
+        int handBefore = countZone(matchId, hostId, "HAND");
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> executedEffects = (List<Map<String, Object>>) summary.get("executedEffects");
+        Map<String, Object> removeCheerEffect = executedEffects.stream()
+            .filter(effect -> "REMOVE_CHEER".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+        Map<String, Object> searchEffect = executedEffects.stream()
+            .filter(effect -> "SEARCH".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+
+        assertThat(removeCheerEffect).isNotNull();
+        assertThat(((Number) removeCheerEffect.get("removeApplied")).intValue()).isEqualTo(0);
+        assertThat(searchEffect).isNotNull();
+        assertThat(searchEffect.get("applied")).isEqualTo(false);
+        assertThat((String) searchEffect.get("reason")).contains("未支付此卡附屬エール成本");
+
+        int handAfter = countZone(matchId, hostId, "HAND");
+        assertThat(handAfter).isEqualTo(handBefore);
+
+        String searchableZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ? AND match_id = ? AND owner_user_id = ?",
+            String.class,
+            searchableInstanceId,
+            matchId,
+            hostId
+        );
+        assertThat(searchableZone).isEqualTo("DECK");
+    }
+
+    @Test
+    void collabHsd13015ShouldReturnStageCheerThenAddCheer() {
+        StartedMatchContext context = createStartedMatch("collab-hsd13015-ok-host", "collab-hsd13015-ok-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            140,
+            "BLUE",
+            20,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":20}",
+            1,
+            "BLUE",
+            "TCOLLAB_HSD13015_CENTER"
+        );
+        String collabCardId = createMemberCardDefinition(
+            "HSD13-015",
+            "正義の諧調測試",
+            "SPOT",
+            160,
+            "COLORLESS",
+            "{\"キーワード\":\"コラボエフェクト正義の諧調 \\n自分のステージのエール1枚をエールデッキの下に戻せる。戻したなら、自分のエールデッキから、エール1枚を公開し、自分のホロメンに送る。そしてエールデッキをシャッフルする。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "SPOT",
+            0
+        );
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        assertThat(summary.get("hasCollabEffect")).isEqualTo(true);
+        @SuppressWarnings("unchecked")
+        List<String> requestedEffects = (List<String>) summary.get("requestedEffects");
+        assertThat(requestedEffects).contains("RETURN_CHEER_TO_DECK_BOTTOM");
+        assertThat(requestedEffects).contains("ADD_CHEER");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> executedEffects = (List<Map<String, Object>>) summary.get("executedEffects");
+        Map<String, Object> returnedEffect = executedEffects.stream()
+            .filter(effect -> "RETURN_CHEER_TO_DECK_BOTTOM".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+        Map<String, Object> addCheerEffect = executedEffects.stream()
+            .filter(effect -> "ADD_CHEER".equals(effect.get("effectType")))
+            .findFirst()
+            .orElse(null);
+
+        assertThat(returnedEffect).isNotNull();
+        assertThat(returnedEffect.get("sourceZone")).isEqualTo("STAGE");
+        assertThat(((Number) returnedEffect.get("returnApplied")).intValue()).isEqualTo(1);
+        assertThat(addCheerEffect).isNotNull();
+        assertThat(((Number) addCheerEffect.get("attachApplied")).intValue()).isEqualTo(1);
+    }
+
+    @Test
+    void collabHsd13015ShouldNotTriggerWhenNoStageCheerToReturn() {
+        StartedMatchContext context = createStartedMatch("collab-hsd13015-empty-host", "collab-hsd13015-empty-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String collabCardId = createMemberCardDefinition(
+            "HSD13-015",
+            "正義の諧調測試",
+            "SPOT",
+            160,
+            "COLORLESS",
+            "{\"キーワード\":\"コラボエフェクト正義の諧調 \\n自分のステージのエール1枚をエールデッキの下に戻せる。戻したなら、自分のエールデッキから、エール1枚を公開し、自分のホロメンに送る。そしてエールデッキをシャッフルする。\"}"
+        );
+        Long collabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            collabCardId,
+            "BACK",
+            "SPOT",
+            0
+        );
+        assertThat(collabCardInstanceId).isNotNull();
+
+        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+            matchId,
+            hostId,
+            collabCardId,
+            collabCardInstanceId
+        );
+
+        assertThat(summary.get("hasCollabEffect")).isEqualTo(false);
+        @SuppressWarnings("unchecked")
+        List<String> requestedEffects = (List<String>) summary.get("requestedEffects");
+        assertThat(requestedEffects).isEmpty();
+    }
+
+    @Test
     void bloomShouldTriggerReattachEffectFromPassiveText() {
         StartedMatchContext context = createStartedMatch("bloom-reattach-host", "bloom-reattach-guest");
         Long matchId = context.matchId();
@@ -3634,6 +5273,419 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             hostId
         );
         assertThat(payload).contains("REVEAL_TO_ARCHIVE");
+    }
+
+    @Test
+    void bloomHsd02007ShouldTakeOneFromTopTwoAndArchiveRemainder() {
+        StartedMatchContext context = createStartedMatch("bloom-hsd02007-host", "bloom-hsd02007-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        String displayName = "百鬼あやめ";
+        String debutCardId = createMemberCardDefinition("THSD02007_DEBUT", displayName, "DEBUT", 100, "RED");
+        String bloomCardId = createMemberCardDefinition(
+            "HSD02-007",
+            displayName,
+            "FIRST",
+            120,
+            "RED",
+            "{\"キーワード\":\"ブルームエフェクトどーっちどっち♪ \\nDebutからBloomした時、自分のデッキの上から2枚を見る。その中から、1枚を公開し、手札に加える。そして残ったカードをアーカイブする。\"}"
+        );
+
+        Long targetHolomemCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            debutCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long bloomCardInstanceId = insertCardIntoHand(matchId, hostId, bloomCardId);
+
+        String archiveTargetCardId = createMemberCardDefinition("THSD02007_ARCHIVE", "剩餘送墓目標", "DEBUT", 90, "RED");
+        String handTargetCardId = createMemberCardDefinition("THSD02007_HAND", "抽到手牌目標", "DEBUT", 90, "RED");
+        Long archiveTargetCardInstanceId = insertCardIntoDeckTop(matchId, hostId, archiveTargetCardId);
+        Long handTargetCardInstanceId = insertCardIntoDeckTop(matchId, hostId, handTargetCardId);
+        assertThat(archiveTargetCardInstanceId).isNotNull();
+        assertThat(handTargetCardInstanceId).isNotNull();
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        BloomActionRequest request = new BloomActionRequest();
+        request.setBloomCardInstanceId(bloomCardInstanceId);
+        request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
+        matchActionService.bloom(matchId, hostId, request);
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        String handTargetZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            handTargetCardInstanceId
+        );
+        String archiveTargetZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            archiveTargetCardInstanceId
+        );
+        assertThat(List.of(handTargetZone, archiveTargetZone))
+            .containsExactlyInAnyOrder("HAND", "ARCHIVE");
+
+        String payload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+        assertThat(payload).contains("\"searchApplied\": 1");
+        assertThat(payload).contains("\"archiveRemainderApplied\": 1");
+    }
+
+    @Test
+    void bloomHsd02007ShouldNotArchiveRemainderWhenDeckTopWindowIsEmpty() {
+        StartedMatchContext context = createStartedMatch("bloom-hsd02007-empty-host", "bloom-hsd02007-empty-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = COALESCE(order_index, 0) + 1000,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'DECK'
+            """,
+            matchId,
+            hostId
+        );
+
+        String displayName = "百鬼あやめ";
+        String debutCardId = createMemberCardDefinition("THSD02007_EMPTY_DEBUT", displayName, "DEBUT", 100, "RED");
+        String bloomCardId = createMemberCardDefinition(
+            "HSD02-007",
+            displayName,
+            "FIRST",
+            120,
+            "RED",
+            "{\"キーワード\":\"ブルームエフェクトどーっちどっち♪ \\nDebutからBloomした時、自分のデッキの上から2枚を見る。その中から、1枚を公開し、手札に加える。そして残ったカードをアーカイブする。\"}"
+        );
+
+        Long targetHolomemCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            debutCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long bloomCardInstanceId = insertCardIntoHand(matchId, hostId, bloomCardId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        BloomActionRequest request = new BloomActionRequest();
+        request.setBloomCardInstanceId(bloomCardInstanceId);
+        request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
+        matchActionService.bloom(matchId, hostId, request);
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        String payload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+        assertThat(payload).contains("\"searchApplied\": 0");
+        assertThat(payload).contains("\"archiveRemainderApplied\": 0");
+    }
+
+    @Test
+    void bloomHsd13011ShouldArchiveStackedDebutAndDamageOpponentCollab() {
+        StartedMatchContext context = createStartedMatch("bloom-hsd13011-host", "bloom-hsd13011-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String displayName = "ジジ・ムリン";
+        String debutCardId = createMemberCardDefinition("THSD13011_DEBUT", displayName, "DEBUT", 120, "YELLOW");
+        String bloomCardId = createMemberCardDefinition(
+            "HSD13-011",
+            displayName,
+            "FIRST",
+            140,
+            "YELLOW",
+            "{\"キーワード\":\"ブルームエフェクトI am Gonathan G. \\nこのホロメンに重なっているDebutホロメン1枚をアーカイブできる：相手のコラボホロメンに特殊ダメージ20を与える。\"}"
+        );
+
+        Long targetHolomemCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            debutCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long bloomCardInstanceId = insertCardIntoHand(matchId, hostId, bloomCardId);
+        Long opponentCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            createMemberCardDefinition("THSD13011_GUEST_COLLAB", "測試對手 COLLAB", "DEBUT", 120, "BLUE"),
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        BloomActionRequest request = new BloomActionRequest();
+        request.setBloomCardInstanceId(bloomCardInstanceId);
+        request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
+        matchActionService.bloom(matchId, hostId, request);
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        String stackedDebutZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            targetHolomemCardInstanceId
+        );
+        Integer collabDamageTaken = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(damage_taken, 0)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId,
+            opponentCollabCardInstanceId
+        );
+        assertThat(stackedDebutZone).isEqualTo("ARCHIVE");
+        assertThat(collabDamageTaken).isEqualTo(20);
+
+        Integer archiveApplied = jdbcTemplate.query(
+            """
+            SELECT CAST(effect ->> 'archiveApplied' AS INTEGER)
+            FROM match_actions ma
+            CROSS JOIN LATERAL jsonb_array_elements(ma.payload -> 'effect' -> 'executedEffects') effect
+            WHERE ma.match_id = ?
+              AND ma.user_id = ?
+              AND ma.action_type = 'TRIGGER_EFFECT_EXECUTED'
+              AND effect ->> 'effectType' = 'ARCHIVE_STACK_CARD'
+            ORDER BY ma.id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt(1) : null,
+            matchId,
+            hostId
+        );
+        Integer damageApplied = jdbcTemplate.query(
+            """
+            SELECT CAST(effect ->> 'damageApplied' AS INTEGER)
+            FROM match_actions ma
+            CROSS JOIN LATERAL jsonb_array_elements(ma.payload -> 'effect' -> 'executedEffects') effect
+            WHERE ma.match_id = ?
+              AND ma.user_id = ?
+              AND ma.action_type = 'TRIGGER_EFFECT_EXECUTED'
+              AND effect ->> 'effectType' = 'DAMAGE'
+            ORDER BY ma.id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt(1) : null,
+            matchId,
+            hostId
+        );
+        assertThat(archiveApplied).isEqualTo(1);
+        assertThat(damageApplied).isEqualTo(20);
+    }
+
+    @Test
+    void bloomHsd13011ShouldSkipDamageWhenNoStackedDebutCost() {
+        StartedMatchContext context = createStartedMatch("bloom-hsd13011-nocost-host", "bloom-hsd13011-nocost-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String displayName = "ジジ・ムリン";
+        String debutCardId = createMemberCardDefinition("THSD13011_NC_DEBUT", displayName, "DEBUT", 120, "YELLOW");
+        String bloomCardId = createMemberCardDefinition(
+            "HSD13-011",
+            displayName,
+            "FIRST",
+            140,
+            "YELLOW",
+            "{\"キーワード\":\"ブルームエフェクトI am Gonathan G. \\nこのホロメンに重なっているDebutホロメン1枚をアーカイブできる：相手のコラボホロメンに特殊ダメージ20を与える。\"}"
+        );
+
+        Long targetHolomemCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            debutCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long bloomCardInstanceId = insertCardIntoHand(matchId, hostId, bloomCardId);
+        Long opponentCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            createMemberCardDefinition("THSD13011_NC_GUEST_COLLAB", "測試對手 COLLAB", "DEBUT", 120, "BLUE"),
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        BloomActionRequest request = new BloomActionRequest();
+        request.setBloomCardInstanceId(bloomCardInstanceId);
+        request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
+        matchActionService.bloom(matchId, hostId, request);
+
+        Long hostCenterHolomemId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'CENTER'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId
+        );
+        assertThat(hostCenterHolomemId).isNotNull();
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomem_stack_cards
+            WHERE match_holomem_id = ?
+              AND match_card_id = ?
+            """,
+            hostCenterHolomemId,
+            targetHolomemCardInstanceId
+        );
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        String stackedDebutZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            targetHolomemCardInstanceId
+        );
+        Integer collabDamageTaken = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(damage_taken, 0)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId,
+            opponentCollabCardInstanceId
+        );
+        assertThat(stackedDebutZone).isEqualTo("STAGE");
+        assertThat(collabDamageTaken).isEqualTo(0);
+
+        Integer archiveApplied = jdbcTemplate.query(
+            """
+            SELECT CAST(effect ->> 'archiveApplied' AS INTEGER)
+            FROM match_actions ma
+            CROSS JOIN LATERAL jsonb_array_elements(ma.payload -> 'effect' -> 'executedEffects') effect
+            WHERE ma.match_id = ?
+              AND ma.user_id = ?
+              AND ma.action_type = 'TRIGGER_EFFECT_EXECUTED'
+              AND effect ->> 'effectType' = 'ARCHIVE_STACK_CARD'
+            ORDER BY ma.id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt(1) : null,
+            matchId,
+            hostId
+        );
+        String damageSkipReason = jdbcTemplate.query(
+            """
+            SELECT effect ->> 'reason'
+            FROM match_actions ma
+            CROSS JOIN LATERAL jsonb_array_elements(ma.payload -> 'effect' -> 'executedEffects') effect
+            WHERE ma.match_id = ?
+              AND ma.user_id = ?
+              AND ma.action_type = 'TRIGGER_EFFECT_EXECUTED'
+              AND effect ->> 'effectType' = 'DAMAGE'
+            ORDER BY ma.id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString(1) : null,
+            matchId,
+            hostId
+        );
+        assertThat(archiveApplied).isZero();
+        assertThat(damageSkipReason).contains("未支付重疊 Debut 成本");
     }
 
     @Test
@@ -4602,6 +6654,8 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         );
         entityManager.clear();
 
+        advanceToPerformancePhase(matchId, hostId, hostCardInstanceId);
+
         AttackArtActionRequest request = new AttackArtActionRequest();
         request.setAttackerCardInstanceId(hostCardInstanceId);
         request.setTargetCardInstanceId(guestCardInstanceId);
@@ -4704,7 +6758,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             "{\"rawText\":\"このターンの間、自分のホロメンが受けるダメージ-30。\"}"
         );
 
-        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
 
         AttackArtActionRequest request = new AttackArtActionRequest();
         request.setAttackerCardInstanceId(hostCenterCardInstanceId);
@@ -4820,6 +6874,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             "INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down) VALUES (?, 'HY04-001', FALSE)",
             hostHolomemId
         );
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
 
         AttackArtActionRequest request = new AttackArtActionRequest();
         request.setAttackerCardInstanceId(hostCenterCardInstanceId);
@@ -4922,7 +6977,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         );
         entityManager.clear();
 
-        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
 
         AttackArtActionRequest request = new AttackArtActionRequest();
         request.setAttackerCardInstanceId(hostCenterCardInstanceId);
@@ -5096,6 +7151,121 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         );
         assertThat(latestPlaySupportPayload).contains("DRAW");
         assertThat(latestPlaySupportPayload).contains("drawApplied");
+    }
+
+    @Test
+    void playSupportDamageShouldRequireTriggerConfirmBeforeApplyingDownEventExtraLifeLoss() {
+        StartedMatchContext context = createStartedMatch("support-down-event-host", "support-down-event-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String hostCenterCardId = createMemberCardDefinition("TSUP_DOWN_EVENT_HOST_C", "支援來源中心", "DEBUT", 140, "RED");
+        createStageHolomemWithSingleCard(matchId, hostId, hostCenterCardId, "CENTER", "DEBUT", 0);
+
+        String guestCenterCardId = createMemberCardDefinition(
+            "TSUP_DOWN_EVENT_GUEST_CENTER",
+            "支援擊倒目標",
+            "DEBUT",
+            120,
+            "BLUE",
+            "{\"エクストラ\":\"このホロメンがダウンした時、自分のライフ-2\"}"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            guestCenterCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        String guestBackCardId = createMemberCardDefinition("TSUP_DOWN_EVENT_GUEST_BACK", "支援擊倒後排", "DEBUT", 120, "WHITE");
+        createStageHolomemWithSingleCard(matchId, guestId, guestBackCardId, "BACK", "DEBUT", 0);
+
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TSUP_DOWN_EVENT_" + System.nanoTime(),
+            false,
+            "DAMAGE",
+            "{\"type\":\"DAMAGE\",\"value\":999}",
+            "ENEMY"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_phase = 'MAIN',
+                current_turn_player_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+            """,
+            matchId,
+            hostId
+        );
+        entityManager.clear();
+        int lifeBefore = countZone(matchId, guestId, "LIFE");
+
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        request.setTargetHolomemCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        int lifeAfterSupport = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterSupport).isEqualTo(lifeBefore - 1);
+
+        Long pendingDecisionId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId
+        );
+        assertThat(pendingDecisionId).isNotNull();
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int lifeAfterConfirm = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterConfirm).isEqualTo(lifeBefore - 3);
+
+        String playSupportPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'PLAY_SUPPORT'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+        assertThat(playSupportPayload).containsPattern(
+            "\"pendingInteractionDecisionType\"\\s*:\\s*\"TRIGGER_EFFECT_CONFIRM\""
+        );
+        assertThat(playSupportPayload).containsPattern("\"downEvent\"\\s*:\\s*\\{");
+        assertThat(playSupportPayload).containsPattern("\"deferred\"\\s*:\\s*true");
+        assertThat(playSupportPayload).containsPattern("\"appliedLifeLoss\"\\s*:\\s*0");
     }
 
     @Test
@@ -5398,6 +7568,8 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             matchId
         );
         entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
 
         AttackArtActionRequest attack = new AttackArtActionRequest();
         attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
@@ -7253,6 +9425,8 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         );
         entityManager.clear();
 
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
         AttackArtActionRequest centerAttack = new AttackArtActionRequest();
         centerAttack.setAttackerCardInstanceId(hostCenterCardInstanceId);
         centerAttack.setTargetCardInstanceId(guestCenterCardInstanceId);
@@ -7562,7 +9736,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             guestCenterCardInstanceId
         );
 
-        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
         matchActionService.endTurn(matchId, hostId);
 
         Boolean guestCenterRestedAfterReset = jdbcTemplate.query(
@@ -7647,6 +9821,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         assertThat(forcedTurn).isEqualTo(2);
         entityManager.clear();
 
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
         int deckBefore = countZone(matchId, hostId, "DECK");
 
         AttackArtActionRequest attack = new AttackArtActionRequest();
@@ -7655,7 +9830,12 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         matchActionService.attackArt(matchId, hostId, attack);
 
         int deckAfterFirstAttack = countZone(matchId, hostId, "DECK");
-        assertThat(deckAfterFirstAttack).isEqualTo(deckBefore - 1);
+        assertThat(deckAfterFirstAttack).isEqualTo(deckBefore);
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int deckAfterGiftConfirm = countZone(matchId, hostId, "DECK");
+        assertThat(deckAfterGiftConfirm).isEqualTo(deckBefore - 1);
 
         List<Map<String, Object>> giftActions = jdbcTemplate.queryForList(
             """
@@ -7681,6 +9861,125 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             2
         );
         assertThat(secondTrigger).isEmpty();
+    }
+
+    @Test
+    void attackArtShouldTriggerGiftWhenOpponentHolomemDowned() {
+        StartedMatchContext context = createStartedMatch("gift-down-host", "gift-down-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String giftHolderCardId = createMemberCardDefinition(
+            "TGIFT_DOWNED",
+            "測試 Gift 擊倒觸發",
+            "DEBUT",
+            130,
+            "GREEN",
+            "{\"キーワード\":\"ギフトテスト \\n[ターンに1回]自分のホロメンが相手のホロメンをダウンさせた時、自分のデッキを1枚引く。\"}"
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            giftHolderCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "TGIFT_DOWNED_ATTACKER"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int deckBefore = countZone(matchId, hostId, "DECK");
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        int deckAfterAttack = countZone(matchId, hostId, "DECK");
+        assertThat(deckAfterAttack).isEqualTo(deckBefore);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("\"triggerSections\"");
+        assertThat(pendingContextText).containsPattern("\"sectionType\"\\s*:\\s*\"GIFT\"");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int deckAfterGiftConfirm = countZone(matchId, hostId, "DECK");
+        assertThat(deckAfterGiftConfirm).isEqualTo(deckBefore - 1);
+
+        String latestGiftPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+        assertThat(latestGiftPayload).containsPattern("\"triggerType\"\\s*:\\s*\"OPPONENT_DOWNED\"");
     }
 
     @Test
@@ -7969,6 +10268,18 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         request.setDecisionId(sendCheerDecisionId);
         request.setSelectedCardInstanceIds(List.of(effectiveTargetCardInstanceId));
         matchActionService.resolveDecision(matchId, userId, request);
+    }
+
+    private void advanceToPerformancePhase(Long matchId, Long userId, Long sendCheerTargetCardInstanceId) {
+        executeRequiredTurnActions(matchId, userId, sendCheerTargetCardInstanceId);
+        String phase = jdbcTemplate.queryForObject(
+            "SELECT current_phase FROM matches WHERE id = ?",
+            String.class,
+            matchId
+        );
+        if ("MAIN".equals(phase)) {
+            matchActionService.advancePhase(matchId, userId);
+        }
     }
 
     private Long loadFirstStageCardInstanceId(Long matchId, Long userId) {

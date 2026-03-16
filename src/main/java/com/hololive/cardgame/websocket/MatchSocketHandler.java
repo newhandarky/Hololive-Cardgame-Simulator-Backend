@@ -25,6 +25,9 @@ public class MatchSocketHandler extends TextWebSocketHandler {
     private final LobbyMatchService lobbyMatchService;
     private final MatchGameStateService matchGameStateService;
 
+    /**
+     * 對戰 WebSocket handler，負責連線驗證與事件廣播。
+     */
     public MatchSocketHandler(
         LobbyMatchService lobbyMatchService,
         MatchGameStateService matchGameStateService
@@ -34,6 +37,9 @@ public class MatchSocketHandler extends TextWebSocketHandler {
     }
 
     @Override
+    /**
+     * WS 建立連線時驗證 matchId 與 userId，並加入房間訂閱集合。
+     */
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
         Long matchId = parseMatchId(session.getUri());
         Long userId = parseUserId(session);
@@ -53,10 +59,16 @@ public class MatchSocketHandler extends TextWebSocketHandler {
     }
 
     @Override
+    /**
+     * WS 關閉時移除 session。
+     */
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         sessionsByMatchId.values().forEach(sessions -> sessions.remove(session));
     }
 
+    /**
+     * 針對房間廣播事件，並依 session 所屬 userId 發送個人化 game state。
+     */
     public void publish(Long matchId, LobbyEvent event) {
         Set<WebSocketSession> sessions = sessionsByMatchId.get(matchId);
         if (sessions == null || sessions.isEmpty()) {
@@ -88,6 +100,9 @@ public class MatchSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    /**
+     * 從 websocket URI 解析 matchId。
+     */
     private Long parseMatchId(URI uri) {
         if (uri == null) {
             return null;
@@ -106,6 +121,9 @@ public class MatchSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    /**
+     * 從 handshake attributes 解析 userId。
+     */
     private Long parseUserId(WebSocketSession session) {
         Object userId = session.getAttributes().get(WsAuthHandshakeInterceptor.USER_ID_ATTR);
         if (userId instanceof Long value) {

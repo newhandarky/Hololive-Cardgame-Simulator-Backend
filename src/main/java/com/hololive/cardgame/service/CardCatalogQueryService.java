@@ -23,6 +23,9 @@ public class CardCatalogQueryService {
     private final NamedParameterJdbcTemplate namedParameterJdbcTemplate;
     private final ObjectMapper objectMapper;
 
+    /**
+     * 卡片圖鑑查詢服務，提供列表查詢、詳情與卡圖偏好設定。
+     */
     public CardCatalogQueryService(
         NamedParameterJdbcTemplate namedParameterJdbcTemplate,
         ObjectMapper objectMapper
@@ -31,6 +34,9 @@ public class CardCatalogQueryService {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * 依條件查詢卡片列表（含排序、標籤與圖片可用性條件）。
+     */
     public List<CardSearchResponse> searchCards(
         Long userId,
         String keyword,
@@ -139,6 +145,9 @@ public class CardCatalogQueryService {
         return namedParameterJdbcTemplate.query(sql.toString(), params, (rs, rowNum) -> toCardSearchResponse(rs));
     }
 
+    /**
+     * 取得單一卡片完整詳情（含 variants / oshiSkills / memberArts）。
+     */
     public CardDetailResponse getCardDetail(String cardId, Long userId) {
         String normalizedCardId = cardId.trim().toUpperCase(Locale.ROOT);
         String sql =
@@ -210,6 +219,9 @@ public class CardCatalogQueryService {
         return detail;
     }
 
+    /**
+     * 設定使用者對某張卡的偏好 variant；傳 null 代表清除偏好。
+     */
     public void setPreferredVariant(Long userId, String cardId, Long variantId) {
         String normalizedCardId = cardId.trim().toUpperCase(Locale.ROOT);
         Integer exists = namedParameterJdbcTemplate.queryForObject(
@@ -257,6 +269,9 @@ public class CardCatalogQueryService {
         );
     }
 
+    /**
+     * 列出目前卡表可用標籤。
+     */
     public List<String> getAvailableTags() {
         String sql =
             """
@@ -268,6 +283,9 @@ public class CardCatalogQueryService {
         return namedParameterJdbcTemplate.getJdbcTemplate().queryForList(sql, String.class);
     }
 
+    /**
+     * 將搜尋查詢列轉為 CardSearchResponse。
+     */
     private CardSearchResponse toCardSearchResponse(ResultSet rs) throws SQLException {
         return new CardSearchResponse(
             rs.getString("card_id"),
@@ -287,6 +305,9 @@ public class CardCatalogQueryService {
         );
     }
 
+    /**
+     * 將詳情查詢列轉為 CardDetailResponse（不含子集合）。
+     */
     private CardDetailResponse toCardDetailResponse(ResultSet rs) throws SQLException {
         String cardType = rs.getString("card_type");
         String mainColor = "OSHI".equals(cardType) ? rs.getString("oshi_main_color") : rs.getString("member_main_color");
@@ -324,6 +345,9 @@ public class CardCatalogQueryService {
         );
     }
 
+    /**
+     * 讀取卡片所有可用圖片變體。
+     */
     private List<CardDetailResponse.CardVariantItem> loadCardVariants(String cardId) {
         String sql =
             """
@@ -345,6 +369,9 @@ public class CardCatalogQueryService {
         );
     }
 
+    /**
+     * 讀取 Oshi 技能清單。
+     */
     private List<CardDetailResponse.OshiSkillItem> loadOshiSkills(String cardId) {
         String sql =
             """
@@ -366,6 +393,9 @@ public class CardCatalogQueryService {
         );
     }
 
+    /**
+     * 讀取 Member 藝能清單。
+     */
     private List<CardDetailResponse.MemberArtItem> loadMemberArts(String cardId) {
         String sql =
             """
@@ -387,6 +417,9 @@ public class CardCatalogQueryService {
         );
     }
 
+    /**
+     * 解析 JSON 文字為字串陣列，失敗時回空清單。
+     */
     private List<String> parseJsonTextToStringList(String jsonText) {
         if (!StringUtils.hasText(jsonText)) {
             return Collections.emptyList();
@@ -401,6 +434,9 @@ public class CardCatalogQueryService {
         }
     }
 
+    /**
+     * 正規化 tags 參數（拆逗號、去空白、去重）。
+     */
     private List<String> normalizeTags(List<String> tags) {
         if (tags == null || tags.isEmpty()) {
             return Collections.emptyList();
@@ -414,6 +450,9 @@ public class CardCatalogQueryService {
             .collect(Collectors.toList());
     }
 
+    /**
+     * 解析排序條件並輸出對應 ORDER BY 子句。
+     */
     private String resolveOrderBy(String sort) {
         if (!StringUtils.hasText(sort)) {
             return " ORDER BY c.card_no NULLS LAST, c.card_id";

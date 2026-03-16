@@ -34,6 +34,7 @@ public class HardNpcService {
     private static final int MAX_ACTION_STEPS = 64;
     private static final String TURN_START_INTERACTION_TYPE = "TURN_START";
     private static final String DRAW_REVEAL_INTERACTION_TYPE = "DRAW_REVEAL";
+    private static final String LIVE_START_INTERACTION_TYPE = "LIVE_START";
     private static final String CARD_SELECTION_INTERACTION_TYPE = "CARD_SELECTION";
     private static final String PENDING_STATUS = "PENDING";
 
@@ -242,14 +243,84 @@ public class HardNpcService {
             return tryEndTurn(matchId, npcUserId, turnNumber);
         }
         if ("RESET".equals(phase)) {
+            if (!isMulliganDone(matchId, npcUserId)) {
+                try {
+                    com.hololive.cardgame.dto.MulliganActionRequest mulligan = new com.hololive.cardgame.dto.MulliganActionRequest();
+                    mulligan.setUseMulligan(false);
+                    matchActionService.mulligan(matchId, npcUserId, mulligan);
+                    return true;
+                } catch (RuntimeException ex) {
+                    log.warn(
+                        "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=OPENING_MULLIGAN",
+                        matchId,
+                        npcUserId,
+                        turnNumber,
+                        ex
+                    );
+                }
+            }
+            if (!hasCenterHolomem(matchId, npcUserId)) {
+                Long openingDebut = findOpeningDebutInHand(matchId, npcUserId);
+                if (openingDebut != null) {
+                    try {
+                        PlayToStageActionRequest playToStage = new PlayToStageActionRequest();
+                        playToStage.setCardInstanceId(openingDebut);
+                        playToStage.setTargetZone("CENTER");
+                        matchActionService.playToStage(matchId, npcUserId, playToStage);
+                        return true;
+                    } catch (RuntimeException ex) {
+                        log.warn(
+                            "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=OPENING_SET_CENTER, cardInstanceId={}",
+                            matchId,
+                            npcUserId,
+                            turnNumber,
+                            openingDebut,
+                            ex
+                        );
+                    }
+                }
+            }
             ensureTurnStartPendingInteraction(matchId, npcUserId, turnNumber);
             return true;
+        }
+        if ("DRAW".equals(phase)) {
+            try {
+                matchActionService.drawTurn(matchId, npcUserId);
+                return true;
+            } catch (RuntimeException ex) {
+                log.warn(
+                    "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=DRAW",
+                    matchId,
+                    npcUserId,
+                    turnNumber,
+                    ex
+                );
+                return false;
+            }
+        }
+        if ("CHEER".equals(phase)) {
+            if (!canSendTurnCheer(matchId, npcUserId)) {
+                return true;
+            }
+            try {
+                matchActionService.sendTurnCheer(matchId, npcUserId);
+                return true;
+            } catch (RuntimeException ex) {
+                log.warn(
+                    "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=SEND_TURN_CHEER",
+                    matchId,
+                    npcUserId,
+                    turnNumber,
+                    ex
+                );
+                return false;
+            }
         }
         if (!"MAIN".equals(phase) && !"PERFORMANCE".equals(phase)) {
             return false;
         }
 
-        if (!hasActionInTurn(matchId, npcUserId, turnNumber, "DRAW_TURN")) {
+        if ("MAIN".equals(phase) && !hasActionInTurn(matchId, npcUserId, turnNumber, "DRAW_TURN")) {
             try {
                 matchActionService.drawTurn(matchId, npcUserId);
                 return true;
@@ -264,7 +335,11 @@ public class HardNpcService {
             }
         }
 
-        if (!hasActionInTurn(matchId, npcUserId, turnNumber, "TURN_CHEER") && canSendTurnCheer(matchId, npcUserId)) {
+        if (
+            "MAIN".equals(phase)
+                && !hasActionInTurn(matchId, npcUserId, turnNumber, "TURN_CHEER")
+                && canSendTurnCheer(matchId, npcUserId)
+        ) {
             try {
                 matchActionService.sendTurnCheer(matchId, npcUserId);
                 return true;
@@ -370,6 +445,22 @@ public class HardNpcService {
             }
         }
 
+        if ("MAIN".equals(phase)) {
+            try {
+                matchActionService.advancePhase(matchId, npcUserId);
+                return true;
+            } catch (RuntimeException ex) {
+                log.warn(
+                    "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=ADVANCE_TO_PERFORMANCE",
+                    matchId,
+                    npcUserId,
+                    turnNumber,
+                    ex
+                );
+                return false;
+            }
+        }
+
         fresh = matchGameStateService.getGameStateForUser(matchId, npcUserId);
         centerCard = findZoneCardInstance(fresh, npcUserId, "CENTER");
         collabCard = findZoneCardInstance(fresh, npcUserId, "COLLAB");
@@ -394,6 +485,22 @@ public class HardNpcService {
                     opponentTarget,
                     ex
                 );
+            }
+        }
+
+        if ("PERFORMANCE".equals(phase)) {
+            try {
+                matchActionService.advancePhase(matchId, npcUserId);
+                return true;
+            } catch (RuntimeException ex) {
+                log.warn(
+                    "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=ADVANCE_TO_END",
+                    matchId,
+                    npcUserId,
+                    turnNumber,
+                    ex
+                );
+                return false;
             }
         }
 
@@ -680,7 +787,69 @@ public class HardNpcService {
      * 判斷是否屬於 NPC 可直接確認的互動類型。
      */
     private boolean isAutoResolveInteractionType(String type) {
-        return TURN_START_INTERACTION_TYPE.equals(type) || DRAW_REVEAL_INTERACTION_TYPE.equals(type);
+        return TURN_START_INTERACTION_TYPE.equals(type)
+            || DRAW_REVEAL_INTERACTION_TYPE.equals(type)
+            || LIVE_START_INTERACTION_TYPE.equals(type);
+    }
+
+    /**
+     * 判斷 NPC 是否已完成起手調度。
+     */
+    private boolean isMulliganDone(Long matchId, Long userId) {
+        Integer done = jdbcTemplate.query(
+            """
+            SELECT CASE WHEN COALESCE(mulligan_done, FALSE) THEN 1 ELSE 0 END AS done
+            FROM match_players
+            WHERE match_id = ?
+              AND user_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt("done") : 0,
+            matchId,
+            userId
+        );
+        return done != null && done > 0;
+    }
+
+    /**
+     * 判斷玩家場上是否已存在 CENTER Holomem。
+     */
+    private boolean hasCenterHolomem(Long matchId, Long userId) {
+        Integer count = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'CENTER'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        return count != null && count > 0;
+    }
+
+    /**
+     * 取得手牌中可用於開場設置 CENTER 的 DEBUT Holomem。
+     */
+    private Long findOpeningDebutInHand(Long matchId, Long userId) {
+        return jdbcTemplate.query(
+            """
+            SELECT mc.id
+            FROM match_cards mc
+            JOIN member_cards m ON m.card_id = mc.card_id
+            WHERE mc.match_id = ?
+              AND mc.owner_user_id = ?
+              AND mc.zone = 'HAND'
+              AND UPPER(COALESCE(m.level_type, '')) = 'DEBUT'
+            ORDER BY mc.order_index NULLS LAST, mc.id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            userId
+        );
     }
 
     /**

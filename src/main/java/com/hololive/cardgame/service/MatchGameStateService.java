@@ -60,6 +60,9 @@ public class MatchGameStateService {
     private final ObjectMapper objectMapper;
     private final MatchEffectService matchEffectService;
 
+    /**
+     * 建立對戰狀態查詢服務，統整 DB 資料成前端可直接渲染的 GameState。
+     */
     public MatchGameStateService(
         MatchRepository matchRepository,
         MatchPlayerRepository matchPlayerRepository,
@@ -75,6 +78,9 @@ public class MatchGameStateService {
     }
 
     @Transactional(readOnly = true)
+    /**
+     * 取得指定使用者視角的對戰狀態（包含其待處理決策與互動）。
+     */
     public GameStateResponse getGameStateForUser(Long matchId, Long userId) {
         if (!matchPlayerRepository.existsByMatchIdAndUserId(matchId, userId)) {
             throw new IllegalStateException("你不在此房間中");
@@ -86,6 +92,9 @@ public class MatchGameStateService {
     }
 
     @Transactional(readOnly = true)
+    /**
+     * 取得對戰公共狀態（不含使用者專屬待辦）。
+     */
     public GameStateResponse getGameState(Long matchId) {
         MatchEntity match = matchRepository.findById(matchId)
             .orElseThrow(() -> new IllegalArgumentException("找不到對戰"));
@@ -247,6 +256,9 @@ public class MatchGameStateService {
         return response;
     }
 
+    /**
+     * 載入近期行動紀錄（最新 20 筆）。
+     */
     private List<RecentMatchActionResponse> loadRecentActions(Long matchId) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
             """
@@ -279,6 +291,9 @@ public class MatchGameStateService {
         return actions;
     }
 
+    /**
+     * 載入待處理的選牌型決策（CARD_SELECTION）。
+     */
     private List<PendingDecisionResponse> loadPendingDecisions(Long matchId, Long userId) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
             """
@@ -324,6 +339,9 @@ public class MatchGameStateService {
         return decisions;
     }
 
+    /**
+     * 解析 decision context 中的候選卡片清單，並補齊場上統計資訊。
+     */
     private List<PendingDecisionCandidateResponse> loadPendingDecisionCandidates(Long matchId, JsonNode contextNode) {
         if (contextNode == null || contextNode.isNull()) {
             return List.of();
@@ -354,6 +372,9 @@ public class MatchGameStateService {
         return candidates;
     }
 
+    /**
+     * 載入待處理互動（非 CARD_SELECTION），例如 trigger confirm、放置選項等。
+     */
     private List<PendingInteractionResponse> loadPendingInteractions(Long matchId, Long userId) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
             """
@@ -411,6 +432,9 @@ public class MatchGameStateService {
         return interactions;
     }
 
+    /**
+     * 決定互動類型，優先採用 context.interactionType，其次回退 decision_type。
+     */
     private String resolveInteractionType(Map<String, Object> row, JsonNode contextNode) {
         String contextType = toStringValue(contextNode.path("interactionType").asText(null));
         if (StringUtils.hasText(contextType)) {
@@ -419,6 +443,9 @@ public class MatchGameStateService {
         return normalizeZone(row.get("decision_type"));
     }
 
+    /**
+     * 讀取 pending interaction 的卡片列表，若缺少 cards 欄位則回退 candidateCards。
+     */
     private List<PendingDecisionCandidateResponse> loadPendingInteractionCards(Long matchId, JsonNode contextNode) {
         if (contextNode == null || contextNode.isNull()) {
             return List.of();
@@ -449,6 +476,9 @@ public class MatchGameStateService {
         return cards;
     }
 
+    /**
+     * 為候選卡補齊場上統計：HP、エール顏色計數、附加支援數。
+     */
     private void enrichPendingCandidateStageStats(Long matchId, List<PendingDecisionCandidateResponse> candidates) {
         if (matchId == null || candidates == null || candidates.isEmpty()) {
             return;
@@ -538,6 +568,9 @@ public class MatchGameStateService {
         }
     }
 
+    /**
+     * 將 JSON 物件轉成 color -> count 映射。
+     */
     private Map<String, Integer> toColorCountMap(JsonNode node) {
         if (node == null || node.isNull() || !node.isObject()) {
             return Map.of();
@@ -557,10 +590,16 @@ public class MatchGameStateService {
         return result.isEmpty() ? Map.of() : result;
     }
 
+    /**
+     * 判斷 match_cards 區位是否為目前前端支援顯示的區位。
+     */
     private boolean isMatchCardSupportedZone(String zone) {
         return "HAND".equals(zone) || BOARD_ZONE_SLOT_INDEX.containsKey(zone);
     }
 
+    /**
+     * 將卡片加入對應玩家區位容器並同步更新區位計數。
+     */
     private void addCardToZone(PlayerZoneStateResponse playerState, ZoneCardInstanceResponse card) {
         if (playerState == null || card == null) {
             return;
@@ -579,6 +618,9 @@ public class MatchGameStateService {
         applyBoardZoneCount(playerState, zone, boardZone.getCards().size());
     }
 
+    /**
+     * 從玩家 boardZones 中尋找指定區位。
+     */
     private BoardZoneStateResponse findBoardZone(PlayerZoneStateResponse playerState, String zone) {
         return playerState.getBoardZones().stream()
             .filter(boardZone -> zone.equals(boardZone.getZone()))
@@ -586,6 +628,9 @@ public class MatchGameStateService {
             .orElse(null);
     }
 
+    /**
+     * 依區位更新玩家的各區卡片數欄位。
+     */
     private void applyBoardZoneCount(PlayerZoneStateResponse playerState, String zone, int count) {
         switch (zone) {
             case "OSHI" -> playerState.setOshiCount(count);
@@ -603,6 +648,9 @@ public class MatchGameStateService {
         }
     }
 
+    /**
+     * 解析 match current_phase，未知值時回退 RESET。
+     */
     private MatchPhase parsePhase(String rawPhase) {
         if (!StringUtils.hasText(rawPhase)) {
             return MatchPhase.RESET;
@@ -615,6 +663,9 @@ public class MatchGameStateService {
         }
     }
 
+    /**
+     * 區位字串正規化（trim + uppercase）。
+     */
     private String normalizeZone(Object value) {
         if (value == null) {
             return "";
@@ -622,6 +673,9 @@ public class MatchGameStateService {
         return value.toString().trim().toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * 安全轉 int，不可轉時回 0。
+     */
     private int toInt(Object value) {
         if (value instanceof Number number) {
             return number.intValue();
@@ -629,6 +683,9 @@ public class MatchGameStateService {
         return 0;
     }
 
+    /**
+     * 安全轉 nullable int，不可轉時回 null。
+     */
     private Integer toNullableInt(Object value) {
         if (value instanceof Number number) {
             return number.intValue();
@@ -643,6 +700,9 @@ public class MatchGameStateService {
         return null;
     }
 
+    /**
+     * 計算當前仍生效的回合傷害修正（match_turn_effects）。
+     */
     private Map<Long, Integer> resolveActiveTurnDamageModifiers(
         Long matchId,
         Integer turnNumber,
@@ -691,6 +751,9 @@ public class MatchGameStateService {
         return modifiers;
     }
 
+    /**
+     * 安全轉 Long，支援 number 與 numeric string。
+     */
     private Long toLong(Object value) {
         if (value instanceof Number number) {
             return number.longValue();
@@ -705,6 +768,9 @@ public class MatchGameStateService {
         return null;
     }
 
+    /**
+     * 通用轉字串，null 則回 null。
+     */
     private String toStringValue(Object value) {
         if (value == null) {
             return null;
@@ -712,6 +778,9 @@ public class MatchGameStateService {
         return value.toString();
     }
 
+    /**
+     * 通用轉 boolean，支援 Boolean/Number/String。
+     */
     private boolean toBoolean(Object value) {
         if (value instanceof Boolean bool) {
             return bool;
@@ -725,6 +794,9 @@ public class MatchGameStateService {
         return false;
     }
 
+    /**
+     * 解析 SQL array 或單值為 Long list，失敗時回退 fallbackSingle。
+     */
     private List<Long> toLongList(Object value, Long fallbackSingle) {
         if (value == null) {
             return fallbackSingle == null ? List.of() : List.of(fallbackSingle);
@@ -755,6 +827,9 @@ public class MatchGameStateService {
         return fallbackSingle == null ? List.of() : List.of(fallbackSingle);
     }
 
+    /**
+     * 解析 payload JSON 字串，失敗時回傳帶 raw 的容錯節點。
+     */
     private JsonNode parsePayloadJson(String value) {
         if (!StringUtils.hasText(value)) {
             return objectMapper.nullNode();
@@ -766,6 +841,9 @@ public class MatchGameStateService {
         }
     }
 
+    /**
+     * 通用轉 LocalDateTime，支援 LocalDateTime 與 Timestamp。
+     */
     private java.time.LocalDateTime toLocalDateTime(Object value) {
         if (value instanceof java.time.LocalDateTime dateTime) {
             return dateTime;
@@ -776,6 +854,9 @@ public class MatchGameStateService {
         return null;
     }
 
+    /**
+     * 解析藝能基礎攻擊值（value/rawHeader/rawText 依序嘗試）。
+     */
     private int resolveArtDamage(String effectJsonText) {
         if (!StringUtils.hasText(effectJsonText)) {
             return 0;
@@ -794,6 +875,9 @@ public class MatchGameStateService {
         return extractDamageFromText(rawText);
     }
 
+    /**
+     * 從文字中擷取傷害值（特殊/一般/最後數字回退）。
+     */
     private int extractDamageFromText(String text) {
         if (!StringUtils.hasText(text)) {
             return 0;

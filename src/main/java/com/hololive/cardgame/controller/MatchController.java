@@ -43,6 +43,9 @@ public class MatchController {
     private final MatchSocketHandler matchSocketHandler;
     private final AuthUserResolver authUserResolver;
 
+    /**
+     * 對戰相關 API 入口，負責房間流程、行動路由與事件廣播。
+     */
     public MatchController(
         LobbyMatchService lobbyMatchService,
         HardNpcService hardNpcService,
@@ -61,6 +64,9 @@ public class MatchController {
 
     @PostMapping("/create")
     @ResponseStatus(HttpStatus.CREATED)
+    /**
+     * 建立一般 PvP 房間。
+     */
     public LobbyMatchResponse createMatch() {
         Long userId = currentUserId();
         LobbyMatch match = lobbyMatchService.createMatch(userId);
@@ -71,6 +77,9 @@ public class MatchController {
 
     @PostMapping("/create-vs-hard-npc")
     @ResponseStatus(HttpStatus.CREATED)
+    /**
+     * 建立並啟動 Hard NPC 對戰房間。
+     */
     public LobbyMatchResponse createVsHardNpcMatch() {
         Long userId = currentUserId();
         try {
@@ -84,6 +93,9 @@ public class MatchController {
     }
 
     @PostMapping("/join")
+    /**
+     * 以房號加入對戰房間。
+     */
     public LobbyMatchResponse joinMatch(@RequestBody JoinMatchRequest request) {
         try {
             LobbyMatch match = lobbyMatchService.joinMatch(request.getRoomCode(), currentUserId());
@@ -98,6 +110,9 @@ public class MatchController {
     }
 
     @GetMapping("/{matchId}")
+    /**
+     * 取得房間基本資訊。
+     */
     public LobbyMatchResponse getMatch(@PathVariable Long matchId) {
         try {
             return LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
@@ -107,6 +122,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/ready")
+    /**
+     * 更新玩家 ready 狀態。
+     */
     public LobbyMatchResponse setReady(@PathVariable Long matchId, @RequestBody ReadyRequest request) {
         try {
             LobbyMatch match = lobbyMatchService.setReady(matchId, currentUserId(), request.isReady());
@@ -119,6 +137,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/start")
+    /**
+     * 由房主手動開始對戰。
+     */
     public LobbyMatchResponse startMatch(@PathVariable Long matchId) {
         try {
             LobbyMatch match = lobbyMatchService.startMatch(matchId, currentUserId());
@@ -133,13 +154,16 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/play-to-stage")
+    /**
+     * 執行出牌到場上的行動。
+     */
     public LobbyMatchResponse playToStage(
         @PathVariable Long matchId,
         @RequestBody PlayToStageActionRequest request
     ) {
         try {
             matchActionService.playToStage(matchId, currentUserId(), request);
-            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+            LobbyMatchResponse response = maybeExecuteHardNpcTurn(matchId);
             publish(matchId, "PLAY_TO_STAGE", response);
             return response;
         } catch (IllegalArgumentException e) {
@@ -150,6 +174,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/bloom")
+    /**
+     * 執行 Bloom 行動。
+     */
     public LobbyMatchResponse bloom(
         @PathVariable Long matchId,
         @RequestBody BloomActionRequest request
@@ -167,13 +194,16 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/mulligan")
+    /**
+     * 回應起手重抽決策。
+     */
     public LobbyMatchResponse mulligan(
         @PathVariable Long matchId,
         @RequestBody(required = false) MulliganActionRequest request
     ) {
         try {
             matchActionService.mulligan(matchId, currentUserId(), request);
-            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+            LobbyMatchResponse response = maybeExecuteHardNpcTurn(matchId);
             publish(matchId, "MULLIGAN", response);
             return response;
         } catch (IllegalArgumentException e) {
@@ -184,6 +214,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/play-support")
+    /**
+     * 使用 Support 卡片。
+     */
     public LobbyMatchResponse playSupport(
         @PathVariable Long matchId,
         @RequestBody PlaySupportActionRequest request
@@ -201,6 +234,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/attach-cheer")
+    /**
+     * 將 Cheer 附加到指定 Holomem。
+     */
     public LobbyMatchResponse attachCheer(
         @PathVariable Long matchId,
         @RequestBody AttachCheerActionRequest request
@@ -218,6 +254,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/attack-art")
+    /**
+     * 執行 Art 攻擊。
+     */
     public LobbyMatchResponse attackArt(
         @PathVariable Long matchId,
         @RequestBody AttackArtActionRequest request
@@ -235,6 +274,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/draw-turn")
+    /**
+     * 執行本回合抽牌動作。
+     */
     public LobbyMatchResponse drawTurn(@PathVariable Long matchId) {
         try {
             matchActionService.drawTurn(matchId, currentUserId());
@@ -249,6 +291,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/send-turn-cheer")
+    /**
+     * 執行本回合吶喊（送 Cheer）動作。
+     */
     public LobbyMatchResponse sendTurnCheer(@PathVariable Long matchId) {
         try {
             matchActionService.sendTurnCheer(matchId, currentUserId());
@@ -262,7 +307,27 @@ public class MatchController {
         }
     }
 
+    @PostMapping("/{matchId}/actions/advance-phase")
+    /**
+     * 推進目前回合 phase。
+     */
+    public LobbyMatchResponse advancePhase(@PathVariable Long matchId) {
+        try {
+            matchActionService.advancePhase(matchId, currentUserId());
+            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+            publish(matchId, "ADVANCE_PHASE", response);
+            return response;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
     @PostMapping("/{matchId}/actions/move-stage-holomem")
+    /**
+     * 移動場上 Holomem（CENTER / BACK / COLLAB）。
+     */
     public LobbyMatchResponse moveStageHolomem(
         @PathVariable Long matchId,
         @RequestBody MoveStageHolomemActionRequest request
@@ -280,6 +345,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/use-oshi-skill")
+    /**
+     * 使用 Oshi 技能。
+     */
     public LobbyMatchResponse useOshiSkill(
         @PathVariable Long matchId,
         @RequestBody UseOshiSkillActionRequest request
@@ -297,6 +365,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/baton-touch")
+    /**
+     * 執行バトンタッチ。
+     */
     public LobbyMatchResponse batonTouch(
         @PathVariable Long matchId,
         @RequestBody BatonTouchActionRequest request
@@ -314,6 +385,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/end-turn")
+    /**
+     * 結束回合；若為 NPC 對戰則嘗試接續執行 NPC 回合。
+     */
     public LobbyMatchResponse endTurn(@PathVariable Long matchId) {
         try {
             matchActionService.endTurn(matchId, currentUserId());
@@ -342,6 +416,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/concede")
+    /**
+     * 投降並結束對戰。
+     */
     public LobbyMatchResponse concede(@PathVariable Long matchId) {
         try {
             matchActionService.concede(matchId, currentUserId());
@@ -356,6 +433,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/npc-hard-turn")
+    /**
+     * 手動觸發 Hard NPC 回合（除錯與補救用）。
+     */
     public LobbyMatchResponse executeHardNpcTurn(@PathVariable Long matchId) {
         try {
             LobbyMatch match = hardNpcService.executeHardNpcTurn(matchId, currentUserId());
@@ -370,6 +450,9 @@ public class MatchController {
     }
 
     @PostMapping("/{matchId}/actions/resolve-decision")
+    /**
+     * 回應待處理互動（如 trigger/選牌/確認）。
+     */
     public LobbyMatchResponse resolveDecision(
         @PathVariable Long matchId,
         @RequestBody ResolveDecisionRequest request
@@ -387,6 +470,9 @@ public class MatchController {
     }
 
     @GetMapping("/{matchId}/state")
+    /**
+     * 取得目前使用者視角的完整對戰狀態。
+     */
     public GameStateResponse getMatchState(@PathVariable Long matchId) {
         try {
             return matchGameStateService.getGameStateForUser(matchId, currentUserId());
@@ -397,10 +483,37 @@ public class MatchController {
         }
     }
 
+    /**
+     * 發送房間事件到 websocket 頻道。
+     */
     private void publish(Long matchId, String eventType, LobbyMatchResponse response) {
         matchSocketHandler.publish(matchId, LobbyEvent.of(eventType, response));
     }
 
+    /**
+     * 若房內包含 Hard NPC，則在玩家行動後嘗試補跑 NPC 回合。
+     */
+    private LobbyMatchResponse maybeExecuteHardNpcTurn(Long matchId) {
+        LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
+        if (!hardNpcService.hasHardNpcInMatch(matchId)) {
+            return response;
+        }
+        try {
+            LobbyMatch npcResult = hardNpcService.executeHardNpcTurn(matchId, currentUserId());
+            LobbyMatchResponse npcResponse = LobbyMatchResponse.from(npcResult);
+            publish(matchId, "NPC_HARD_TURN", npcResponse);
+            return npcResponse;
+        } catch (RuntimeException ignored) {
+            LobbyMatch recoveredMatch = hardNpcService.recoverIfNpcTurnStuck(matchId, currentUserId());
+            LobbyMatchResponse recoveredResponse = LobbyMatchResponse.from(recoveredMatch);
+            publish(matchId, "NPC_HARD_TURN_RECOVERED", recoveredResponse);
+            return recoveredResponse;
+        }
+    }
+
+    /**
+     * 解析目前登入使用者 ID。
+     */
     private Long currentUserId() {
         return authUserResolver.currentUserId();
     }

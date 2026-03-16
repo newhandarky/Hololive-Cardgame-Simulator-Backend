@@ -89,7 +89,33 @@ public class MatchEffectService {
         List<Long> selectedCardInstanceIds,
         Long targetHolomemCardInstanceId
     ) {
+        return applySupportEffect(
+            matchId,
+            userId,
+            effectType,
+            effectJson,
+            targetType,
+            selectedCardInstanceIds,
+            targetHolomemCardInstanceId,
+            false
+        );
+    }
+
+    /**
+     * 支援卡效果總入口（可選擇延後 down event 到互動確認後再結算）。
+     */
+    public Map<String, Object> applySupportEffect(
+        Long matchId,
+        Long userId,
+        String effectType,
+        String effectJson,
+        String targetType,
+        List<Long> selectedCardInstanceIds,
+        Long targetHolomemCardInstanceId,
+        boolean deferDownEvent
+    ) {
         JsonNode effectNode = parseEffectJson(effectJson);
+        JsonNode damageEffectNode = withDeferDownEventFlag(effectNode, deferDownEvent);
         List<String> effectTypes = resolveEffectTypes(effectType, effectNode);
         List<Map<String, Object>> executed = new ArrayList<>();
         List<String> unsupported = new ArrayList<>();
@@ -123,7 +149,7 @@ public class MatchEffectService {
                             matchId,
                             userId,
                             type,
-                            effectNode,
+                            damageEffectNode,
                             targetType,
                             targetHolomemCardInstanceId
                         )
@@ -296,10 +322,27 @@ public class MatchEffectService {
         int baseDamage,
         Long targetHolomemCardInstanceId
     ) {
+        return applyArtDamage(matchId, userId, baseDamage, targetHolomemCardInstanceId, false);
+    }
+
+    /**
+     * 套用藝能造成的直接傷害（可選擇是否延遲 down event 額外結算）。
+     */
+    public Map<String, Object> applyArtDamage(
+        Long matchId,
+        Long userId,
+        int baseDamage,
+        Long targetHolomemCardInstanceId,
+        boolean deferDownEvent
+    ) {
         if (baseDamage <= 0) {
             throw new IllegalArgumentException("藝能傷害必須大於 0");
         }
-        JsonNode effectNode = objectMapper.valueToTree(Map.of("type", "DAMAGE", "value", baseDamage));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "DAMAGE");
+        payload.put("value", baseDamage);
+        payload.put("deferDownEvent", deferDownEvent);
+        JsonNode effectNode = objectMapper.valueToTree(payload);
         return executeDamageEffect(
             matchId,
             userId,
@@ -311,7 +354,7 @@ public class MatchEffectService {
     }
 
     /**
-     * 處理藝能後由 Gift/被動觸發的追加效果。
+     * 處理「使用藝能後」由 Gift/被動觸發的追加效果。
      */
     public List<Map<String, Object>> applyGiftTriggeredEffectsOnArt(
         Long matchId,
@@ -320,9 +363,185 @@ public class MatchEffectService {
         Long attackTargetCardInstanceId,
         int turnNumber
     ) {
-        if (matchId == null || userId == null || attackerCardInstanceId == null || turnNumber <= 0) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "ART_USED",
+            attackerCardInstanceId,
+            attackTargetCardInstanceId,
+            turnNumber,
+            true
+        );
+    }
+
+    /**
+     * 預覽「使用藝能後」會觸發的 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnArt(
+        Long matchId,
+        Long userId,
+        Long attackerCardInstanceId,
+        Long attackTargetCardInstanceId,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "ART_USED",
+            attackerCardInstanceId,
+            attackTargetCardInstanceId,
+            turnNumber,
+            false
+        );
+    }
+
+    /**
+     * 處理「擊倒對手 Holomem 後」由 Gift/被動觸發的追加效果。
+     */
+    public List<Map<String, Object>> applyGiftTriggeredEffectsOnDownedOpponent(
+        Long matchId,
+        Long userId,
+        Long attackerCardInstanceId,
+        Long downedTargetCardInstanceId,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "OPPONENT_DOWNED",
+            attackerCardInstanceId,
+            downedTargetCardInstanceId,
+            turnNumber,
+            true
+        );
+    }
+
+    /**
+     * 預覽「擊倒對手 Holomem 後」會觸發的 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnDownedOpponent(
+        Long matchId,
+        Long userId,
+        Long attackerCardInstanceId,
+        Long downedTargetCardInstanceId,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "OPPONENT_DOWNED",
+            attackerCardInstanceId,
+            downedTargetCardInstanceId,
+            turnNumber,
+            false
+        );
+    }
+
+    /**
+     * 依已選定 Gift 持有者執行一次觸發效果（供互動確認後使用）。
+     */
+    public Map<String, Object> applySingleGiftTriggeredEffect(
+        Long matchId,
+        Long userId,
+        String triggerType,
+        Long sourceCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        int turnNumber,
+        Long giftHolderHolomemId
+    ) {
+        if (matchId == null || userId == null || sourceCardInstanceId == null || turnNumber <= 0 || giftHolderHolomemId == null || giftHolderHolomemId <= 0) {
+            return null;
+        }
+        String normalizedTriggerType = normalizeGiftTriggerType(triggerType);
+        Map<String, Object> holder = jdbcTemplate.query(
+            """
+            SELECT h.id AS holomem_id,
+                   h.match_card_id,
+                   h.card_id,
+                   h.zone,
+                   h.current_level,
+                   m.passive_effect_json::text AS passive_text
+            FROM match_holomems h
+            JOIN member_cards m ON m.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("holomem_id", rs.getLong("holomem_id"));
+                row.put("match_card_id", rs.getLong("match_card_id"));
+                row.put("card_id", rs.getString("card_id"));
+                row.put("zone", rs.getString("zone"));
+                row.put("current_level", rs.getString("current_level"));
+                row.put("passive_text", rs.getString("passive_text"));
+                return row;
+            },
+            matchId,
+            userId,
+            giftHolderHolomemId
+        );
+        if (holder == null) {
+            return null;
+        }
+        return buildGiftTriggerSummary(
+            matchId,
+            userId,
+            turnNumber,
+            sourceCardInstanceId,
+            triggerTargetCardInstanceId,
+            normalizedTriggerType,
+            holder,
+            true
+        );
+    }
+
+    /**
+     * down event 預覽（不扣生命，供互動確認）。
+     */
+    public Map<String, Object> previewDownEventEffect(
+        Long matchId,
+        Long actorUserId,
+        Long downedOwnerUserId,
+        String downedCardId,
+        int currentTurn
+    ) {
+        return executeDownEvent(matchId, actorUserId, downedOwnerUserId, downedCardId, currentTurn, false);
+    }
+
+    /**
+     * down event 正式結算（確認後扣生命）。
+     */
+    public Map<String, Object> applyDownEventEffect(
+        Long matchId,
+        Long actorUserId,
+        Long downedOwnerUserId,
+        String downedCardId,
+        int currentTurn
+    ) {
+        return executeDownEvent(matchId, actorUserId, downedOwnerUserId, downedCardId, currentTurn, true);
+    }
+
+    /**
+     * 依觸發事件執行 Gift 效果（目前已接 ART_USED、OPPONENT_DOWNED）。
+     */
+    private List<Map<String, Object>> applyGiftTriggeredEffectsByTrigger(
+        Long matchId,
+        Long userId,
+        String triggerType,
+        Long sourceCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        int turnNumber,
+        boolean executeEffects
+    ) {
+        if (matchId == null || userId == null || sourceCardInstanceId == null || turnNumber <= 0) {
             return List.of();
         }
+        String normalizedTriggerType = normalizeGiftTriggerType(triggerType);
         List<Map<String, Object>> holders = jdbcTemplate.queryForList(
             """
             SELECT h.id AS holomem_id,
@@ -346,157 +565,307 @@ public class MatchEffectService {
 
         List<Map<String, Object>> triggered = new ArrayList<>();
         for (Map<String, Object> holder : holders) {
-            Long holderHolomemId = asLong(holder.get("holomem_id"));
-            Long holderCardInstanceId = asLong(holder.get("match_card_id"));
-            String holderZone = normalize(asText(holder.get("zone")));
-            String holderLevel = normalizeLevelType(asText(holder.get("current_level")));
-            String giftText = loadGiftEffectText(asText(holder.get("passive_text")));
-            if (!StringUtils.hasText(giftText)) {
-                continue;
+            Map<String, Object> summary = buildGiftTriggerSummary(
+                matchId,
+                userId,
+                turnNumber,
+                sourceCardInstanceId,
+                triggerTargetCardInstanceId,
+                normalizedTriggerType,
+                holder,
+                executeEffects
+            );
+            if (summary != null) {
+                triggered.add(summary);
             }
-            if (!giftText.contains("アーツ") || !giftText.contains("使った時")) {
-                continue;
-            }
-            if (giftText.contains("このホロメンが") && !attackerCardInstanceId.equals(holderCardInstanceId)) {
-                continue;
-            }
-            if (giftText.contains("センターポジション限定") && !"CENTER".equals(holderZone)) {
-                continue;
-            }
-            if (giftText.contains("コラボポジション限定") && !"COLLAB".equals(holderZone)) {
-                continue;
-            }
-            if (giftText.contains("1stホロメンからBloomしているこのホロメン")) {
-                if (!Set.of("SECOND", "BUZZ").contains(holderLevel)) {
-                    continue;
-                }
-            }
-            if (giftText.contains("ターンに1回") && isGiftAlreadyUsedThisTurn(matchId, userId, turnNumber, holderHolomemId)) {
-                continue;
-            }
-
-            JsonNode giftNode = objectMapper.valueToTree(Map.of("rawText", giftText));
-            List<String> effectTypes = inferBloomEffectTypes(giftText);
-            List<Map<String, Object>> executed = new ArrayList<>();
-            List<String> unsupported = new ArrayList<>();
-            List<Map<String, Object>> skippedEffects = new ArrayList<>();
-            for (String effectType : effectTypes) {
-                String targetType = inferBloomTargetType(effectType);
-                try {
-                    switch (effectType) {
-                        case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, giftNode));
-                        case "SEARCH" -> executed.add(executeSearchEffect(matchId, userId, effectType, giftNode, null));
-                        case "RETURN_TO_HAND" -> executed.add(
-                            executeReturnToHandEffect(matchId, userId, effectType, giftNode, null)
-                        );
-                        case "RETURN_TO_DECK_TOP" -> executed.add(
-                            executeReturnToDeckTopEffect(matchId, userId, effectType, giftNode, null)
-                        );
-                        case "ADD_CHEER" -> executed.add(
-                            executeAddCheerEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                        );
-                        case "DAMAGE" -> executed.add(
-                            executeDamageEffect(
-                                matchId,
-                                userId,
-                                effectType,
-                                giftNode,
-                                targetType,
-                                attackTargetCardInstanceId
-                            )
-                        );
-                        case "REATTACH" -> executed.add(
-                            executeReattachEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                        );
-                        case "SUMMON_TO_STAGE" -> executed.add(executeSummonToStageEffect(matchId, userId, effectType, giftNode));
-                        case "REVEAL_TO_ARCHIVE" -> executed.add(
-                            executeRevealToArchiveEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "BLOOM_FROM_ARCHIVE" -> executed.add(
-                            executeBloomFromArchiveEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
-                            executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "DISCARD_HAND" -> executed.add(executeDiscardHandEffect(matchId, userId, effectType, giftNode));
-                        case "REST" -> executed.add(
-                            executeRestEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                        );
-                        case "SWAP_CENTER_BACK" -> executed.add(
-                            executeSwapCenterBackEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "MOVE_TO_HOLOPOWER" -> executed.add(
-                            executeMoveToHolopowerEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "DOWN_NO_LIFE" -> executed.add(
-                            executeDownNoLifeEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "DOWN_EXTRA_LIFE" -> executed.add(
-                            executeDownExtraLifeEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
-                            executeBatonTouchCostModifierEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                        );
-                        case "ACTION_LOCK" -> executed.add(
-                            executeActionLockEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                        );
-                        case "ALLOW_EXTRA_BLOOM" -> executed.add(
-                            executeAllowExtraBloomEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "LOOK_TOP_DECK" -> executed.add(
-                            executeLookTopDeckEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "LOOK_OPPONENT_HAND" -> executed.add(
-                            executeLookOpponentHandEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "LOOK_HOLOPOWER" -> executed.add(
-                            executeLookHolopowerEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "SWAP_WITH_COLLAB" -> executed.add(
-                            executeSwapWithCollabEffect(matchId, userId, effectType, giftNode, holderCardInstanceId)
-                        );
-                        case "HEAL" -> executed.add(
-                            executeHealEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                        );
-                        case "BUFF", "DEBUFF" -> executed.add(
-                            executeBuffDebuffEffect(matchId, userId, effectType, giftNode, targetType)
-                        );
-                        case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
-                            executeMatchResultEffect(matchId, userId, effectType, giftNode)
-                        );
-                        case "UNIMPLEMENTED" -> executed.add(
-                            executeNoOpEffect(effectType, giftNode, "尚未支援的 GIFT 效果")
-                        );
-                        default -> {
-                            unsupported.add(effectType);
-                            Map<String, Object> skipped = buildSkippedEffect(effectType, "UNSUPPORTED_EFFECT");
-                            executed.add(skipped);
-                            skippedEffects.add(skipped);
-                        }
-                    }
-                } catch (RuntimeException ex) {
-                    Map<String, Object> skipped = buildSkippedEffect(effectType, ex.getMessage());
-                    executed.add(skipped);
-                    skippedEffects.add(skipped);
-                }
-            }
-
-            Map<String, Object> summary = new LinkedHashMap<>();
-            summary.put("triggerType", "ART_USED");
-            summary.put("giftHolderHolomemId", holderHolomemId);
-            summary.put("giftHolderCardInstanceId", holderCardInstanceId);
-            summary.put("giftHolderCardId", asText(holder.get("card_id")));
-            summary.put("giftHolderZone", holderZone);
-            summary.put("rawText", giftText);
-            summary.put("requestedEffects", effectTypes);
-            summary.put("executedEffects", executed);
-            summary.put("unsupportedEffects", unsupported);
-            summary.put("skippedEffects", skippedEffects);
-            summary.put("partiallyResolved", !skippedEffects.isEmpty() || !unsupported.isEmpty());
-            triggered.add(summary);
         }
         return triggered;
     }
+
+    /**
+     * 建立單一 Gift 持有者的觸發摘要（可選擇立即執行或僅預覽）。
+     */
+    private Map<String, Object> buildGiftTriggerSummary(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        Long sourceCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        String normalizedTriggerType,
+        Map<String, Object> holder,
+        boolean executeEffects
+    ) {
+        Long holderHolomemId = asLong(holder.get("holomem_id"));
+        Long holderCardInstanceId = asLong(holder.get("match_card_id"));
+        String holderZone = normalize(asText(holder.get("zone")));
+        String holderLevel = normalizeLevelType(asText(holder.get("current_level")));
+        String giftText = loadGiftEffectText(asText(holder.get("passive_text")));
+        if (!StringUtils.hasText(giftText)) {
+            return null;
+        }
+        if (!matchesGiftTriggerType(giftText, normalizedTriggerType)) {
+            return null;
+        }
+        if (
+            !isGiftHolderEligibleForTrigger(
+                matchId,
+                userId,
+                turnNumber,
+                holderHolomemId,
+                holderCardInstanceId,
+                holderZone,
+                holderLevel,
+                sourceCardInstanceId,
+                giftText,
+                normalizedTriggerType
+            )
+        ) {
+            return null;
+        }
+        GiftExecutionSummary execution;
+        if (executeEffects) {
+            execution = executeGiftEffectsForHolder(
+                matchId,
+                userId,
+                holderCardInstanceId,
+                triggerTargetCardInstanceId,
+                giftText
+            );
+        } else {
+            execution = previewGiftEffects(giftText);
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("triggerType", normalizedTriggerType);
+        summary.put("giftHolderHolomemId", holderHolomemId);
+        summary.put("giftHolderCardInstanceId", holderCardInstanceId);
+        summary.put("giftHolderCardId", asText(holder.get("card_id")));
+        summary.put("giftHolderZone", holderZone);
+        summary.put("sourceCardInstanceId", sourceCardInstanceId);
+        summary.put("triggerTargetCardInstanceId", triggerTargetCardInstanceId);
+        summary.put("rawText", giftText);
+        summary.put("requestedEffects", execution.requestedEffects());
+        summary.put("executedEffects", execution.executedEffects());
+        summary.put("unsupportedEffects", execution.unsupportedEffects());
+        summary.put("skippedEffects", execution.skippedEffects());
+        summary.put("partiallyResolved", !execution.skippedEffects().isEmpty() || !execution.unsupportedEffects().isEmpty());
+        if (!executeEffects) {
+            summary.put("deferred", true);
+        }
+        return summary;
+    }
+
+    /**
+     * 判斷 Gift 文案是否符合本次觸發事件。
+     */
+    private boolean matchesGiftTriggerType(String giftText, String triggerType) {
+        if (!StringUtils.hasText(giftText)) {
+            return false;
+        }
+        if ("ART_USED".equals(triggerType)) {
+            return giftText.contains("アーツ") && giftText.contains("使った時");
+        }
+        if ("OPPONENT_DOWNED".equals(triggerType)) {
+            if (!giftText.contains("ダウン") || !giftText.contains("時")) {
+                return false;
+            }
+            return !giftText.contains("このホロメンがダウンした時");
+        }
+        return false;
+    }
+
+    /**
+     * 檢查 Gift 持有者與條件是否滿足（位置、層級、回合次數、來源卡等）。
+     */
+    private boolean isGiftHolderEligibleForTrigger(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        Long holderHolomemId,
+        Long holderCardInstanceId,
+        String holderZone,
+        String holderLevel,
+        Long sourceCardInstanceId,
+        String giftText,
+        String triggerType
+    ) {
+        if (giftText.contains("このホロメンが") && !sourceCardInstanceId.equals(holderCardInstanceId)) {
+            return false;
+        }
+        if (giftText.contains("センターポジション限定") && !"CENTER".equals(holderZone)) {
+            return false;
+        }
+        if (giftText.contains("コラボポジション限定") && !"COLLAB".equals(holderZone)) {
+            return false;
+        }
+        if (giftText.contains("1stホロメンからBloomしているこのホロメン")) {
+            if (!Set.of("SECOND", "BUZZ").contains(holderLevel)) {
+                return false;
+            }
+        }
+        if (giftText.contains("ターンに1回") && isGiftAlreadyUsedThisTurn(matchId, userId, turnNumber, holderHolomemId)) {
+            return false;
+        }
+        if ("OPPONENT_DOWNED".equals(triggerType)) {
+            if (giftText.contains("このホロメンがダウンした時")) {
+                return false;
+            }
+            if (
+                (giftText.contains("相手のホロメンがダウンした時") || giftText.contains("ダウンさせた時"))
+                && sourceCardInstanceId == null
+            ) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 執行單一 Gift 持有者所需的 effectType 並彙整結果。
+     */
+    private GiftExecutionSummary executeGiftEffectsForHolder(
+        Long matchId,
+        Long userId,
+        Long holderCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        String giftText
+    ) {
+        JsonNode giftNode = objectMapper.valueToTree(Map.of("rawText", giftText));
+        List<String> effectTypes = inferBloomEffectTypes(giftText);
+        List<Map<String, Object>> executed = new ArrayList<>();
+        List<String> unsupported = new ArrayList<>();
+        List<Map<String, Object>> skippedEffects = new ArrayList<>();
+        for (String effectType : effectTypes) {
+            String targetType = inferBloomTargetType(effectType);
+            try {
+                switch (effectType) {
+                    case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, giftNode));
+                    case "SEARCH" -> executed.add(executeSearchEffect(matchId, userId, effectType, giftNode, null));
+                    case "RETURN_TO_HAND" -> executed.add(
+                        executeReturnToHandEffect(matchId, userId, effectType, giftNode, null)
+                    );
+                    case "RETURN_TO_DECK_TOP" -> executed.add(
+                        executeReturnToDeckTopEffect(matchId, userId, effectType, giftNode, null)
+                    );
+                    case "ADD_CHEER" -> executed.add(
+                        executeAddCheerEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                    );
+                    case "DAMAGE" -> executed.add(
+                        executeDamageEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            giftNode,
+                            targetType,
+                            triggerTargetCardInstanceId
+                        )
+                    );
+                    case "REATTACH" -> executed.add(
+                        executeReattachEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                    );
+                    case "SUMMON_TO_STAGE" -> executed.add(executeSummonToStageEffect(matchId, userId, effectType, giftNode));
+                    case "REVEAL_TO_ARCHIVE" -> executed.add(
+                        executeRevealToArchiveEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "BLOOM_FROM_ARCHIVE" -> executed.add(
+                        executeBloomFromArchiveEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
+                        executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "DISCARD_HAND" -> executed.add(executeDiscardHandEffect(matchId, userId, effectType, giftNode));
+                    case "REST" -> executed.add(
+                        executeRestEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                    );
+                    case "SWAP_CENTER_BACK" -> executed.add(
+                        executeSwapCenterBackEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "MOVE_TO_HOLOPOWER" -> executed.add(
+                        executeMoveToHolopowerEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "DOWN_NO_LIFE" -> executed.add(
+                        executeDownNoLifeEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "DOWN_EXTRA_LIFE" -> executed.add(
+                        executeDownExtraLifeEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
+                        executeBatonTouchCostModifierEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                    );
+                    case "ACTION_LOCK" -> executed.add(
+                        executeActionLockEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                    );
+                    case "ALLOW_EXTRA_BLOOM" -> executed.add(
+                        executeAllowExtraBloomEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "LOOK_TOP_DECK" -> executed.add(
+                        executeLookTopDeckEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "LOOK_OPPONENT_HAND" -> executed.add(
+                        executeLookOpponentHandEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "LOOK_HOLOPOWER" -> executed.add(
+                        executeLookHolopowerEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "SWAP_WITH_COLLAB" -> executed.add(
+                        executeSwapWithCollabEffect(matchId, userId, effectType, giftNode, holderCardInstanceId)
+                    );
+                    case "HEAL" -> executed.add(
+                        executeHealEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
+                    );
+                    case "BUFF", "DEBUFF" -> executed.add(
+                        executeBuffDebuffEffect(matchId, userId, effectType, giftNode, targetType)
+                    );
+                    case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
+                        executeMatchResultEffect(matchId, userId, effectType, giftNode)
+                    );
+                    case "UNIMPLEMENTED" -> executed.add(
+                        executeNoOpEffect(effectType, giftNode, "尚未支援的 GIFT 效果")
+                    );
+                    default -> {
+                        unsupported.add(effectType);
+                        Map<String, Object> skipped = buildSkippedEffect(effectType, "UNSUPPORTED_EFFECT");
+                        executed.add(skipped);
+                        skippedEffects.add(skipped);
+                    }
+                }
+            } catch (RuntimeException ex) {
+                Map<String, Object> skipped = buildSkippedEffect(effectType, ex.getMessage());
+                executed.add(skipped);
+                skippedEffects.add(skipped);
+            }
+        }
+        return new GiftExecutionSummary(effectTypes, executed, unsupported, skippedEffects);
+    }
+
+    /**
+     * 僅解析 Gift effectType，不執行效果。
+     */
+    private GiftExecutionSummary previewGiftEffects(String giftText) {
+        List<String> effectTypes = inferBloomEffectTypes(giftText);
+        return new GiftExecutionSummary(effectTypes, List.of(), List.of(), List.of());
+    }
+
+    /**
+     * Gift trigger type 正規化。
+     */
+    private String normalizeGiftTriggerType(String triggerType) {
+        String normalized = normalize(triggerType);
+        return switch (normalized) {
+            case "OPPONENT_DOWNED", "DOWNED", "DOWNED_OPPONENT" -> "OPPONENT_DOWNED";
+            default -> "ART_USED";
+        };
+    }
+
+    /**
+     * Gift 效果執行摘要。
+     */
+    private record GiftExecutionSummary(
+        List<String> requestedEffects,
+        List<Map<String, Object>> executedEffects,
+        List<String> unsupportedEffects,
+        List<Map<String, Object>> skippedEffects
+    ) {}
 
     /**
      * 計算附加支援造成的 HP 加成總和。
@@ -510,6 +879,49 @@ public class MatchEffectService {
      */
     public int resolveAttachedSupportArtBonus(Long matchId, Long matchHolomemId) {
         return resolveAttachedSupportStatBonus(matchId, matchHolomemId, ATTACHED_SUPPORT_ARTS_PATTERN);
+    }
+
+    /**
+     * Bloom 觸發效果入口（含條件判斷、執行結果摘要）。
+     */
+    public TriggeredEffectPreview previewBloomTriggeredEffect(String bloomCardId) {
+        BloomEffectPlan bloomPlan = resolveBloomEffectPlan(bloomCardId);
+        return new TriggeredEffectPreview(
+            bloomPlan.hasBloomEffect(),
+            bloomPlan.effectTypes(),
+            bloomPlan.rawText(),
+            bloomPlan.diceRoll()
+        );
+    }
+
+    /**
+     * Collab 觸發效果預覽（僅解析，不執行）。
+     */
+    public TriggeredEffectPreview previewCollabTriggeredEffect(
+        Long matchId,
+        Long userId,
+        String collabCardId,
+        Long selfHolomemCardInstanceId
+    ) {
+        CollabRuntimeContext runtimeContext = loadCollabRuntimeContext(
+            matchId,
+            userId,
+            selfHolomemCardInstanceId
+        );
+        BloomEffectPlan collabPlan = resolveCollabEffectPlan(collabCardId, runtimeContext);
+        return new TriggeredEffectPreview(
+            collabPlan.hasBloomEffect(),
+            collabPlan.effectTypes(),
+            collabPlan.rawText(),
+            collabPlan.diceRoll()
+        );
+    }
+
+    /**
+     * 向後相容：不帶場況資訊的連動效果預覽。
+     */
+    public TriggeredEffectPreview previewCollabTriggeredEffect(String collabCardId) {
+        return previewCollabTriggeredEffect(null, null, collabCardId, null);
     }
 
     /**
@@ -538,6 +950,8 @@ public class MatchEffectService {
         List<Map<String, Object>> skippedEffects = new ArrayList<>();
         Integer diceRoll = bloomPlan.diceRoll();
         JsonNode bloomEffectNode = bloomPlan.effectNode();
+        String normalizedBloomCardId = normalize(bloomCardId);
+        int archivedStackCostCount = -1;
 
         for (String effectType : effectTypes) {
             String targetType = inferBloomTargetType(effectType);
@@ -563,18 +977,57 @@ public class MatchEffectService {
                             selfHolomemCardInstanceId
                         )
                     );
-                    case "DAMAGE" -> executed.add(
-                        executeDamageEffect(
+                    case "DAMAGE" -> {
+                        if (
+                            normalizedBloomCardId.startsWith("HSD13-011")
+                                && archivedStackCostCount <= 0
+                        ) {
+                            Map<String, Object> skipped = executeNoOpEffect(
+                                effectType,
+                                bloomEffectNode,
+                                "條件未成立：未支付重疊 Debut 成本"
+                            );
+                            executed.add(skipped);
+                            skippedEffects.add(skipped);
+                            continue;
+                        }
+                        Long requestedTargetCardInstanceId = null;
+                        if (normalizedBloomCardId.startsWith("HSD13-011")) {
+                            requestedTargetCardInstanceId = resolveOpponentCollabCardInstanceId(matchId, userId);
+                            if (requestedTargetCardInstanceId == null || requestedTargetCardInstanceId <= 0) {
+                                Map<String, Object> skipped = executeNoOpEffect(
+                                    effectType,
+                                    bloomEffectNode,
+                                    "條件未成立：對手沒有 COLLAB 目標"
+                                );
+                                executed.add(skipped);
+                                skippedEffects.add(skipped);
+                                continue;
+                            }
+                        }
+                        executed.add(
+                            executeDamageEffect(
+                                matchId,
+                                userId,
+                                effectType,
+                                bloomEffectNode,
+                                targetType,
+                                requestedTargetCardInstanceId
+                            )
+                        );
+                    }
+                    case "REATTACH" -> executed.add(
+                        executeReattachEffect(
                             matchId,
                             userId,
                             effectType,
                             bloomEffectNode,
                             targetType,
-                            null
+                            selfHolomemCardInstanceId
                         )
                     );
-                    case "REATTACH" -> executed.add(
-                        executeReattachEffect(
+                    case "REMOVE_CHEER" -> executed.add(
+                        executeRemoveCheerEffect(
                             matchId,
                             userId,
                             effectType,
@@ -652,6 +1105,17 @@ public class MatchEffectService {
                     case "LOOK_HOLOPOWER" -> executed.add(
                         executeLookHolopowerEffect(matchId, userId, effectType, bloomEffectNode)
                     );
+                    case "ARCHIVE_STACK_CARD" -> {
+                        Map<String, Object> archiveSummary = executeArchiveStackCardEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode,
+                            selfHolomemCardInstanceId
+                        );
+                        executed.add(archiveSummary);
+                        archivedStackCostCount = asInt(archiveSummary.get("archiveApplied"));
+                    }
                     case "MOVE_ZONE" -> executed.add(
                         executeMoveZoneEffect(
                             matchId,
@@ -727,7 +1191,12 @@ public class MatchEffectService {
         String collabCardId,
         Long selfHolomemCardInstanceId
     ) {
-        BloomEffectPlan collabPlan = resolveCollabEffectPlan(collabCardId);
+        CollabRuntimeContext runtimeContext = loadCollabRuntimeContext(
+            matchId,
+            userId,
+            selfHolomemCardInstanceId
+        );
+        BloomEffectPlan collabPlan = resolveCollabEffectPlan(collabCardId, runtimeContext);
         if (!collabPlan.hasBloomEffect()) {
             Map<String, Object> summary = new LinkedHashMap<>();
             summary.put("hasCollabEffect", false);
@@ -744,9 +1213,36 @@ public class MatchEffectService {
         List<Map<String, Object>> skippedEffects = new ArrayList<>();
         Integer diceRoll = collabPlan.diceRoll();
         JsonNode collabEffectNode = collabPlan.effectNode();
+        String normalizedCollabCardId = normalize(collabCardId);
+        int returnedCheerCount = -1;
+        int removedCheerCount = -1;
 
         for (String effectType : effectTypes) {
             String targetType = inferBloomTargetType(effectType);
+            String effectiveTargetType = targetType;
+            if ("MOVE_ZONE".equals(effectType)) {
+                effectiveTargetType = resolveCollabMoveTargetType(collabEffectNode, targetType);
+            }
+            if (
+                "HSD13-015".equals(normalizedCollabCardId)
+                    && "ADD_CHEER".equals(effectType)
+                    && returnedCheerCount == 0
+            ) {
+                Map<String, Object> skipped = executeNoOpEffect(effectType, collabEffectNode, "條件未成立：未退回場上エール");
+                executed.add(skipped);
+                skippedEffects.add(skipped);
+                continue;
+            }
+            if (
+                normalizedCollabCardId.startsWith("HBP06-078")
+                    && "SEARCH".equals(effectType)
+                    && removedCheerCount == 0
+            ) {
+                Map<String, Object> skipped = executeNoOpEffect(effectType, collabEffectNode, "條件未成立：未支付此卡附屬エール成本");
+                executed.add(skipped);
+                skippedEffects.add(skipped);
+                continue;
+            }
             try {
                 switch (effectType) {
                     case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, collabEffectNode));
@@ -766,7 +1262,7 @@ public class MatchEffectService {
                             effectType,
                             collabEffectNode,
                             targetType,
-                            selfHolomemCardInstanceId
+                            resolveCollabAddCheerTargetCardInstanceId(collabEffectNode, selfHolomemCardInstanceId)
                         )
                     );
                     case "DAMAGE" -> executed.add(
@@ -781,6 +1277,16 @@ public class MatchEffectService {
                     );
                     case "REATTACH" -> executed.add(
                         executeReattachEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            collabEffectNode,
+                            targetType,
+                            selfHolomemCardInstanceId
+                        )
+                    );
+                    case "REMOVE_CHEER" -> executed.add(
+                        executeRemoveCheerEffect(
                             matchId,
                             userId,
                             effectType,
@@ -864,8 +1370,8 @@ public class MatchEffectService {
                             userId,
                             effectType,
                             collabEffectNode,
-                            targetType,
-                            null
+                            effectiveTargetType,
+                            resolveCollabMoveTargetCardInstanceId(collabEffectNode, selfHolomemCardInstanceId)
                         )
                     );
                     case "SWAP_WITH_COLLAB" -> executed.add(
@@ -908,6 +1414,14 @@ public class MatchEffectService {
                 executed.add(skipped);
                 skippedEffects.add(skipped);
             }
+            if ("RETURN_CHEER_TO_DECK_BOTTOM".equals(effectType)) {
+                Map<String, Object> latest = executed.isEmpty() ? null : executed.get(executed.size() - 1);
+                returnedCheerCount = latest == null ? 0 : asInt(latest.get("returnApplied"));
+            }
+            if ("REMOVE_CHEER".equals(effectType)) {
+                Map<String, Object> latest = executed.isEmpty() ? null : executed.get(executed.size() - 1);
+                removedCheerCount = latest == null ? 0 : asInt(latest.get("removeApplied"));
+            }
         }
 
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -922,6 +1436,61 @@ public class MatchEffectService {
             summary.put("diceRoll", diceRoll);
         }
         return summary;
+    }
+
+    /**
+     * Collab ADD_CHEER 目標解析：優先讀效果覆寫目標，否則回退到觸發卡本身。
+     */
+    private Long resolveCollabAddCheerTargetCardInstanceId(JsonNode collabEffectNode, Long fallbackCardInstanceId) {
+        Long override = readLong(
+            collabEffectNode,
+            "targetHolomemCardInstanceId",
+            "targetCardInstanceId",
+            "targetMatchCardInstanceId"
+        );
+        if (override != null && override > 0) {
+            return override;
+        }
+        String rawText = normalizeDigits(extractText(collabEffectNode, "rawText", "rawEffect"));
+        if (StringUtils.hasText(rawText) && rawText.contains("バックホロメン")) {
+            return null;
+        }
+        return fallbackCardInstanceId;
+    }
+
+    /**
+     * Collab MOVE_ZONE 目標側解析：可由 effectNode 覆寫，文案含「このホロメン」時預設 SELF。
+     */
+    private String resolveCollabMoveTargetType(JsonNode collabEffectNode, String fallbackTargetType) {
+        String override = normalizeEffectType(readText(collabEffectNode, "moveTargetType", "move_target_type"));
+        if (StringUtils.hasText(override)) {
+            return override;
+        }
+        String rawText = normalizeDigits(extractText(collabEffectNode, "rawText", "rawEffect"));
+        if (StringUtils.hasText(rawText) && rawText.contains("このホロメン")) {
+            return "SELF";
+        }
+        return fallbackTargetType;
+    }
+
+    /**
+     * Collab MOVE_ZONE 目標卡解析：可由 effectNode 覆寫，文案含「このホロメン」時預設為觸發卡本身。
+     */
+    private Long resolveCollabMoveTargetCardInstanceId(JsonNode collabEffectNode, Long fallbackSelfCardInstanceId) {
+        Long override = readLong(
+            collabEffectNode,
+            "moveTargetHolomemCardInstanceId",
+            "moveTargetCardInstanceId",
+            "moveTargetMatchCardInstanceId"
+        );
+        if (override != null && override > 0) {
+            return override;
+        }
+        String rawText = normalizeDigits(extractText(collabEffectNode, "rawText", "rawEffect"));
+        if (StringUtils.hasText(rawText) && rawText.contains("このホロメン")) {
+            return fallbackSelfCardInstanceId;
+        }
+        return null;
     }
 
     /**
@@ -1038,15 +1607,31 @@ public class MatchEffectService {
         List<Long> selectedCardInstanceIds
     ) {
         String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String searchSourceZone = resolveSearchSourceZone(effectNode, rawText);
+        boolean searchFromDeck = "DECK".equals(searchSourceZone);
         int requestedCount = resolveSearchCount(effectNode);
         int searchCount = Math.max(requestedCount, 1);
         SearchCriteria criteria = resolveSearchCriteria(effectNode);
         int lookTopCount = resolveSearchLookTopCount(effectNode, rawText);
-        boolean requiresDeckBottomReorder = lookTopCount > 0 && rawText.contains("好きな順でデッキの下に戻す");
+        boolean archiveUnselectedTopWindow = toBoolean(
+            readBoolean(
+                effectNode,
+                "archiveUnselectedTopWindow",
+                "archiveRemainingTopWindow",
+                "archiveRemainder"
+            )
+        );
+        boolean requiresDeckBottomReorder =
+            searchFromDeck
+                && lookTopCount > 0
+                && rawText.contains("好きな順でデッキの下に戻す");
 
-        List<Map<String, Object>> searchPool = lookTopCount > 0
-            ? loadTopDeckWindow(matchId, userId, lookTopCount)
-            : loadSearchCandidates(matchId, userId, criteria);
+        List<Map<String, Object>> searchPool;
+        if (searchFromDeck && lookTopCount > 0) {
+            searchPool = loadTopDeckWindow(matchId, userId, lookTopCount);
+        } else {
+            searchPool = loadCandidatesFromZone(matchId, userId, searchSourceZone, criteria, false);
+        }
         List<Map<String, Object>> candidates = lookTopCount > 0
             ? filterCandidatesByCriteria(searchPool, criteria)
             : searchPool;
@@ -1071,12 +1656,13 @@ public class MatchEffectService {
                 WHERE id = ?
                   AND match_id = ?
                   AND owner_user_id = ?
-                  AND zone = 'DECK'
+                  AND zone = ?
                 """,
                 nextHandOrder++,
                 cardInstanceId,
                 matchId,
-                userId
+                userId,
+                searchSourceZone
             );
             if (updated != 1) {
                 continue;
@@ -1085,15 +1671,49 @@ public class MatchEffectService {
             movedCardIds.add(cardId);
         }
 
-        List<Map<String, Object>> reorderCandidates = new ArrayList<>();
-        if (requiresDeckBottomReorder) {
-            Set<Long> selectedIds = new LinkedHashSet<>();
-            for (Map<String, Object> row : selected) {
-                Long id = asLong(row.get("id"));
-                if (id != null && id > 0) {
-                    selectedIds.add(id);
-                }
+        Set<Long> selectedIds = new LinkedHashSet<>();
+        for (Map<String, Object> row : selected) {
+            Long id = asLong(row.get("id"));
+            if (id != null && id > 0) {
+                selectedIds.add(id);
             }
+        }
+
+        List<Map<String, Object>> reorderCandidates = new ArrayList<>();
+        List<Long> archivedRemainderCardInstanceIds = new ArrayList<>();
+        List<String> archivedRemainderCardIds = new ArrayList<>();
+        if (archiveUnselectedTopWindow && searchFromDeck && lookTopCount > 0) {
+            int nextArchiveOrder = nextZoneOrder(matchId, userId, "ARCHIVE");
+            for (Map<String, Object> row : searchPool) {
+                Long id = asLong(row.get("id"));
+                if (id == null || selectedIds.contains(id)) {
+                    continue;
+                }
+                String cardId = asText(row.get("card_id"));
+                int updated = jdbcTemplate.update(
+                    """
+                    UPDATE match_cards
+                    SET zone = 'ARCHIVE',
+                        order_index = ?,
+                        is_face_down = FALSE,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                      AND match_id = ?
+                      AND owner_user_id = ?
+                      AND zone = 'DECK'
+                    """,
+                    nextArchiveOrder++,
+                    id,
+                    matchId,
+                    userId
+                );
+                if (updated != 1) {
+                    continue;
+                }
+                archivedRemainderCardInstanceIds.add(id);
+                archivedRemainderCardIds.add(cardId);
+            }
+        } else if (requiresDeckBottomReorder) {
             for (Map<String, Object> row : searchPool) {
                 Long id = asLong(row.get("id"));
                 if (id == null || selectedIds.contains(id)) {
@@ -1122,7 +1742,12 @@ public class MatchEffectService {
         summary.put("candidateCount", candidates.size());
         summary.put("searchPoolCount", searchPool.size());
         summary.put("lookTopCount", lookTopCount);
+        summary.put("searchSourceZone", searchSourceZone);
         summary.put("searchApplied", movedCardInstanceIds.size());
+        summary.put("archiveUnselectedTopWindow", archiveUnselectedTopWindow);
+        summary.put("archiveRemainderApplied", archivedRemainderCardInstanceIds.size());
+        summary.put("archiveRemainderCardInstanceIds", archivedRemainderCardInstanceIds);
+        summary.put("archiveRemainderCardIds", archivedRemainderCardIds);
         summary.put("selectedByClient", selectedCardInstanceIds != null && !selectedCardInstanceIds.isEmpty());
         summary.put("searchedCardInstanceIds", movedCardInstanceIds);
         summary.put("searchedCardIds", movedCardIds);
@@ -1941,42 +2566,98 @@ public class MatchEffectService {
         String colorFilter = resolveCheerColorFilter(rawText);
         int requestedCount = resolveActionCount(effectNode, "エールデッキの下に戻", 1);
         int returnCount = Math.max(requestedCount, 1);
+        boolean fromStageAttachedCheer = rawText.contains("ステージのエール");
 
-        List<Map<String, Object>> candidates = jdbcTemplate.query(
-            """
-            SELECT mc.id, mc.card_id, cc.color
-            FROM match_cards mc
-            JOIN cheer_cards cc ON cc.card_id = mc.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.zone = 'ARCHIVE'
-              AND (? = '' OR cc.color = ?)
-            ORDER BY mc.order_index NULLS LAST, mc.id
-            LIMIT ?
-            """,
-            (rs, rowNum) -> {
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", rs.getLong("id"));
-                row.put("card_id", rs.getString("card_id"));
-                row.put("color", rs.getString("color"));
-                return row;
-            },
-            matchId,
-            userId,
-            nullToEmpty(colorFilter),
-            nullToEmpty(colorFilter),
-            returnCount
-        );
+        List<Map<String, Object>> candidates;
+        if (fromStageAttachedCheer) {
+            candidates = jdbcTemplate.query(
+                """
+                SELECT hc.id AS cheer_row_id,
+                       hc.cheer_card_id AS card_id,
+                       cc.color
+                FROM match_holomem_cheers hc
+                JOIN match_holomems h ON h.id = hc.match_holomem_id
+                JOIN cheer_cards cc ON cc.card_id = hc.cheer_card_id
+                WHERE h.match_id = ?
+                  AND h.owner_user_id = ?
+                  AND (? = '' OR cc.color = ?)
+                ORDER BY hc.id
+                LIMIT ?
+                """,
+                (rs, rowNum) -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("cheer_row_id", rs.getLong("cheer_row_id"));
+                    row.put("card_id", rs.getString("card_id"));
+                    row.put("color", rs.getString("color"));
+                    return row;
+                },
+                matchId,
+                userId,
+                nullToEmpty(colorFilter),
+                nullToEmpty(colorFilter),
+                returnCount
+            );
+        } else {
+            candidates = jdbcTemplate.query(
+                """
+                SELECT mc.id, mc.card_id, cc.color
+                FROM match_cards mc
+                JOIN cheer_cards cc ON cc.card_id = mc.card_id
+                WHERE mc.match_id = ?
+                  AND mc.owner_user_id = ?
+                  AND mc.zone = 'ARCHIVE'
+                  AND (? = '' OR cc.color = ?)
+                ORDER BY mc.order_index NULLS LAST, mc.id
+                LIMIT ?
+                """,
+                (rs, rowNum) -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", rs.getLong("id"));
+                    row.put("card_id", rs.getString("card_id"));
+                    row.put("color", rs.getString("color"));
+                    return row;
+                },
+                matchId,
+                userId,
+                nullToEmpty(colorFilter),
+                nullToEmpty(colorFilter),
+                returnCount
+            );
+        }
 
         List<Long> movedCardInstanceIds = new ArrayList<>();
         List<String> movedCardIds = new ArrayList<>();
         int nextCheerDeckOrder = nextZoneOrder(matchId, userId, "CHEER_DECK");
         for (Map<String, Object> row : candidates) {
-            Long cardInstanceId = asLong(row.get("id"));
             String cardId = asText(row.get("card_id"));
-            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
+            if (!StringUtils.hasText(cardId)) {
                 continue;
             }
+            Long cardInstanceId;
+            if (fromStageAttachedCheer) {
+                cardInstanceId = jdbcTemplate.query(
+                    """
+                    SELECT id
+                    FROM match_cards
+                    WHERE match_id = ?
+                      AND owner_user_id = ?
+                      AND zone = 'STAGE'
+                      AND card_id = ?
+                    ORDER BY id
+                    LIMIT 1
+                    """,
+                    rs -> rs.next() ? rs.getLong("id") : null,
+                    matchId,
+                    userId,
+                    cardId
+                );
+            } else {
+                cardInstanceId = asLong(row.get("id"));
+            }
+            if (cardInstanceId == null || cardInstanceId <= 0) {
+                continue;
+            }
+            String sourceZone = fromStageAttachedCheer ? "STAGE" : "ARCHIVE";
             int moved = jdbcTemplate.update(
                 """
                 UPDATE match_cards
@@ -1987,15 +2668,28 @@ public class MatchEffectService {
                 WHERE id = ?
                   AND match_id = ?
                   AND owner_user_id = ?
-                  AND zone = 'ARCHIVE'
+                  AND zone = ?
                 """,
                 nextCheerDeckOrder++,
                 cardInstanceId,
                 matchId,
-                userId
+                userId,
+                sourceZone
             );
             if (moved != 1) {
                 continue;
+            }
+            if (fromStageAttachedCheer) {
+                Long cheerRowId = asLong(row.get("cheer_row_id"));
+                if (cheerRowId != null && cheerRowId > 0) {
+                    jdbcTemplate.update(
+                        """
+                        DELETE FROM match_holomem_cheers
+                        WHERE id = ?
+                        """,
+                        cheerRowId
+                    );
+                }
             }
             movedCardInstanceIds.add(cardInstanceId);
             movedCardIds.add(cardId);
@@ -2003,6 +2697,7 @@ public class MatchEffectService {
 
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
+        summary.put("sourceZone", fromStageAttachedCheer ? "STAGE" : "ARCHIVE");
         summary.put("returnRequested", returnCount);
         summary.put("returnApplied", movedCardInstanceIds.size());
         summary.put("colorFilter", colorFilter);
@@ -2269,6 +2964,7 @@ public class MatchEffectService {
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
+        String sourceZone = resolveMoveToHolopowerSourceZone(effectNode, rawText);
         int requestedCount = resolveActionCount(effectNode, "ホロパワー", 1);
         int moveCount = Math.max(requestedCount, 1);
 
@@ -2280,13 +2976,14 @@ public class MatchEffectService {
                 FROM match_cards
                 WHERE match_id = ?
                   AND owner_user_id = ?
-                  AND zone = 'DECK'
+                  AND zone = ?
                 ORDER BY order_index NULLS LAST, id
                 LIMIT 1
                 """,
                 rs -> rs.next() ? rs.getLong("id") : null,
                 matchId,
-                userId
+                userId,
+                sourceZone
             );
             if (deckCardInstanceId == null) {
                 break;
@@ -2302,12 +2999,13 @@ public class MatchEffectService {
                 WHERE id = ?
                   AND match_id = ?
                   AND owner_user_id = ?
-                  AND zone = 'DECK'
+                  AND zone = ?
                 """,
                 nextOrder,
                 deckCardInstanceId,
                 matchId,
-                userId
+                userId,
+                sourceZone
             );
             if (moved == 1) {
                 movedCardInstanceIds.add(deckCardInstanceId);
@@ -2316,6 +3014,7 @@ public class MatchEffectService {
 
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
+        summary.put("sourceZone", sourceZone);
         summary.put("moveRequested", moveCount);
         summary.put("moveApplied", movedCardInstanceIds.size());
         summary.put("movedCardInstanceIds", movedCardInstanceIds);
@@ -2422,7 +3121,14 @@ public class MatchEffectService {
         }
 
         int currentTurn = resolveCurrentTurnNumber(matchId);
-        Map<String, Object> downEventSummary = executeDownEvent(matchId, userId, opponentUserId, targetCardId, currentTurn);
+        Map<String, Object> downEventSummary = executeDownEvent(
+            matchId,
+            userId,
+            opponentUserId,
+            targetCardId,
+            currentTurn,
+            true
+        );
         List<Long> lostLifeCardInstanceIds = extractLostLifeCardInstanceIds(downEventSummary);
 
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -3125,13 +3831,40 @@ public class MatchEffectService {
         String targetType,
         Long targetHolomemCardInstanceId
     ) {
-        Long targetHolomemId = resolveEffectTargetHolomemId(
-            matchId,
-            userId,
-            targetType,
-            targetHolomemCardInstanceId,
-            false
-        );
+        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        boolean preferSelfBackTarget =
+            !isOpponentTargetType(normalize(targetType))
+                && StringUtils.hasText(rawText)
+                && rawText.contains("バックホロメン");
+
+        Long targetHolomemId;
+        if (preferSelfBackTarget) {
+            targetHolomemId = jdbcTemplate.query(
+                """
+                SELECT id
+                FROM match_holomems
+                WHERE match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'BACK'
+                ORDER BY id
+                LIMIT 1
+                """,
+                rs -> rs.next() ? rs.getLong("id") : null,
+                matchId,
+                userId
+            );
+            if (targetHolomemId == null) {
+                return executeNoOpEffect(effectType, effectNode, "找不到可附加的 BACK Holomem");
+            }
+        } else {
+            targetHolomemId = resolveEffectTargetHolomemId(
+                matchId,
+                userId,
+                targetType,
+                targetHolomemCardInstanceId,
+                false
+            );
+        }
         if (targetHolomemId == null) {
             throw new IllegalStateException("ADD_CHEER 需要指定可用的我方 Holomen");
         }
@@ -3205,6 +3938,134 @@ public class MatchEffectService {
         summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
         summary.put("attachedCheerCardInstanceIds", attachedCardInstanceIds);
         summary.put("sourceZones", sourceZones);
+        return summary;
+    }
+
+    /**
+     * 將目標 Holomem 疊卡中的指定等級卡片歸檔（常用於 Bloom 前置成本）。
+     */
+    private Map<String, Object> executeArchiveStackCardEffect(
+        Long matchId,
+        Long userId,
+        String effectType,
+        JsonNode effectNode,
+        Long selfHolomemCardInstanceId
+    ) {
+        Long targetHolomemId = resolveEffectTargetHolomemId(
+            matchId,
+            userId,
+            "SELF",
+            selfHolomemCardInstanceId,
+            false
+        );
+        if (targetHolomemId == null || targetHolomemId <= 0) {
+            return executeNoOpEffect(effectType, effectNode, "找不到可支付疊卡成本的 Holomem");
+        }
+
+        int archiveRequested = extractInt(effectNode, 1, "stackArchiveCount", "archiveCount", "stackCostCount", "costCount");
+        if (archiveRequested <= 0) {
+            archiveRequested = 1;
+        }
+        String requiredLevelType = normalizeLevelType(extractText(effectNode, "stackCostLevelType", "costLevelType"));
+        if (!StringUtils.hasText(requiredLevelType)) {
+            requiredLevelType = "DEBUT";
+        }
+
+        Long topCardInstanceId = selfHolomemCardInstanceId != null
+            ? selfHolomemCardInstanceId
+            : resolveHolomemCardInstanceId(targetHolomemId);
+        List<Map<String, Object>> candidates = jdbcTemplate.query(
+            """
+            SELECT s.match_card_id,
+                   mc.card_id,
+                   UPPER(COALESCE(m.level_type, '')) AS level_type
+            FROM match_holomem_stack_cards s
+            JOIN match_cards mc ON mc.id = s.match_card_id
+            LEFT JOIN member_cards m ON m.card_id = mc.card_id
+            WHERE s.match_holomem_id = ?
+              AND mc.match_id = ?
+              AND mc.owner_user_id = ?
+              AND s.match_card_id <> COALESCE(?, -1)
+            ORDER BY s.stack_order DESC, s.id DESC
+            """,
+            (rs, rowNum) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("match_card_id", rs.getLong("match_card_id"));
+                row.put("card_id", rs.getString("card_id"));
+                row.put("level_type", rs.getString("level_type"));
+                return row;
+            },
+            targetHolomemId,
+            matchId,
+            userId,
+            topCardInstanceId
+        );
+
+        List<Map<String, Object>> selected = new ArrayList<>();
+        for (Map<String, Object> candidate : candidates) {
+            String levelType = normalizeLevelType(asText(candidate.get("level_type")));
+            if (!requiredLevelType.equals(levelType)) {
+                continue;
+            }
+            selected.add(candidate);
+            if (selected.size() >= archiveRequested) {
+                break;
+            }
+        }
+
+        List<Long> archivedStackCardInstanceIds = new ArrayList<>();
+        List<String> archivedStackCardIds = new ArrayList<>();
+        for (Map<String, Object> candidate : selected) {
+            Long stackCardInstanceId = asLong(candidate.get("match_card_id"));
+            if (stackCardInstanceId == null || stackCardInstanceId <= 0) {
+                continue;
+            }
+            int archiveOrder = nextZoneOrder(matchId, userId, "ARCHIVE");
+            int updated = jdbcTemplate.update(
+                """
+                UPDATE match_cards
+                SET zone = 'ARCHIVE',
+                    order_index = ?,
+                    is_face_down = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND match_id = ?
+                  AND owner_user_id = ?
+                """,
+                archiveOrder,
+                stackCardInstanceId,
+                matchId,
+                userId
+            );
+            if (updated != 1) {
+                continue;
+            }
+            jdbcTemplate.update(
+                """
+                DELETE FROM match_holomem_stack_cards
+                WHERE match_holomem_id = ?
+                  AND match_card_id = ?
+                """,
+                targetHolomemId,
+                stackCardInstanceId
+            );
+            archivedStackCardInstanceIds.add(stackCardInstanceId);
+            archivedStackCardIds.add(asText(candidate.get("card_id")));
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", effectType);
+        summary.put("archiveRequested", archiveRequested);
+        summary.put("archiveApplied", archivedStackCardInstanceIds.size());
+        summary.put("requiredLevelType", requiredLevelType);
+        summary.put("targetHolomemId", targetHolomemId);
+        summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
+        summary.put("archivedStackCardInstanceIds", archivedStackCardInstanceIds);
+        summary.put("archivedStackCardIds", archivedStackCardIds);
+        summary.put("applied", !archivedStackCardInstanceIds.isEmpty());
+        if (archivedStackCardInstanceIds.isEmpty()) {
+            summary.put("reason", "沒有可歸檔的重疊 " + requiredLevelType + " 卡片");
+        }
         return summary;
     }
 
@@ -3378,8 +4239,16 @@ public class MatchEffectService {
                     lostLifeCardInstanceIds.add(lostLifeCardInstanceId);
                 }
             }
-            downEventSummary = executeDownEvent(matchId, userId, targetOwnerUserId, targetCardId, currentTurn);
-            if (toBoolean(downEventSummary.get("lifeReduced"))) {
+            boolean deferDownEvent = effectNode != null && effectNode.path("deferDownEvent").asBoolean(false);
+            downEventSummary = executeDownEvent(
+                matchId,
+                userId,
+                targetOwnerUserId,
+                targetCardId,
+                currentTurn,
+                !deferDownEvent
+            );
+            if (!deferDownEvent && toBoolean(downEventSummary.get("lifeReduced"))) {
                 lifeReduced = true;
                 lostLifeCardInstanceIds.addAll(extractLostLifeCardInstanceIds(downEventSummary));
             }
@@ -4252,6 +5121,23 @@ public class MatchEffectService {
         bloomEffectPayload.put("type", "UNIMPLEMENTED");
         bloomEffectPayload.put("effects", effectTypes);
         bloomEffectPayload.put("rawText", bloomText);
+        String normalizedCardId = normalize(bloomCardId);
+        if (normalizedCardId.startsWith("HSD02-007")) {
+            bloomEffectPayload.put("effects", List.of("SEARCH"));
+            bloomEffectPayload.put("value", 1);
+            bloomEffectPayload.put("lookTopCount", 2);
+            bloomEffectPayload.put("searchSourceZone", "DECK");
+            bloomEffectPayload.put("archiveUnselectedTopWindow", true);
+            effectTypes = List.of("SEARCH");
+        }
+        if (normalizedCardId.startsWith("HSD13-011")) {
+            bloomEffectPayload.put("effects", List.of("ARCHIVE_STACK_CARD", "DAMAGE"));
+            bloomEffectPayload.put("stackArchiveCount", 1);
+            bloomEffectPayload.put("stackCostLevelType", "DEBUT");
+            bloomEffectPayload.put("value", 20);
+            bloomEffectPayload.put("damageTargetZone", "COLLAB");
+            effectTypes = List.of("ARCHIVE_STACK_CARD", "DAMAGE");
+        }
         if (diceRoll != null) {
             bloomEffectPayload.put("diceRoll", diceRoll);
         }
@@ -4298,6 +5184,345 @@ public class MatchEffectService {
             collabText,
             diceRoll
         );
+    }
+
+    /**
+     * 解析 Collab 效果計畫（含場況條件修正）。
+     */
+    private BloomEffectPlan resolveCollabEffectPlan(String collabCardId, CollabRuntimeContext runtimeContext) {
+        BloomEffectPlan basePlan = resolveCollabEffectPlan(collabCardId);
+        if (basePlan == null || !basePlan.hasBloomEffect()) {
+            return basePlan;
+        }
+        if (!StringUtils.hasText(collabCardId) || runtimeContext == null) {
+            return basePlan;
+        }
+        String normalizedCardId = normalize(collabCardId);
+        List<String> adjustedEffects = new ArrayList<>(basePlan.effectTypes());
+        ObjectNode adjustedNode = mutableEffectNode(basePlan.effectNode());
+
+        // HSD01-015：依 CENTER 夥伴分支，只能二擇一，不可同時套用。
+        if (normalizedCardId.startsWith("HSD01-015")) {
+            if (isCenterAzki(runtimeContext)) {
+                adjustedEffects = List.of("ADD_CHEER");
+                adjustedNode.set("effects", objectMapper.valueToTree(adjustedEffects));
+                if (runtimeContext.centerHolomemCardInstanceId() != null) {
+                    adjustedNode.put("targetHolomemCardInstanceId", runtimeContext.centerHolomemCardInstanceId());
+                }
+                return new BloomEffectPlan(true, adjustedEffects, adjustedNode, basePlan.rawText(), basePlan.diceRoll());
+            }
+            if (isCenterTokinoSora(runtimeContext)) {
+                adjustedEffects = List.of("DRAW");
+                adjustedNode.set("effects", objectMapper.valueToTree(adjustedEffects));
+                if (!adjustedNode.has("value") && !adjustedNode.has("cards") && !adjustedNode.has("amount")) {
+                    adjustedNode.put("value", 1);
+                }
+                return new BloomEffectPlan(true, adjustedEffects, adjustedNode, basePlan.rawText(), basePlan.diceRoll());
+            }
+            return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), basePlan.rawText(), basePlan.diceRoll());
+        }
+
+        // HSD13-009：僅後攻玩家第一回合可觸發。
+        if (normalizedCardId.startsWith("HSD13-009") && !runtimeContext.secondPlayerFirstTurn()) {
+            return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), basePlan.rawText(), basePlan.diceRoll());
+        }
+
+        // HSD01-009：骰值 <=4 才送 cheer；骰值 =1 時才可再把本體移回 BACK。
+        if (normalizedCardId.startsWith("HSD01-009")) {
+            LinkedHashSet<String> reorderedEffects = new LinkedHashSet<>();
+            reorderedEffects.add("ADD_CHEER");
+            reorderedEffects.add("MOVE_ZONE");
+            adjustedEffects = new ArrayList<>(reorderedEffects);
+            adjustedNode.set("effects", objectMapper.valueToTree(adjustedEffects));
+            adjustedNode.put("moveTargetType", "SELF");
+            if (runtimeContext.selfHolomemCardInstanceId() != null) {
+                adjustedNode.put("moveTargetHolomemCardInstanceId", runtimeContext.selfHolomemCardInstanceId());
+            }
+            if (runtimeContext.firstBackHolomemCardInstanceId() != null) {
+                adjustedNode.put("targetHolomemCardInstanceId", runtimeContext.firstBackHolomemCardInstanceId());
+            }
+            ObjectNode diceConditions = objectMapper.createObjectNode();
+            diceConditions.put("ADD_CHEER", "AT_MOST_4");
+            diceConditions.put("MOVE_ZONE", "EXACT_1");
+            adjustedNode.set("effectDiceConditions", diceConditions);
+            return new BloomEffectPlan(true, adjustedEffects, adjustedNode, basePlan.rawText(), basePlan.diceRoll());
+        }
+
+        // HBP01-031：從 HOLOPOWER 選 1 入手，再把牌庫頂 1 張送去 HOLOPOWER。
+        if (normalizedCardId.startsWith("HBP01-031")) {
+            adjustedEffects = List.of("LOOK_HOLOPOWER", "SEARCH", "MOVE_TO_HOLOPOWER");
+            adjustedNode.set("effects", objectMapper.valueToTree(adjustedEffects));
+            adjustedNode.put("searchSourceZone", "HOLOPOWER");
+            adjustedNode.put("value", 1);
+            return new BloomEffectPlan(true, adjustedEffects, adjustedNode, basePlan.rawText(), basePlan.diceRoll());
+        }
+
+        // HSD04-011：看 HOLOPOWER 取 1 入手，再從手牌送 1 到 HOLOPOWER。
+        if (normalizedCardId.startsWith("HSD04-011")) {
+            adjustedEffects = List.of("LOOK_HOLOPOWER", "SEARCH", "MOVE_TO_HOLOPOWER");
+            adjustedNode.set("effects", objectMapper.valueToTree(adjustedEffects));
+            adjustedNode.put("searchSourceZone", "HOLOPOWER");
+            adjustedNode.put("holopowerSourceZone", "HAND");
+            adjustedNode.put("value", 1);
+            return new BloomEffectPlan(true, adjustedEffects, adjustedNode, basePlan.rawText(), basePlan.diceRoll());
+        }
+
+        // HBP06-078：先支付「此卡附屬エール 1」成本，再搜尋與推し同名 Debut。
+        if (normalizedCardId.startsWith("HBP06-078")) {
+            if (!StringUtils.hasText(runtimeContext.oshiCardName())) {
+                return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), basePlan.rawText(), basePlan.diceRoll());
+            }
+            adjustedEffects = List.of("REMOVE_CHEER", "SEARCH");
+            adjustedNode.set("effects", objectMapper.valueToTree(adjustedEffects));
+            adjustedNode.put("value", 1);
+            adjustedNode.put("searchSourceZone", "DECK");
+            if (runtimeContext.selfHolomemCardInstanceId() != null) {
+                adjustedNode.put("targetHolomemCardInstanceId", runtimeContext.selfHolomemCardInstanceId());
+            }
+            ObjectNode criteriaNode = adjustedNode.putObject("searchCriteria");
+            criteriaNode.put("cardType", "MEMBER");
+            criteriaNode.put("levelType", "DEBUT");
+            criteriaNode.put("nameContains", runtimeContext.oshiCardName());
+            return new BloomEffectPlan(true, adjustedEffects, adjustedNode, basePlan.rawText(), basePlan.diceRoll());
+        }
+
+        // HSD10-008：只有看到對手手牌中有 SUPPORT 時才追加 DRAW。
+        if (normalizedCardId.startsWith("HSD10-008") && !runtimeContext.opponentHandHasSupport()) {
+            adjustedEffects.removeIf("DRAW"::equals);
+            if (adjustedEffects.isEmpty()) {
+                return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), basePlan.rawText(), basePlan.diceRoll());
+            }
+            adjustedNode.set("effects", objectMapper.valueToTree(adjustedEffects));
+            return new BloomEffectPlan(true, adjustedEffects, adjustedNode, basePlan.rawText(), basePlan.diceRoll());
+        }
+
+        // HSD13-015：先退回場上エール；若場上無可退回エール則整段不觸發。
+        if (normalizedCardId.startsWith("HSD13-015") && runtimeContext.ownedStageCheerCount() <= 0) {
+            return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), basePlan.rawText(), basePlan.diceRoll());
+        }
+
+        // HSD10-009：查看牌庫頂張數 = 對手目前手牌張數（至少 1，避免空查詢退化）。
+        if (normalizedCardId.startsWith("HSD10-009")) {
+            int lookTopCount = Math.max(runtimeContext.opponentHandCount(), 1);
+            adjustedNode.put("lookTopCount", lookTopCount);
+            if (!adjustedEffects.contains("SEARCH")) {
+                adjustedEffects.add(0, "SEARCH");
+            }
+            adjustedNode.set("effects", objectMapper.valueToTree(adjustedEffects));
+            return new BloomEffectPlan(true, adjustedEffects, adjustedNode, basePlan.rawText(), basePlan.diceRoll());
+        }
+
+        return basePlan;
+    }
+
+    /**
+     * 載入 Collab 規則判斷所需場況（回合、CENTER 搭檔、對手手牌資訊）。
+     */
+    private CollabRuntimeContext loadCollabRuntimeContext(
+        Long matchId,
+        Long userId,
+        Long selfHolomemCardInstanceId
+    ) {
+        if (matchId == null || userId == null) {
+            return new CollabRuntimeContext(
+                selfHolomemCardInstanceId,
+                1,
+                false,
+                null,
+                null,
+                null,
+                null,
+                null,
+                0,
+                false,
+                0
+            );
+        }
+
+        Map<String, Object> matchRow = jdbcTemplate.query(
+            """
+            SELECT turn_number, player_a_id, player_b_id
+            FROM matches
+            WHERE id = ?
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("turn_number", rs.getObject("turn_number"));
+                row.put("player_a_id", rs.getObject("player_a_id"));
+                row.put("player_b_id", rs.getObject("player_b_id"));
+                return row;
+            },
+            matchId
+        );
+
+        int turnNumber = 1;
+        boolean secondPlayerFirstTurn = false;
+        if (matchRow != null) {
+            turnNumber = Math.max(1, asInt(matchRow.get("turn_number")));
+            Long playerBId = asLong(matchRow.get("player_b_id"));
+            secondPlayerFirstTurn = turnNumber == 2 && userId.equals(playerBId);
+        }
+
+        Map<String, Object> centerRow = jdbcTemplate.query(
+            """
+            SELECT h.match_card_id, h.card_id, c.name
+            FROM match_holomems h
+            LEFT JOIN cards c ON c.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone = 'CENTER'
+            ORDER BY h.id
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("match_card_id", rs.getObject("match_card_id"));
+                row.put("card_id", rs.getString("card_id"));
+                row.put("name", rs.getString("name"));
+                return row;
+            },
+            matchId,
+            userId
+        );
+
+        String oshiCardName = jdbcTemplate.query(
+            """
+            SELECT c.name
+            FROM match_players mp
+            JOIN cards c ON c.card_id = mp.oshi_card_id
+            WHERE mp.match_id = ?
+              AND mp.user_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("name") : null,
+            matchId,
+            userId
+        );
+
+        Long firstBackHolomemCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT h.match_card_id
+            FROM match_holomems h
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone = 'BACK'
+            ORDER BY h.id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("match_card_id") : null,
+            matchId,
+            userId
+        );
+
+        Long opponentUserId = resolveOpponentUserId(matchId, userId);
+        int opponentHandCount = 0;
+        boolean opponentHandHasSupport = false;
+        int ownedStageCheerCount = 0;
+        if (opponentUserId != null && opponentUserId > 0) {
+            Integer handCount = jdbcTemplate.query(
+                """
+                SELECT COUNT(*)
+                FROM match_cards
+                WHERE match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'HAND'
+                """,
+                rs -> rs.next() ? rs.getInt(1) : 0,
+                matchId,
+                opponentUserId
+            );
+            Integer supportCount = jdbcTemplate.query(
+                """
+                SELECT COUNT(*)
+                FROM match_cards mc
+                JOIN cards c ON c.card_id = mc.card_id
+                WHERE mc.match_id = ?
+                  AND mc.owner_user_id = ?
+                  AND mc.zone = 'HAND'
+                  AND c.card_type = 'SUPPORT'
+                """,
+                rs -> rs.next() ? rs.getInt(1) : 0,
+                matchId,
+                opponentUserId
+            );
+            opponentHandCount = handCount == null ? 0 : Math.max(handCount, 0);
+            opponentHandHasSupport = supportCount != null && supportCount > 0;
+        }
+        Integer stageCheerCount = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_holomem_cheers hc
+            JOIN match_holomems h ON h.id = hc.match_holomem_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            userId
+        );
+        ownedStageCheerCount = stageCheerCount == null ? 0 : Math.max(stageCheerCount, 0);
+
+        return new CollabRuntimeContext(
+            selfHolomemCardInstanceId,
+            turnNumber,
+            secondPlayerFirstTurn,
+            centerRow == null ? null : asLong(centerRow.get("match_card_id")),
+            centerRow == null ? null : asText(centerRow.get("card_id")),
+            centerRow == null ? null : asText(centerRow.get("name")),
+            oshiCardName,
+            firstBackHolomemCardInstanceId,
+            opponentHandCount,
+            opponentHandHasSupport,
+            ownedStageCheerCount
+        );
+    }
+
+    /**
+     * 轉成可編輯 ObjectNode，保留既有欄位內容。
+     */
+    private ObjectNode mutableEffectNode(JsonNode effectNode) {
+        if (effectNode instanceof ObjectNode objectNode) {
+            return objectNode.deepCopy();
+        }
+        ObjectNode node = objectMapper.createObjectNode();
+        if (effectNode != null && !effectNode.isNull()) {
+            node.set("sourceEffect", effectNode);
+        }
+        return node;
+    }
+
+    /**
+     * 判斷 CENTER 是否為 AZKi（以卡號或名稱辨識）。
+     */
+    private boolean isCenterAzki(CollabRuntimeContext runtimeContext) {
+        if (runtimeContext == null) {
+            return false;
+        }
+        String centerCardId = normalize(runtimeContext.centerHolomemCardId());
+        String centerName = normalize(runtimeContext.centerHolomemName());
+        return centerCardId.contains("AZKI") || centerName.contains("AZKI");
+    }
+
+    /**
+     * 判斷 CENTER 是否為ときのそら（以卡號或名稱辨識）。
+     */
+    private boolean isCenterTokinoSora(CollabRuntimeContext runtimeContext) {
+        if (runtimeContext == null) {
+            return false;
+        }
+        String centerCardId = normalize(runtimeContext.centerHolomemCardId());
+        String centerNameRaw = runtimeContext.centerHolomemName() == null ? "" : runtimeContext.centerHolomemName();
+        String centerName = normalize(centerNameRaw);
+        return centerCardId.contains("TOKINO") && centerCardId.contains("SORA")
+            || centerCardId.contains("TOKINOSORA")
+            || centerName.contains("TOKINO") && centerName.contains("SORA")
+            || centerNameRaw.contains("ときのそら");
     }
 
     /**
@@ -4577,6 +5802,9 @@ public class MatchEffectService {
         if (text.contains("エールデッキに戻")) {
             effectTypes.add("RETURN_CHEER_TO_DECK_BOTTOM");
         }
+        if (text.contains("エール") && (text.contains("アーカイブできる") || text.contains("アーカイブする"))) {
+            effectTypes.add("REMOVE_CHEER");
+        }
         if (text.contains("手札") && text.contains("アーカイブする")) {
             effectTypes.add("DISCARD_HAND");
         }
@@ -4774,6 +6002,46 @@ public class MatchEffectService {
             }
         }
         return 0;
+    }
+
+    /**
+     * 解析 SEARCH 的來源區，預設為 DECK，可由 effectNode 或文案覆寫。
+     */
+    private String resolveSearchSourceZone(JsonNode effectNode, String rawText) {
+        String explicit = normalizeEffectType(readText(effectNode, "searchSourceZone", "sourceZone", "searchFromZone"));
+        if ("DECK".equals(explicit) || "ARCHIVE".equals(explicit) || "HOLOPOWER".equals(explicit) || "HAND".equals(explicit)) {
+            return explicit;
+        }
+        String text = normalizeDigits(rawText);
+        if (
+            text.contains("ホロパワー")
+                && (text.contains("見る") || text.contains("見"))
+                && text.contains("手札に加える")
+        ) {
+            return "HOLOPOWER";
+        }
+        if ((text.contains("アーカイブから") || text.contains("アーカイブにある")) && text.contains("手札に加える")) {
+            return "ARCHIVE";
+        }
+        return "DECK";
+    }
+
+    /**
+     * 解析 MOVE_TO_HOLOPOWER 的來源區，預設 DECK。
+     */
+    private String resolveMoveToHolopowerSourceZone(JsonNode effectNode, String rawText) {
+        String explicit = normalizeEffectType(readText(effectNode, "holopowerSourceZone", "moveSourceZone", "sourceZone"));
+        if ("DECK".equals(explicit) || "ARCHIVE".equals(explicit) || "HAND".equals(explicit)) {
+            return explicit;
+        }
+        String text = normalizeDigits(rawText);
+        if (text.contains("手札") && text.contains("ホロパワーにする")) {
+            return "HAND";
+        }
+        if (text.contains("アーカイブ") && text.contains("ホロパワーにする")) {
+            return "ARCHIVE";
+        }
+        return "DECK";
     }
 
     /**
@@ -5583,6 +6851,36 @@ public class MatchEffectService {
                 }
                 if ("false".equals(normalized) || "0".equals(normalized) || "no".equals(normalized)) {
                     return false;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 依欄位順序讀取 Long，支援數字與數字字串。
+     */
+    private Long readLong(JsonNode node, String... fields) {
+        if (node == null || fields == null) {
+            return null;
+        }
+        for (String field : fields) {
+            JsonNode value = node.get(field);
+            if (value == null || value.isNull()) {
+                continue;
+            }
+            if (value.isIntegralNumber()) {
+                return value.asLong();
+            }
+            if (value.isTextual()) {
+                String text = value.asText();
+                if (!StringUtils.hasText(text)) {
+                    continue;
+                }
+                try {
+                    return Long.parseLong(text.trim());
+                } catch (NumberFormatException ignored) {
+                    // ignore invalid numeric token
                 }
             }
         }
@@ -6700,6 +7998,30 @@ public class MatchEffectService {
     }
 
     /**
+     * 取得對手 COLLAB 區位的 Holomem 卡片實例 id。
+     */
+    private Long resolveOpponentCollabCardInstanceId(Long matchId, Long userId) {
+        Long opponentUserId = resolveOpponentUserId(matchId, userId);
+        if (opponentUserId == null || opponentUserId <= 0) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT match_card_id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'COLLAB'
+            ORDER BY id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("match_card_id") : null,
+            matchId,
+            opponentUserId
+        );
+    }
+
+    /**
      * 執行一次失去生命：LIFE 頂牌移到 ARCHIVE，並同步扣減 current_life。
      */
     private Long loseLifeOnce(Long matchId, Long ownerUserId) {
@@ -6760,12 +8082,15 @@ public class MatchEffectService {
         Long actorUserId,
         Long downedOwnerUserId,
         String downedCardId,
-        int currentTurn
+        int currentTurn,
+        boolean applyLifeLoss
     ) {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("triggered", false);
         summary.put("effectType", "DOWN_EVENT");
         summary.put("downedCardId", downedCardId);
+        summary.put("downedOwnerUserId", downedOwnerUserId);
+        summary.put("turnNumber", currentTurn);
         if (matchId == null || downedOwnerUserId == null || !StringUtils.hasText(downedCardId)) {
             return summary;
         }
@@ -6789,26 +8114,29 @@ public class MatchEffectService {
             return summary;
         }
 
-        EffectContext context = new EffectContext(
-            matchId,
-            actorUserId,
-            Math.max(currentTurn, 1),
-            "DOWN_EVENT",
-            null,
-            downedCardId
-        );
-        ReduceLifeAction reduceLifeAction = new ReduceLifeAction(
-            downedOwnerUserId,
-            requestedLifeLoss,
-            "DOWN_EVENT_EXTRA_LIFE"
-        );
-        List<ActionResult> results = gameActionExecutor.execute(context, List.of(reduceLifeAction));
         List<Long> lostLifeCardInstanceIds = new ArrayList<>();
-        if (!results.isEmpty() && results.get(0).success()) {
-            lostLifeCardInstanceIds.addAll(extractLostLifeCardInstanceIds(results.get(0).details()));
+        if (applyLifeLoss) {
+            EffectContext context = new EffectContext(
+                matchId,
+                actorUserId,
+                Math.max(currentTurn, 1),
+                "DOWN_EVENT",
+                null,
+                downedCardId
+            );
+            ReduceLifeAction reduceLifeAction = new ReduceLifeAction(
+                downedOwnerUserId,
+                requestedLifeLoss,
+                "DOWN_EVENT_EXTRA_LIFE"
+            );
+            List<ActionResult> results = gameActionExecutor.execute(context, List.of(reduceLifeAction));
+            if (!results.isEmpty() && results.get(0).success()) {
+                lostLifeCardInstanceIds.addAll(extractLostLifeCardInstanceIds(results.get(0).details()));
+            }
         }
 
         summary.put("triggered", true);
+        summary.put("deferred", !applyLifeLoss);
         summary.put("rawText", extraText);
         summary.put("requestedLifeLoss", requestedLifeLoss);
         summary.put("appliedLifeLoss", lostLifeCardInstanceIds.size());
@@ -6972,6 +8300,26 @@ public class MatchEffectService {
             }
         }
         return merged.toString();
+    }
+
+    /**
+     * 為 DAMAGE 類效果補上 deferDownEvent 旗標，讓 down event 可延後至互動確認後再套用。
+     */
+    private JsonNode withDeferDownEventFlag(JsonNode effectNode, boolean deferDownEvent) {
+        if (!deferDownEvent) {
+            return effectNode;
+        }
+        ObjectNode node;
+        if (effectNode instanceof ObjectNode objectNode) {
+            node = objectNode.deepCopy();
+        } else {
+            node = objectMapper.createObjectNode();
+            if (effectNode != null && !effectNode.isNull()) {
+                node.set("sourceEffect", effectNode);
+            }
+        }
+        node.put("deferDownEvent", true);
+        return node;
     }
 
     /**
@@ -7196,6 +8544,16 @@ public class MatchEffectService {
     /**
      * 前端決策候選卡資料模型。
      */
+    public record TriggeredEffectPreview(
+        boolean hasEffect,
+        List<String> effectTypes,
+        String rawText,
+        Integer diceRoll
+    ) {}
+
+    /**
+     * 前端決策候選卡資料模型。
+     */
     public record DecisionCandidate(
         Long cardInstanceId,
         String cardId,
@@ -7203,6 +8561,23 @@ public class MatchEffectService {
         String cardType,
         String levelType,
         String zone
+    ) {}
+
+    /**
+     * Collab 效果場況上下文（供規則分支判斷使用）。
+     */
+    private record CollabRuntimeContext(
+        Long selfHolomemCardInstanceId,
+        int turnNumber,
+        boolean secondPlayerFirstTurn,
+        Long centerHolomemCardInstanceId,
+        String centerHolomemCardId,
+        String centerHolomemName,
+        String oshiCardName,
+        Long firstBackHolomemCardInstanceId,
+        int opponentHandCount,
+        boolean opponentHandHasSupport,
+        int ownedStageCheerCount
     ) {}
 
     /**

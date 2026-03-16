@@ -45,6 +45,9 @@ public class DeckService {
     private final DeckCardRepository deckCardRepository;
     private final CardRepository cardRepository;
 
+    /**
+     * 建立牌組服務，負責牌組 CRUD、驗證與預設套牌流程。
+     */
     public DeckService(
         DeckRepository deckRepository,
         DeckCardRepository deckCardRepository,
@@ -56,6 +59,9 @@ public class DeckService {
     }
 
     @Transactional(readOnly = true)
+    /**
+     * 取得使用者所有牌組摘要，依最後更新時間排序。
+     */
     public List<DeckSummaryResponse> listDeckSummaries(Long userId) {
         return deckRepository.findByUserIdOrderByUpdatedAtDesc(userId)
             .stream()
@@ -64,12 +70,18 @@ public class DeckService {
     }
 
     @Transactional(readOnly = true)
+    /**
+     * 取得指定牌組完整內容（含卡片明細）。
+     */
     public DeckDetailResponse getDeckDetail(Long userId, Long deckId) {
         DeckEntity deck = getDeck(userId, deckId);
         return toDetail(deck);
     }
 
     @Transactional
+    /**
+     * 建立新牌組，若尚無啟用中牌組則自動設為 active。
+     */
     public DeckDetailResponse createDeck(Long userId, String requestedName) {
         String normalizedName = normalizeDeckName(requestedName);
         String finalName = ensureUniqueDeckName(userId, normalizedName, null);
@@ -90,6 +102,9 @@ public class DeckService {
     }
 
     @Transactional
+    /**
+     * 重新命名牌組，並自動避免重名。
+     */
     public DeckDetailResponse renameDeck(Long userId, Long deckId, String newName) {
         DeckEntity deck = getDeck(userId, deckId);
         String normalizedName = normalizeDeckName(newName);
@@ -104,27 +119,25 @@ public class DeckService {
     }
 
     @Transactional
+    /**
+     * 啟用指定牌組，並停用同使用者其他牌組。
+     */
     public DeckDetailResponse activateDeck(Long userId, Long deckId) {
         DeckEntity targetDeck = getDeck(userId, deckId);
-        List<DeckEntity> userDecks = deckRepository.findByUserIdOrderByUpdatedAtDesc(userId);
-
         LocalDateTime now = LocalDateTime.now();
-        for (DeckEntity deck : userDecks) {
-            boolean shouldActive = deck.getId().equals(targetDeck.getId());
-            if (deck.isActive() != shouldActive) {
-                deck.setActive(shouldActive);
-                deck.setUpdatedAt(now);
-                if (shouldActive) {
-                    deck.setVersion(deck.getVersion() == null ? 1 : deck.getVersion() + 1);
-                }
-            }
-        }
+        deckRepository.deactivateAllByUserId(userId);
 
-        deckRepository.saveAll(userDecks);
+        targetDeck.setActive(true);
+        targetDeck.setUpdatedAt(now);
+        targetDeck.setVersion(targetDeck.getVersion() == null ? 1 : targetDeck.getVersion() + 1);
+        deckRepository.save(targetDeck);
         return toDetail(targetDeck);
     }
 
     @Transactional(readOnly = true)
+    /**
+     * 驗證指定牌組是否符合官方構築張數限制。
+     */
     public DeckValidationResponse validateDeck(Long userId, Long deckId) {
         DeckEntity deck = getDeck(userId, deckId);
         List<DeckCardEntity> deckCards = deckCardRepository.findByDeckIdOrderByCardIdAsc(deck.getId());
@@ -132,6 +145,9 @@ public class DeckService {
     }
 
     @Transactional(readOnly = true)
+    /**
+     * 取得目前啟用牌組的卡片列表。
+     */
     public List<DeckCardResponse> getActiveDeckCards(Long userId) {
         DeckEntity activeDeck = getOrCreateActiveDeck(userId);
         return deckCardRepository.findByDeckIdOrderByCardIdAsc(activeDeck.getId())
@@ -141,12 +157,18 @@ public class DeckService {
     }
 
     @Transactional
+    /**
+     * 更新啟用牌組中的單一卡片張數。
+     */
     public DeckCardResponse updateActiveDeckCard(Long userId, String cardId, int count) {
         DeckEntity activeDeck = getOrCreateActiveDeck(userId);
         return updateDeckCard(userId, activeDeck.getId(), cardId, count);
     }
 
     @Transactional
+    /**
+     * 更新指定牌組中的單一卡片張數，並套用卡片類型與上限驗證。
+     */
     public DeckCardResponse updateDeckCard(Long userId, Long deckId, String cardId, int count) {
         DeckEntity deck = getDeck(userId, deckId);
         String normalizedCardId = normalizeCardId(cardId);
@@ -197,11 +219,17 @@ public class DeckService {
     }
 
     @Transactional
+    /**
+     * 以預設策略快速建立可用牌組（預設 AUTO）。
+     */
     public List<DeckCardResponse> setupQuickDeck(Long userId) {
         return setupQuickDeck(userId, null);
     }
 
     @Transactional
+    /**
+     * 依指定預設碼快速建立牌組；若失敗則回退到 fallback 測試牌組。
+     */
     public List<DeckCardResponse> setupQuickDeck(Long userId, String presetCode) {
         DeckEntity activeDeck = getOrCreateActiveDeck(userId);
         deckCardRepository.deleteByDeckId(activeDeck.getId());
@@ -226,6 +254,9 @@ public class DeckService {
     }
 
     @Transactional(readOnly = true)
+    /**
+     * 列出可用的起始牌組預設選項。
+     */
     public List<StarterDeckPresetResponse> listStarterDeckPresets() {
         List<StarterDeckPresetResponse> presets = new ArrayList<>();
         presets.add(new StarterDeckPresetResponse(PRESET_AUTO, "自動預設（官方）", "優先套用官方起始牌組，若卡片不足則回退一般測試牌組"));
@@ -236,6 +267,9 @@ public class DeckService {
     }
 
     @Transactional
+    /**
+     * 新使用者初始化官方起始牌組；若已有牌組則略過。
+     */
     public void bootstrapStarterDecksForNewUser(Long userId) {
         List<DeckEntity> existingDecks = deckRepository.findByUserIdOrderByUpdatedAtDesc(userId);
         if (!existingDecks.isEmpty()) {
@@ -246,6 +280,9 @@ public class DeckService {
     }
 
     @Transactional
+    /**
+     * 為指定使用者補齊官方起始牌組，並回傳最新牌組摘要。
+     */
     public List<DeckSummaryResponse> bootstrapStarterDecksForUser(Long userId) {
         List<DeckEntity> existingDecks = deckRepository.findByUserIdOrderByUpdatedAtDesc(userId);
         boolean hasExistingDeck = !existingDecks.isEmpty();
@@ -281,6 +318,9 @@ public class DeckService {
     }
 
     @Transactional(readOnly = true)
+    /**
+     * 載入並驗證對戰使用中的 active 牌組，不合法時直接丟出例外。
+     */
     public ActiveDeckForMatch loadValidatedActiveDeckForMatch(Long userId) {
         DeckEntity activeDeck = deckRepository.findByUserIdAndActiveTrue(userId)
             .orElseThrow(() -> new IllegalStateException("玩家 #" + userId + " 沒有啟用中的牌組"));
@@ -299,6 +339,9 @@ public class DeckService {
         return new ActiveDeckForMatch(activeDeck.getId(), entries, validation);
     }
 
+    /**
+     * 驗證牌組卡片分布，回傳可供前端顯示的完整錯誤列表。
+     */
     private DeckValidationResponse validateDeckCards(List<DeckCardEntity> deckCards) {
         if (deckCards.isEmpty()) {
             return new DeckValidationResponse(
@@ -389,6 +432,9 @@ public class DeckService {
         );
     }
 
+    /**
+     * 嘗試套用官方預設，若缺卡或流程失敗則回傳 false。
+     */
     private boolean applyOfficialStarterPresetIfExists(Long userId, Long deckId, String presetCode) {
         StarterDeckPreset preset = STARTER_DECK_PRESETS.get(presetCode);
         if (preset == null) {
@@ -402,6 +448,9 @@ public class DeckService {
         }
     }
 
+    /**
+     * 由預設資料建立一副實體牌組。
+     */
     private DeckEntity createDeckFromPreset(Long userId, StarterDeckPreset preset, boolean active) {
         DeckEntity deck = new DeckEntity();
         deck.setUserId(userId);
@@ -417,6 +466,9 @@ public class DeckService {
         return savedDeck;
     }
 
+    /**
+     * 依預設清單逐張寫入牌組。
+     */
     private void applyPresetEntries(Long userId, Long deckId, Map<String, Integer> entries) {
         ensureCardsExist(entries.keySet());
         for (Map.Entry<String, Integer> entry : entries.entrySet()) {
@@ -424,6 +476,9 @@ public class DeckService {
         }
     }
 
+    /**
+     * 確認預設用到的 cardId 全部存在於卡表中。
+     */
     private void ensureCardsExist(Collection<String> cardIds) {
         List<String> normalizedCardIds = cardIds.stream().map(this::normalizeCardId).toList();
         Set<String> existingCardIds = cardRepository.findByCardIdIn(normalizedCardIds).stream()
@@ -437,6 +492,9 @@ public class DeckService {
         }
     }
 
+    /**
+     * 建立 fallback 測試牌組（1 OSHI + 50 主牌 + 20 エール）。
+     */
     private void setupFallbackQuickDeck(Long userId, Long deckId) {
         List<Card> oshiCards = cardRepository.findByCardTypeOrderByCardIdAsc("OSHI");
         if (oshiCards.isEmpty()) {
@@ -471,6 +529,9 @@ public class DeckService {
         updateDeckCard(userId, deckId, cheerCards.get(0).getCardId(), REQUIRED_CHEER_DECK_SIZE);
     }
 
+    /**
+     * 載入指定牌組卡片並轉成回應 DTO。
+     */
     private List<DeckCardResponse> loadDeckCards(Long deckId) {
         return deckCardRepository.findByDeckIdOrderByCardIdAsc(deckId)
             .stream()
@@ -478,6 +539,9 @@ public class DeckService {
             .toList();
     }
 
+    /**
+     * 解析主牌單卡上限（支援「不受 4 張限制」清單）。
+     */
     private int resolveMainCardDuplicateLimit(String cardId, String cardType, Set<String> unlimitedMainDeckCardIds) {
         if ("CHEER".equals(cardType) || "OSHI".equals(cardType)) {
             return MAIN_CARD_DUPLICATE_LIMIT;
@@ -487,12 +551,18 @@ public class DeckService {
             : MAIN_CARD_DUPLICATE_LIMIT;
     }
 
+    /**
+     * 讀取「主牌不限 4 張」卡片清單。
+     */
     private Set<String> loadUnlimitedMainDeckCardIds() {
         return cardRepository.findUnlimitedMainDeckCardIds().stream()
             .map(this::normalizeCardId)
             .collect(Collectors.toSet());
     }
 
+    /**
+     * 正規化預設代碼，空值視為 AUTO，不合法代碼直接拋錯。
+     */
     private String normalizePresetCode(String presetCode) {
         if (presetCode == null || presetCode.isBlank()) {
             return PRESET_AUTO;
@@ -507,6 +577,9 @@ public class DeckService {
         throw new IllegalArgumentException("找不到預設牌組：" + presetCode);
     }
 
+    /**
+     * 建立所有官方起始牌組預設資料。
+     */
     private static Map<String, StarterDeckPreset> createStarterDeckPresets() {
         Map<String, StarterDeckPreset> presets = new LinkedHashMap<>();
         presets.put(
@@ -548,6 +621,9 @@ public class DeckService {
         return Map.copyOf(presets);
     }
 
+    /**
+     * 定義起始牌組自動補齊時的建立順序。
+     */
     private static List<StarterDeckPreset> starterPresetBootstrapOrder() {
         return List.of(
             STARTER_DECK_PRESETS.get(DEFAULT_STARTER_PRESET),
@@ -557,6 +633,9 @@ public class DeckService {
         );
     }
 
+    /**
+     * 建立 Advent 起始牌組內容（含指定 OSHI）。
+     */
     private static Map<String, Integer> createStarterAdventEntries(String oshiCardId) {
         LinkedHashMap<String, Integer> cards = new LinkedHashMap<>();
         cards.put(oshiCardId, 1);
@@ -587,6 +666,9 @@ public class DeckService {
         return Map.copyOf(cards);
     }
 
+    /**
+     * 建立 Justice 起始牌組內容（含指定 OSHI）。
+     */
     private static Map<String, Integer> createStarterJusticeEntries(String oshiCardId) {
         LinkedHashMap<String, Integer> cards = new LinkedHashMap<>();
         cards.put(oshiCardId, 1);
@@ -616,6 +698,9 @@ public class DeckService {
         return Map.copyOf(cards);
     }
 
+    /**
+     * 將牌組卡片映射為 cardId -> cardType。
+     */
     private Map<String, String> resolveCardTypeMap(List<DeckCardEntity> deckCards) {
         List<String> cardIds = deckCards.stream().map(DeckCardEntity::getCardId).distinct().toList();
         Map<String, String> map = new LinkedHashMap<>();
@@ -626,11 +711,17 @@ public class DeckService {
         return map;
     }
 
+    /**
+     * 載入指定使用者牌組，找不到即拋錯。
+     */
     private DeckEntity getDeck(Long userId, Long deckId) {
         return deckRepository.findByIdAndUserId(deckId, userId)
             .orElseThrow(() -> new IllegalArgumentException("找不到牌組：" + deckId));
     }
 
+    /**
+     * 取得 active 牌組；若不存在則自動建立或啟用第一副牌組。
+     */
     private DeckEntity getOrCreateActiveDeck(Long userId) {
         DeckEntity activeDeck = deckRepository.findByUserIdAndActiveTrue(userId).orElse(null);
         if (activeDeck != null) {
@@ -656,6 +747,9 @@ public class DeckService {
         return deckRepository.save(deck);
     }
 
+    /**
+     * 轉換成牌組摘要 DTO。
+     */
     private DeckSummaryResponse toSummary(DeckEntity deck) {
         List<DeckCardEntity> cards = deckCardRepository.findByDeckIdOrderByCardIdAsc(deck.getId());
         int totalCards = cards.stream().mapToInt(card -> card.getCount() == null ? 0 : card.getCount()).sum();
@@ -671,6 +765,9 @@ public class DeckService {
         );
     }
 
+    /**
+     * 轉換成牌組完整 DTO（含卡片明細）。
+     */
     private DeckDetailResponse toDetail(DeckEntity deck) {
         List<DeckCardResponse> cards = deckCardRepository.findByDeckIdOrderByCardIdAsc(deck.getId())
             .stream()
@@ -690,6 +787,9 @@ public class DeckService {
         );
     }
 
+    /**
+     * 產生使用者內唯一的牌組名稱，必要時自動加數字後綴。
+     */
     private String ensureUniqueDeckName(Long userId, String requestedName, Long currentDeckId) {
         String baseName = normalizeDeckName(requestedName);
         List<DeckEntity> userDecks = deckRepository.findByUserIdOrderByUpdatedAtDesc(userId);
@@ -706,6 +806,9 @@ public class DeckService {
         return candidate;
     }
 
+    /**
+     * 正規化牌組名稱並檢查空值。
+     */
     private String normalizeDeckName(String raw) {
         if (raw == null || raw.isBlank()) {
             throw new IllegalArgumentException("牌組名稱不可為空");
@@ -713,6 +816,9 @@ public class DeckService {
         return raw.trim();
     }
 
+    /**
+     * 正規化 cardId（trim + uppercase）。
+     */
     private String normalizeCardId(String cardId) {
         if (cardId == null || cardId.isBlank()) {
             throw new IllegalArgumentException("cardId 不可為空");
@@ -720,6 +826,9 @@ public class DeckService {
         return cardId.trim().toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * 正規化卡片類型（trim + uppercase）。
+     */
     private String normalizeCardType(String cardType) {
         if (cardType == null) {
             return null;
@@ -727,6 +836,9 @@ public class DeckService {
         return cardType.trim().toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * 牌組版本遞增並更新 updatedAt。
+     */
     private void bumpVersion(DeckEntity deck) {
         deck.setVersion(deck.getVersion() == null ? 1 : deck.getVersion() + 1);
         deck.setUpdatedAt(LocalDateTime.now());

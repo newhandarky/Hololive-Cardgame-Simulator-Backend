@@ -9,4 +9,5 @@ public class ResolveDecisionRequest {
     private Long decisionId;
     private List<Long> selectedCardInstanceIds = new ArrayList<>();
     private String placement;
+    private Boolean confirmed;
 }

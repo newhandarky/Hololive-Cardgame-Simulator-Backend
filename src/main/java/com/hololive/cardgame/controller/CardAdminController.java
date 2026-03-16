@@ -18,12 +18,18 @@ public class CardAdminController {
 
     private final CardAdminService cardAdminService;
 
+    /**
+     * 卡片後台 API 控制器。
+     */
     public CardAdminController(CardAdminService cardAdminService) {
         this.cardAdminService = cardAdminService;
     }
 
     @PostMapping("/cards")
     @ResponseStatus(HttpStatus.CREATED)
+    /**
+     * 建立新卡片（含子表資料）。
+     */
     public CardResponse createCard(@RequestBody AdminCreateCardRequest request) {
         try {
             Card card = cardAdminService.createCard(request);

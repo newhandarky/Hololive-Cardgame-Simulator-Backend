@@ -11,8 +11,12 @@ spring:
       hibernate:
         format_sql: true
   flyway:
-    enabled: true
+    enabled: ${SPRING_FLYWAY_ENABLED:true}
     locations: classpath:db/migration
+    url: ${SPRING_FLYWAY_URL:${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/holocardgame_db}}
+    user: ${SPRING_FLYWAY_USER:${SPRING_DATASOURCE_USERNAME:holocard_user}}
+    password: ${SPRING_FLYWAY_PASSWORD:${SPRING_DATASOURCE_PASSWORD:holocard_password}}
+    connect-retries: ${SPRING_FLYWAY_CONNECT_RETRIES:3}
 
 line:
   channel-id: ${LINE_CHANNEL_ID:YOUR_LINE_CHANNEL_ID}

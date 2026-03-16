@@ -52,6 +52,9 @@ public class LobbyMatchService {
     private final ObjectMapper objectMapper;
     private final SecureRandom random = new SecureRandom();
 
+    /**
+     * 大廳與對戰建立流程服務，負責房間生命週期與對戰初始化。
+     */
     public LobbyMatchService(
         MatchRepository matchRepository,
         MatchPlayerRepository matchPlayerRepository,
@@ -73,6 +76,9 @@ public class LobbyMatchService {
     }
 
     @Transactional
+    /**
+     * 建立一般 PvP 房間，並加入房主為第一位玩家。
+     */
     public LobbyMatch createMatch(Long hostUserId) {
         MatchEntity match = new MatchEntity();
         match.setRoomCode(generateRoomCode());
@@ -90,6 +96,9 @@ public class LobbyMatchService {
     }
 
     @Transactional
+    /**
+     * 建立並直接啟動 Hard NPC 對戰。
+     */
     public LobbyMatch createAndStartHardNpcMatch(Long hostUserId) {
         Long hardNpcUserId = ensureHardNpcUser();
         if (hostUserId.equals(hardNpcUserId)) {
@@ -105,6 +114,9 @@ public class LobbyMatchService {
     }
 
     @Transactional
+    /**
+     * 以 roomCode 加入房間，並同步更新 playerB 與房間狀態。
+     */
     public LobbyMatch joinMatch(String roomCode, Long userId) {
         MatchEntity match = getByRoomCodeForUpdate(roomCode);
         List<MatchPlayerEntity> players = matchPlayerRepository.findByMatchIdOrderByIdAsc(match.getId());
@@ -133,6 +145,9 @@ public class LobbyMatchService {
     }
 
     @Transactional(readOnly = true)
+    /**
+     * 取得指定房間資訊。
+     */
     public LobbyMatch getMatch(Long matchId) {
         MatchEntity match = getMatchEntity(matchId);
         List<MatchPlayerEntity> players = matchPlayerRepository.findByMatchIdOrderByIdAsc(matchId);
@@ -140,6 +155,9 @@ public class LobbyMatchService {
     }
 
     @Transactional
+    /**
+     * 更新玩家 ready 狀態，並重算房間 WAITING/READY 狀態。
+     */
     public LobbyMatch setReady(Long matchId, Long userId, boolean ready) {
         MatchEntity match = getMatchEntityForUpdate(matchId);
         MatchPlayerEntity player = matchPlayerRepository.findByMatchIdAndUserId(matchId, userId)
@@ -155,6 +173,9 @@ public class LobbyMatchService {
     }
 
     @Transactional
+    /**
+     * 由房主開始對戰，驗證雙方 ready 與牌組後初始化 runtime。
+     */
     public LobbyMatch startMatch(Long matchId, Long userId) {
         MatchEntity match = getMatchEntityForUpdate(matchId);
         List<MatchPlayerEntity> players = matchPlayerRepository.findByMatchIdOrderByIdAsc(matchId);
@@ -195,6 +216,9 @@ public class LobbyMatchService {
     }
 
     @Transactional
+    /**
+     * 結束回合並切換到對手，推進 turnNumber 與 phase。
+     */
     public LobbyMatch endTurn(Long matchId, Long userId) {
         MatchEntity match = getMatchEntityForUpdate(matchId);
         List<MatchPlayerEntity> players = matchPlayerRepository.findByMatchIdOrderByIdAsc(matchId);
@@ -232,10 +256,16 @@ public class LobbyMatchService {
     }
 
     @Transactional(readOnly = true)
+    /**
+     * 判斷指定使用者是否在該房間中。
+     */
     public boolean isUserInMatch(Long matchId, Long userId) {
         return matchPlayerRepository.existsByMatchIdAndUserId(matchId, userId);
     }
 
+    /**
+     * 在非 STARTED 狀態下，依玩家 ready 狀況更新房間狀態。
+     */
     private void refreshStatus(MatchEntity match, List<MatchPlayerEntity> players) {
         if (LobbyMatchStatus.STARTED.name().equals(match.getLobbyStatus())) {
             return;
@@ -246,6 +276,9 @@ public class LobbyMatchService {
         matchRepository.save(match);
     }
 
+    /**
+     * 依房號取得房間並加鎖。
+     */
     private MatchEntity getByRoomCodeForUpdate(String roomCode) {
         if (roomCode == null || roomCode.isBlank()) {
             throw new IllegalArgumentException("roomCode 不可為空");
@@ -256,16 +289,25 @@ public class LobbyMatchService {
             .orElseThrow(() -> new IllegalArgumentException("找不到房間"));
     }
 
+    /**
+     * 以 ID 取得房間（不加鎖）。
+     */
     private MatchEntity getMatchEntity(Long matchId) {
         return matchRepository.findById(matchId)
             .orElseThrow(() -> new IllegalArgumentException("找不到對戰"));
     }
 
+    /**
+     * 以 ID 取得房間並加鎖。
+     */
     private MatchEntity getMatchEntityForUpdate(Long matchId) {
         return matchRepository.findByIdForUpdate(matchId)
             .orElseThrow(() -> new IllegalArgumentException("找不到對戰"));
     }
 
+    /**
+     * 產生唯一房號。
+     */
     private String generateRoomCode() {
         String roomCode;
         do {
@@ -280,6 +322,9 @@ public class LobbyMatchService {
         return roomCode;
     }
 
+    /**
+     * 建立 match_players 紀錄。
+     */
     private void createMatchPlayer(Long matchId, Long userId, boolean ready) {
         MatchPlayerEntity entity = new MatchPlayerEntity();
         entity.setMatchId(matchId);
@@ -320,6 +365,9 @@ public class LobbyMatchService {
         }
     }
 
+    /**
+     * 初始化單一玩家 runtime 卡區（OSHI/DECK/HAND/LIFE/CHEER_DECK）。
+     */
     private void initializePlayerRuntime(
         Long matchId,
         MatchPlayerEntity matchPlayer,
@@ -394,6 +442,9 @@ public class LobbyMatchService {
         matchPlayerRepository.save(matchPlayer);
     }
 
+    /**
+     * 儲存對戰開局時的牌組快照（供重播與稽核）。
+     */
     private void saveDeckSnapshots(
         Long matchId,
         Map<Long, DeckService.ActiveDeckForMatch> activeDeckByUserId
@@ -426,6 +477,9 @@ public class LobbyMatchService {
         }
     }
 
+    /**
+     * 批次插入 match_cards 卡片實例。
+     */
     private void batchInsertMatchCards(
         Long matchId,
         Long ownerUserId,
@@ -450,6 +504,9 @@ public class LobbyMatchService {
         }
     }
 
+    /**
+     * 讀取 OSHI life，若缺值則回退預設值。
+     */
     private int resolveOshiLife(String oshiCardId) {
         Integer life = jdbcTemplate.query(
             "SELECT life FROM oshi_cards WHERE card_id = ?",
@@ -462,6 +519,9 @@ public class LobbyMatchService {
         return life;
     }
 
+    /**
+     * 寫入 match_actions 行動紀錄。
+     */
     private void appendAction(
         MatchEntity match,
         Long userId,
@@ -480,6 +540,9 @@ public class LobbyMatchService {
         matchActionRepository.save(action);
     }
 
+    /**
+     * Entity 轉成 LobbyMatch domain model。
+     */
     private LobbyMatch toModel(MatchEntity entity, List<MatchPlayerEntity> players) {
         LobbyMatch match = new LobbyMatch();
         match.setId(entity.getId());
@@ -495,6 +558,9 @@ public class LobbyMatchService {
         return match;
     }
 
+    /**
+     * 解析房間狀態字串，不合法時回退 WAITING。
+     */
     private LobbyMatchStatus parseLobbyStatus(String text) {
         if (!StringUtils.hasText(text)) {
             return LobbyMatchStatus.WAITING;
@@ -507,6 +573,9 @@ public class LobbyMatchService {
         }
     }
 
+    /**
+     * 解析對手 userId。
+     */
     private Long resolveOpponent(MatchEntity match, Long userId) {
         if (match.getPlayerAId() != null && !match.getPlayerAId().equals(userId)) {
             return match.getPlayerAId();
@@ -517,10 +586,16 @@ public class LobbyMatchService {
         throw new IllegalStateException("找不到對手玩家");
     }
 
+    /**
+     * 更新房間 updatedAt。
+     */
     private void touchUpdatedAt(MatchEntity match) {
         match.setUpdatedAt(LocalDateTime.now());
     }
 
+    /**
+     * 取得或建立 Hard NPC 使用者。
+     */
     private Long ensureHardNpcUser() {
         return userRepository.findByLineUserId(HARD_NPC_LINE_USER_ID)
             .map(user -> user.getId())
