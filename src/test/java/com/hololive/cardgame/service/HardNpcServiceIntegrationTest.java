@@ -202,6 +202,793 @@ class HardNpcServiceIntegrationTest extends AbstractPostgresIntegrationTest {
         assertThat(attackCount).isGreaterThan(0);
     }
 
+    @Test
+    void executeHardNpcTurnShouldResolveOwnTriggerEffectConfirmFromStageEnterGift() {
+        User host = createUser("npc-trigger-host");
+        deckService.setupQuickDeck(host.getId());
+
+        LobbyMatch started = lobbyMatchService.createAndStartHardNpcMatch(host.getId());
+        Long matchId = started.getId();
+        Long npcUserId = findHardNpcUserId();
+        int turnNumber = 2;
+
+        Long npcHolomemId = seedNpcCenterFromHand(matchId, npcUserId, turnNumber - 1);
+        Long npcCenterCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT match_card_id
+            FROM match_holomems
+            WHERE id = ?
+            """,
+            rs -> rs.next() ? rs.getLong("match_card_id") : null,
+            npcHolomemId
+        );
+        assertThat(npcCenterCardInstanceId).isNotNull();
+
+        String giftHolderCardId = createMemberCardDefinition(
+            "TNPC_GIFT_ENTER_HOLDER",
+            "NPC 進場 Gift 持有者",
+            "DEBUT",
+            150,
+            "YELLOW",
+            "{\"キーワード\":\"ギフトNPC進場測試 \\n[センターポジション限定][ターンに1回]自分の#Justiceを持つ[DebutホロメンかSpotホロメン]がステージに出た時、自分のデッキを1枚引く。\"}"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            giftHolderCardId,
+            npcCenterCardInstanceId,
+            matchId,
+            npcUserId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            giftHolderCardId,
+            npcHolomemId,
+            matchId,
+            npcUserId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = NULL,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            matchId,
+            npcUserId
+        );
+
+        String enteredCardId = createMemberCardDefinition("TNPC_GIFT_ENTER_SRC", "NPC Justice Debut", "DEBUT", 120, "BLUE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#Justice\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            enteredCardId
+        );
+        insertCardIntoHand(matchId, npcUserId, enteredCardId);
+
+        forceNpcTurn(matchId, npcUserId, turnNumber);
+        resolveAllPendingForUser(matchId, npcUserId);
+        seedActionUsed(matchId, npcUserId, turnNumber, 1, "DRAW_TURN");
+        seedActionUsed(matchId, npcUserId, turnNumber, 2, "TURN_CHEER");
+        int deckBefore = countZone(matchId, npcUserId, "DECK");
+
+        hardNpcService.executeHardNpcTurn(matchId, host.getId());
+
+        Integer pendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            npcUserId
+        );
+        assertThat(pendingCount).isNotNull();
+        assertThat(pendingCount).isZero();
+
+        Integer giftTriggerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'GIFT_TRIGGER'
+            """,
+            Integer.class,
+            matchId,
+            npcUserId,
+            turnNumber
+        );
+        assertThat(giftTriggerCount).isNotNull();
+        assertThat(giftTriggerCount).isGreaterThan(0);
+
+        String latestGiftPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            npcUserId
+        );
+        assertThat(latestGiftPayload).containsPattern("\"triggerType\"\\s*:\\s*\"STAGE_ENTER\"");
+
+        int deckAfter = countZone(matchId, npcUserId, "DECK");
+        assertThat(deckAfter).isEqualTo(deckBefore - 1);
+    }
+
+    @Test
+    void executeHardNpcTurnShouldResolveTriggerFollowupLookTopDeckFromStageEnterGift() {
+        User host = createUser("npc-trigger-followup-host");
+        deckService.setupQuickDeck(host.getId());
+
+        LobbyMatch started = lobbyMatchService.createAndStartHardNpcMatch(host.getId());
+        Long matchId = started.getId();
+        Long npcUserId = findHardNpcUserId();
+        int turnNumber = 2;
+
+        Long npcHolomemId = seedNpcCenterFromHand(matchId, npcUserId, turnNumber - 1);
+        Long npcCenterCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT match_card_id
+            FROM match_holomems
+            WHERE id = ?
+            """,
+            rs -> rs.next() ? rs.getLong("match_card_id") : null,
+            npcHolomemId
+        );
+        assertThat(npcCenterCardInstanceId).isNotNull();
+
+        String giftHolderCardId = createMemberCardDefinition(
+            "TNPC_GIFT_ENTER_LOOK_TOP_HOLDER",
+            "NPC 進場查看牌庫頂 Gift 持有者",
+            "DEBUT",
+            150,
+            "YELLOW",
+            "{\"キーワード\":\"ギフトNPC進場查看牌庫頂測試 \\n[センターポジション限定][ターンに1回]自分の#Justiceを持つ[DebutホロメンかSpotホロメン]がステージに出た時、自分のデッキの上から1枚を見る。\"}"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            giftHolderCardId,
+            npcCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            giftHolderCardId,
+            npcHolomemId,
+            matchId,
+            npcUserId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = NULL,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            matchId,
+            npcUserId
+        );
+
+        String enteredCardId = createMemberCardDefinition("TNPC_GIFT_ENTER_LOOK_TOP_SRC", "NPC Justice Debut 2", "DEBUT", 120, "BLUE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#Justice\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            enteredCardId
+        );
+        insertCardIntoHand(matchId, npcUserId, enteredCardId);
+
+        forceNpcTurn(matchId, npcUserId, turnNumber);
+        resolveAllPendingForUser(matchId, npcUserId);
+        seedActionUsed(matchId, npcUserId, turnNumber, 1, "DRAW_TURN");
+        seedActionUsed(matchId, npcUserId, turnNumber, 2, "TURN_CHEER");
+
+        hardNpcService.executeHardNpcTurn(matchId, host.getId());
+
+        Integer triggerPendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            npcUserId
+        );
+        Integer lookTopPendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'LOOK_TOP_DECK'
+            """,
+            Integer.class,
+            matchId,
+            npcUserId
+        );
+        assertThat(triggerPendingCount).isZero();
+        assertThat(lookTopPendingCount).isZero();
+
+        String triggerPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            npcUserId,
+            turnNumber
+        );
+        assertThat(triggerPayload).containsPattern("\"triggerType\"\\s*:\\s*\"STAGE_ENTER\"");
+        assertThat(triggerPayload).containsPattern("\"pendingInteractionDecisionType\"\\s*:\\s*\"LOOK_TOP_DECK\"");
+
+        String resolvedPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'INTERACTION_CONFIRMED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            npcUserId,
+            turnNumber
+        );
+        assertThat(resolvedPayload).containsPattern("\"decisionType\"\\s*:\\s*\"LOOK_TOP_DECK\"");
+        assertThat(resolvedPayload).containsPattern("\"placement\"\\s*:\\s*\"TOP\"");
+    }
+
+    @Test
+    void executeHardNpcTurnShouldResolveTriggerFollowupReorderDeckBottomFromStageEnterGift() {
+        User host = createUser("npc-trigger-reorder-host");
+        deckService.setupQuickDeck(host.getId());
+
+        LobbyMatch started = lobbyMatchService.createAndStartHardNpcMatch(host.getId());
+        Long matchId = started.getId();
+        Long npcUserId = findHardNpcUserId();
+        int turnNumber = 2;
+
+        Long npcHolomemId = seedNpcCenterFromHand(matchId, npcUserId, turnNumber - 1);
+        Long npcCenterCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT match_card_id
+            FROM match_holomems
+            WHERE id = ?
+            """,
+            rs -> rs.next() ? rs.getLong("match_card_id") : null,
+            npcHolomemId
+        );
+        assertThat(npcCenterCardInstanceId).isNotNull();
+
+        String giftHolderCardId = createMemberCardDefinition(
+            "TNPC_GIFT_ENTER_REORDER_HOLDER",
+            "NPC 進場排序牌庫底 Gift 持有者",
+            "DEBUT",
+            150,
+            "YELLOW",
+            "{\"キーワード\":\"ギフトNPC進場排序牌庫底測試 \\n[センターポジション限定][ターンに1回]自分の#Justiceを持つ[DebutホロメンかSpotホロメン]がステージに出た時、自分のデッキの上から4枚を見る。その中から、#ORDER_TESTを持つホロメンを1枚手札に加える。そして残ったカードを好きな順でデッキの下に戻す。\"}"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            giftHolderCardId,
+            npcCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            giftHolderCardId,
+            npcHolomemId,
+            matchId,
+            npcUserId
+        );
+
+        String reorderMatchCardId = createMemberCardDefinition("TNPC_REORDER_MATCH", "排序命中", "DEBUT", 90, "RED");
+        String reorderMissCardA = createMemberCardDefinition("TNPC_REORDER_MISS_A", "排序未命中 A", "DEBUT", 90, "BLUE");
+        String reorderMissCardB = createMemberCardDefinition("TNPC_REORDER_MISS_B", "排序未命中 B", "DEBUT", 90, "GREEN");
+        String reorderMissCardC = createMemberCardDefinition("TNPC_REORDER_MISS_C", "排序未命中 C", "DEBUT", 90, "WHITE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#ORDER_TEST\"]'::jsonb WHERE card_id = ?",
+            reorderMatchCardId
+        );
+
+        insertCardIntoDeckTop(matchId, npcUserId, reorderMissCardA);
+        insertCardIntoDeckTop(matchId, npcUserId, reorderMissCardB);
+        insertCardIntoDeckTop(matchId, npcUserId, reorderMissCardC);
+        insertCardIntoDeckTop(matchId, npcUserId, reorderMatchCardId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = NULL,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            matchId,
+            npcUserId
+        );
+
+        String enteredCardId = createMemberCardDefinition("TNPC_GIFT_ENTER_REORDER_SRC", "NPC Justice Debut 3", "DEBUT", 120, "BLUE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#Justice\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            enteredCardId
+        );
+        insertCardIntoHand(matchId, npcUserId, enteredCardId);
+
+        forceNpcTurn(matchId, npcUserId, turnNumber);
+        resolveAllPendingForUser(matchId, npcUserId);
+        seedActionUsed(matchId, npcUserId, turnNumber, 1, "DRAW_TURN");
+        seedActionUsed(matchId, npcUserId, turnNumber, 2, "TURN_CHEER");
+
+        hardNpcService.executeHardNpcTurn(matchId, host.getId());
+
+        Integer triggerPendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            npcUserId
+        );
+        Integer reorderPendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'REORDER_DECK_BOTTOM'
+            """,
+            Integer.class,
+            matchId,
+            npcUserId
+        );
+        assertThat(triggerPendingCount).isZero();
+        assertThat(reorderPendingCount).isZero();
+
+        String triggerPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            npcUserId,
+            turnNumber
+        );
+        assertThat(triggerPayload).containsPattern("\"triggerType\"\\s*:\\s*\"STAGE_ENTER\"");
+        assertThat(triggerPayload).containsPattern("\"pendingInteractionDecisionType\"\\s*:\\s*\"REORDER_DECK_BOTTOM\"");
+
+        String resolvedPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'INTERACTION_CONFIRMED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            npcUserId,
+            turnNumber
+        );
+        assertThat(resolvedPayload).containsPattern("\"decisionType\"\\s*:\\s*\"REORDER_DECK_BOTTOM\"");
+    }
+
+    @Test
+    void executeHardNpcTurnShouldResolveTriggerFollowupLookOpponentHandFromStageEnterGift() {
+        User host = createUser("npc-trigger-look-opponent-hand-host");
+        deckService.setupQuickDeck(host.getId());
+
+        LobbyMatch started = lobbyMatchService.createAndStartHardNpcMatch(host.getId());
+        Long matchId = started.getId();
+        Long npcUserId = findHardNpcUserId();
+        int turnNumber = 2;
+
+        Long npcHolomemId = seedNpcCenterFromHand(matchId, npcUserId, turnNumber - 1);
+        Long npcCenterCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT match_card_id
+            FROM match_holomems
+            WHERE id = ?
+            """,
+            rs -> rs.next() ? rs.getLong("match_card_id") : null,
+            npcHolomemId
+        );
+        assertThat(npcCenterCardInstanceId).isNotNull();
+
+        String giftHolderCardId = createMemberCardDefinition(
+            "TNPC_LOOK_OP_H",
+            "NPC 看對手手牌",
+            "DEBUT",
+            150,
+            "YELLOW",
+            "{\"キーワード\":\"ギフトNPC進場查看對手手牌測試 \\n[センターポジション限定][ターンに1回]自分の#Justiceを持つ[DebutホロメンかSpotホロメン]がステージに出た時、相手の手札を見る。\"}"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            giftHolderCardId,
+            npcCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            giftHolderCardId,
+            npcHolomemId,
+            matchId,
+            npcUserId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = NULL,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            matchId,
+            npcUserId
+        );
+
+        String enteredCardId = createMemberCardDefinition("TNPC_LOOK_OP_S", "NPC JD4", "DEBUT", 120, "BLUE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#Justice\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            enteredCardId
+        );
+        insertCardIntoHand(matchId, npcUserId, enteredCardId);
+
+        forceNpcTurn(matchId, npcUserId, turnNumber);
+        resolveAllPendingForUser(matchId, npcUserId);
+        seedActionUsed(matchId, npcUserId, turnNumber, 1, "DRAW_TURN");
+        seedActionUsed(matchId, npcUserId, turnNumber, 2, "TURN_CHEER");
+
+        hardNpcService.executeHardNpcTurn(matchId, host.getId());
+
+        Integer triggerPendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            npcUserId
+        );
+        Integer lookOpponentHandPendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'LOOK_OPPONENT_HAND'
+            """,
+            Integer.class,
+            matchId,
+            npcUserId
+        );
+        assertThat(triggerPendingCount).isZero();
+        assertThat(lookOpponentHandPendingCount).isZero();
+
+        String triggerPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            npcUserId,
+            turnNumber
+        );
+        assertThat(triggerPayload).containsPattern("\"triggerType\"\\s*:\\s*\"STAGE_ENTER\"");
+        assertThat(triggerPayload).containsPattern("\"pendingInteractionDecisionType\"\\s*:\\s*\"LOOK_OPPONENT_HAND\"");
+
+        String resolvedPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'INTERACTION_CONFIRMED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            npcUserId,
+            turnNumber
+        );
+        assertThat(resolvedPayload).containsPattern("\"decisionType\"\\s*:\\s*\"LOOK_OPPONENT_HAND\"");
+    }
+
+    @Test
+    void executeHardNpcTurnShouldResolveTriggerFollowupLookHolopowerFromStageEnterGift() {
+        User host = createUser("npc-trigger-look-holopower-host");
+        deckService.setupQuickDeck(host.getId());
+
+        LobbyMatch started = lobbyMatchService.createAndStartHardNpcMatch(host.getId());
+        Long matchId = started.getId();
+        Long npcUserId = findHardNpcUserId();
+        int turnNumber = 2;
+
+        Long npcHolomemId = seedNpcCenterFromHand(matchId, npcUserId, turnNumber - 1);
+        Long npcCenterCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT match_card_id
+            FROM match_holomems
+            WHERE id = ?
+            """,
+            rs -> rs.next() ? rs.getLong("match_card_id") : null,
+            npcHolomemId
+        );
+        assertThat(npcCenterCardInstanceId).isNotNull();
+
+        String giftHolderCardId = createMemberCardDefinition(
+            "TNPC_LOOK_HP_H",
+            "NPC 看 Holopower",
+            "DEBUT",
+            150,
+            "YELLOW",
+            "{\"キーワード\":\"ギフトNPC進場查看Holopower測試 \\n[センターポジション限定][ターンに1回]自分の#Justiceを持つ[DebutホロメンかSpotホロメン]がステージに出た時、自分のホロパワーを見る。\"}"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            giftHolderCardId,
+            npcCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            giftHolderCardId,
+            npcHolomemId,
+            matchId,
+            npcUserId
+        );
+
+        jdbcTemplate.update(
+            """
+            WITH target AS (
+              SELECT id
+              FROM match_cards
+              WHERE match_id = ?
+                AND owner_user_id = ?
+                AND zone = 'DECK'
+              ORDER BY order_index NULLS LAST, id
+              LIMIT 1
+            )
+            UPDATE match_cards
+            SET zone = 'HOLOPOWER',
+                order_index = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id IN (SELECT id FROM target)
+            """,
+            matchId,
+            npcUserId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = NULL,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            matchId,
+            npcUserId
+        );
+
+        String enteredCardId = createMemberCardDefinition("TNPC_LOOK_HP_S", "NPC JD5", "DEBUT", 120, "BLUE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#Justice\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            enteredCardId
+        );
+        insertCardIntoHand(matchId, npcUserId, enteredCardId);
+
+        forceNpcTurn(matchId, npcUserId, turnNumber);
+        resolveAllPendingForUser(matchId, npcUserId);
+        seedActionUsed(matchId, npcUserId, turnNumber, 1, "DRAW_TURN");
+        seedActionUsed(matchId, npcUserId, turnNumber, 2, "TURN_CHEER");
+
+        hardNpcService.executeHardNpcTurn(matchId, host.getId());
+
+        Integer triggerPendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            npcUserId
+        );
+        Integer lookHolopowerPendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'LOOK_HOLOPOWER'
+            """,
+            Integer.class,
+            matchId,
+            npcUserId
+        );
+        assertThat(triggerPendingCount).isZero();
+        assertThat(lookHolopowerPendingCount).isZero();
+
+        String triggerPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            npcUserId,
+            turnNumber
+        );
+        assertThat(triggerPayload).containsPattern("\"triggerType\"\\s*:\\s*\"STAGE_ENTER\"");
+        assertThat(triggerPayload).containsPattern("\"pendingInteractionDecisionType\"\\s*:\\s*\"LOOK_HOLOPOWER\"");
+
+        String resolvedPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'INTERACTION_CONFIRMED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            npcUserId,
+            turnNumber
+        );
+        assertThat(resolvedPayload).containsPattern("\"decisionType\"\\s*:\\s*\"LOOK_HOLOPOWER\"");
+    }
+
     private void seedActionUsed(Long matchId, Long userId, int turnNumber, int actionOrder, String actionType) {
         jdbcTemplate.update(
             """
@@ -377,6 +1164,159 @@ class HardNpcServiceIntegrationTest extends AbstractPostgresIntegrationTest {
             matchId,
             userId
         );
+    }
+
+    private String createMemberCardDefinition(
+        String prefix,
+        String displayName,
+        String levelType,
+        int hp,
+        String mainColor
+    ) {
+        return createMemberCardDefinition(prefix, displayName, levelType, hp, mainColor, "null");
+    }
+
+    private String createMemberCardDefinition(
+        String prefix,
+        String displayName,
+        String levelType,
+        int hp,
+        String mainColor,
+        String passiveEffectJson
+    ) {
+        String cardId = prefix + "_" + System.nanoTime();
+        jdbcTemplate.update(
+            """
+            INSERT INTO cards (card_id, name, card_type, created_at, updated_at)
+            VALUES (?, ?, 'MEMBER', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            cardId,
+            displayName
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO member_cards (
+                card_id, hp, level_type, main_color, sub_color, bloom_level, passive_effect_json, trigger_condition, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, NULL, ?, CAST(? AS jsonb), NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            cardId,
+            hp,
+            levelType,
+            mainColor,
+            bloomLevelOf(levelType),
+            passiveEffectJson
+        );
+        return cardId;
+    }
+
+    private Long insertCardIntoHand(Long matchId, Long ownerUserId, String cardId) {
+        Integer nextHandOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(MAX(order_index), 0) + 1
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            Integer.class,
+            matchId,
+            ownerUserId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
+            VALUES (?, ?, ?, 'HAND', ?, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            matchId,
+            ownerUserId,
+            cardId,
+            nextHandOrder == null ? 1 : nextHandOrder
+        );
+        return jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND card_id = ?
+              AND zone = 'HAND'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            ownerUserId,
+            cardId
+        );
+    }
+
+    private Long insertCardIntoDeckTop(Long matchId, Long ownerUserId, String cardId) {
+        int nextDeckTopOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(MIN(order_index), 1) - 1
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'DECK'
+            """,
+            Integer.class,
+            matchId,
+            ownerUserId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
+            VALUES (?, ?, ?, 'DECK', ?, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            matchId,
+            ownerUserId,
+            cardId,
+            nextDeckTopOrder
+        );
+        return jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND card_id = ?
+              AND zone = 'DECK'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            ownerUserId,
+            cardId
+        );
+    }
+
+    private int countZone(Long matchId, Long userId, String zone) {
+        Integer count = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = ?
+            """,
+            Integer.class,
+            matchId,
+            userId,
+            zone
+        );
+        return count == null ? 0 : count;
+    }
+
+    private int bloomLevelOf(String levelType) {
+        if (levelType == null) {
+            return 0;
+        }
+        return switch (levelType.trim().toUpperCase()) {
+            case "FIRST" -> 1;
+            case "SECOND" -> 2;
+            default -> 0;
+        };
     }
 
     private Long findHardNpcUserId() {

@@ -215,7 +215,8 @@ public class MatchGameStateService {
             Long holomemId = toLong(row.get("holomem_id"));
             Integer damageTaken = toNullableInt(row.get("damage_taken"));
             Integer baseMaxHp = toNullableInt(row.get("base_max_hp"));
-            int hpBonus = matchEffectService.resolveAttachedSupportHpBonus(matchId, holomemId);
+            int hpBonus = matchEffectService.resolveAttachedSupportHpBonus(matchId, holomemId)
+                + matchEffectService.resolvePassiveGiftHpBonus(matchId, ownerUserId, holomemId);
             int artBonus = matchEffectService.resolveAttachedSupportArtBonus(matchId, holomemId);
             int turnDamageModifier = activeTurnDamageModifiers.getOrDefault(ownerUserId, 0);
             int adjustedMaxHp = Math.max((baseMaxHp == null ? 0 : baseMaxHp) + hpBonus, 0);
@@ -555,7 +556,8 @@ public class MatchGameStateService {
             Long holomemId = toLong(stats.get("holomem_id"));
             Integer damageTaken = toNullableInt(stats.get("damage_taken"));
             Integer baseMaxHp = toNullableInt(stats.get("base_max_hp"));
-            int hpBonus = matchEffectService.resolveAttachedSupportHpBonus(matchId, holomemId);
+            int hpBonus = matchEffectService.resolveAttachedSupportHpBonus(matchId, holomemId)
+                + matchEffectService.resolvePassiveGiftHpBonus(matchId, candidate.getOwnerUserId(), holomemId);
             int adjustedMaxHp = Math.max((baseMaxHp == null ? 0 : baseMaxHp) + hpBonus, 0);
             int adjustedCurrentHp = Math.max(adjustedMaxHp - (damageTaken == null ? 0 : damageTaken), 0);
             candidate.setCurrentHp(adjustedCurrentHp);

@@ -280,8 +280,19 @@ public class HardNpcService {
                     }
                 }
             }
-            ensureTurnStartPendingInteraction(matchId, npcUserId, turnNumber);
-            return true;
+            try {
+                matchActionService.advancePhase(matchId, npcUserId);
+                return true;
+            } catch (RuntimeException ex) {
+                log.warn(
+                    "Hard NPC action failed. matchId={}, npcUserId={}, turnNumber={}, step=OPENING_ADVANCE",
+                    matchId,
+                    npcUserId,
+                    turnNumber,
+                    ex
+                );
+                return false;
+            }
         }
         if ("DRAW".equals(phase)) {
             try {

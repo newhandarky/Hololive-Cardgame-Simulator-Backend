@@ -146,31 +146,29 @@ public class MatchActionService {
             MatchPlayerEntity openingPlayer = matchPlayerRepository.findByMatchIdAndUserId(matchId, userId)
                 .orElseThrow(() -> new IllegalArgumentException("你不在此房間中"));
             if (!openingPlayer.isMulliganDone()) {
-                throw new IllegalStateException("請先完成起手調度，再放置開場 CENTER");
+                throw new IllegalStateException("請先完成起手調度，再設置開場舞台");
             }
-            if (!"DEBUT".equals(normalizedLevelType)) {
-                throw new GameRuleException(
-                    GameErrorCode.PLAY_TO_STAGE_LEVEL_NOT_ALLOWED,
-                    "開場只能從手牌放置 DEBUT Holomem 到 CENTER"
-                );
-            }
-            if (!"CENTER".equals(targetZone)) {
-                throw new IllegalStateException("開場只能將 DEBUT 放置到 CENTER");
-            }
-            Integer centerCount = jdbcTemplate.queryForObject(
-                """
-                SELECT COUNT(*)
-                FROM match_holomems
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'CENTER'
-                """,
-                Integer.class,
-                matchId,
-                userId
-            );
-            if (centerCount != null && centerCount > 0) {
-                throw new IllegalStateException("你已經放置開場 CENTER Holomem");
+            boolean hasOpeningCenter = hasOpeningCenterPlaced(matchId, userId);
+            if (!hasOpeningCenter) {
+                if (!"DEBUT".equals(normalizedLevelType)) {
+                    throw new GameRuleException(
+                        GameErrorCode.PLAY_TO_STAGE_LEVEL_NOT_ALLOWED,
+                        "開場只能從手牌放置 DEBUT Holomem 到 CENTER"
+                    );
+                }
+                if (!"CENTER".equals(targetZone)) {
+                    throw new IllegalStateException("放置開場 CENTER 前，不能先設置開場 BACK");
+                }
+            } else {
+                if (!Set.of("DEBUT", "SPOT").contains(normalizedLevelType)) {
+                    throw new GameRuleException(
+                        GameErrorCode.PLAY_TO_STAGE_LEVEL_NOT_ALLOWED,
+                        "開場 BACK 只能放置 DEBUT 或 SPOT Holomem"
+                    );
+                }
+                if (!"BACK".equals(targetZone)) {
+                    throw new IllegalStateException("開場完成 CENTER 後，只能繼續設置 BACK");
+                }
             }
         } else {
             if (!Set.of("DEBUT", "SPOT").contains(normalizedLevelType)) {
@@ -255,55 +253,66 @@ public class MatchActionService {
         touchUpdatedAt(context.match);
         matchRepository.saveAndFlush(context.match);
 
-        if (openingReset) {
-            Long nextUser = resolveNextOpeningCenterUser(context.match);
-            if (nextUser != null) {
-                context.match.setCurrentTurnPlayerId(nextUser);
-                touchUpdatedAt(context.match);
-                matchRepository.saveAndFlush(context.match);
-            } else {
-                context.match.setCurrentTurnPlayerId(context.match.getPlayerAId());
-                touchUpdatedAt(context.match);
-                matchRepository.saveAndFlush(context.match);
-                Long liveStartInteractionId = createLiveStartPendingInteraction(matchId, context.match.getPlayerAId(), context.turnNumber);
-                if (liveStartInteractionId != null) {
-                    Map<String, Object> interactionPayload = new LinkedHashMap<>();
-                    interactionPayload.put("interactionId", liveStartInteractionId);
-                    interactionPayload.put("interactionType", INTERACTION_TYPE_LIVE_START);
-                    interactionPayload.put("sourceActionType", INTERACTION_TYPE_LIVE_START);
-                    appendAction(
-                        context.match,
-                        context.match.getPlayerAId(),
-                        "INTERACTION_PENDING",
-                        toJson(interactionPayload),
-                        context.turnNumber
-                    );
-                }
-            }
+        Map<String, Object> triggerSummary = openingReset
+            ? Map.of("deferredUntilLiveStart", true)
+            : matchEventHookService.onHolomemEnter(
+                matchId,
+                userId,
+                cardId,
+                cardInstanceId,
+                targetZone
+            );
+        List<Map<String, Object>> giftTriggeredEffects = openingReset
+            ? List.of()
+            : matchEffectService.previewGiftTriggeredEffectsOnStageEnter(
+                matchId,
+                userId,
+                cardInstanceId,
+                targetZone,
+                context.turnNumber
+            );
+        Map<String, Object> giftEffectSummary = buildGiftTriggeredEffectDeferredSummary(giftTriggeredEffects);
+        FollowupInteractionDecision giftTriggerConfirmDecision = null;
+        if (!giftTriggeredEffects.isEmpty()) {
+            giftTriggerConfirmDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                matchId,
+                userId,
+                cardInstanceId,
+                cardId,
+                List.of(buildInteractionSourceCardPayload(matchId, userId, cardInstanceId, cardId, targetZone)),
+                giftTriggeredEffects,
+                context.turnNumber
+            );
         }
 
-        Map<String, Object> triggerSummary = matchEventHookService.onHolomemEnter(
-            matchId,
-            userId,
-            cardId,
-            cardInstanceId,
-            targetZone
-        );
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("cardInstanceId", cardInstanceId);
+        payload.put("cardId", cardId);
+        payload.put("targetZone", targetZone);
+        payload.put("enteredTurn", context.turnNumber);
+        payload.put("faceDown", openingReset);
+        payload.put("triggerSummary", triggerSummary);
+        if (!openingReset) {
+            payload.put("giftEffect", giftEffectSummary);
+            payload.put(
+                "triggerResolutionOrder",
+                buildTriggeredResolutionOrder(
+                    "GIFT_TRIGGER",
+                    100,
+                    giftEffectSummary,
+                    "ENTER_EVENT_HOOK",
+                    200,
+                    triggerSummary
+                )
+            );
+            putFollowupDecisionPayload(payload, giftTriggerConfirmDecision);
+        }
 
         appendAction(
             context.match,
             userId,
-            openingReset ? "OPENING_SET_CENTER" : "PLAY_TO_STAGE",
-            toJson(
-                Map.of(
-                    "cardInstanceId", cardInstanceId,
-                    "cardId", cardId,
-                    "targetZone", targetZone,
-                    "enteredTurn", context.turnNumber,
-                    "faceDown", openingReset,
-                    "triggerSummary", triggerSummary
-                )
-            ),
+            openingReset ? ("CENTER".equals(targetZone) ? "OPENING_SET_CENTER" : "OPENING_SET_BACK") : "PLAY_TO_STAGE",
+            toJson(payload),
             context.turnNumber
         );
     }
@@ -434,7 +443,21 @@ public class MatchActionService {
         }
 
         int stackDepth = countHolomemStackDepth(target.holomemId());
-        MatchEffectService.TriggeredEffectPreview bloomPreview = matchEffectService.previewBloomTriggeredEffect(bloomCardId);
+        Map<String, Object> passiveGiftSummary = matchEffectService.applyPassiveGiftExtraBloomAllowanceOnBloom(
+            matchId,
+            userId,
+            target.holomemId(),
+            bloomCardInstanceId,
+            bloomCardId
+        );
+        String sourceLevelType = target.topLevelType();
+        MatchEffectService.TriggeredEffectPreview bloomPreview = matchEffectService.previewBloomTriggeredEffect(
+            matchId,
+            userId,
+            bloomCardId,
+            bloomCardInstanceId,
+            sourceLevelType
+        );
         Map<String, Object> bloomEffectSummary = buildTriggeredEffectDeferredSummary("BLOOM", bloomPreview);
         Map<String, Object> triggerSummary = matchEventHookService.onHolomemBloom(
             matchId,
@@ -446,6 +469,8 @@ public class MatchActionService {
         );
         FollowupInteractionDecision triggerConfirmDecision = null;
         if (bloomPreview.hasEffect()) {
+            Map<String, Object> additionalContext = new LinkedHashMap<>();
+            additionalContext.put("sourceLevelType", sourceLevelType);
             triggerConfirmDecision = createTriggeredEffectConfirmPendingInteraction(
                 matchId,
                 userId,
@@ -456,7 +481,8 @@ public class MatchActionService {
                 "確認 Bloom 效果",
                 buildTriggeredEffectConfirmMessage("BLOOM", bloomPreview),
                 List.of(buildInteractionSourceCardPayload(matchId, userId, bloomCardInstanceId, bloomCardId, "STAGE")),
-                context.turnNumber
+                context.turnNumber,
+                additionalContext
             );
         }
 
@@ -473,6 +499,7 @@ public class MatchActionService {
         payload.put("toLevel", bloomLevel);
         payload.put("damageCarried", target.damageTaken());
         payload.put("stackDepth", stackDepth);
+        payload.put("passiveGiftSummary", passiveGiftSummary);
         payload.put("bloomEffect", bloomEffectSummary);
         payload.put("triggerSummary", triggerSummary);
         payload.put(
@@ -851,7 +878,7 @@ public class MatchActionService {
                     updated_at = CURRENT_TIMESTAMP
                 WHERE match_id = ?
                   AND owner_user_id IN (?, ?)
-                  AND zone = 'CENTER'
+                  AND zone IN ('CENTER', 'BACK')
                 """,
                 matchId,
                 context.match.getPlayerAId(),
@@ -870,7 +897,7 @@ public class MatchActionService {
                     FROM match_holomems
                     WHERE match_id = ?
                       AND owner_user_id IN (?, ?)
-                      AND zone = 'CENTER'
+                      AND zone IN ('CENTER', 'BACK')
                   )
                 """,
                 matchId,
@@ -942,7 +969,6 @@ public class MatchActionService {
             boolean confirmed = request == null || request.getConfirmed() == null || request.getConfirmed();
             markDecisionResolved(pending.decisionId());
 
-            context.match.setCurrentPhase(MatchPhase.MAIN.name());
             touchUpdatedAt(context.match);
             matchRepository.saveAndFlush(context.match);
 
@@ -1363,22 +1389,6 @@ public class MatchActionService {
 
         touchUpdatedAt(context.match);
         matchRepository.saveAndFlush(context.match);
-        if (allDone && resolveNextOpeningCenterUser(context.match) == null) {
-            Long interactionId = createLiveStartPendingInteraction(matchId, context.match.getPlayerAId(), context.turnNumber);
-            if (interactionId != null) {
-                Map<String, Object> interactionPayload = new LinkedHashMap<>();
-                interactionPayload.put("interactionId", interactionId);
-                interactionPayload.put("interactionType", INTERACTION_TYPE_LIVE_START);
-                interactionPayload.put("sourceActionType", INTERACTION_TYPE_LIVE_START);
-                appendAction(
-                    context.match,
-                    context.match.getPlayerAId(),
-                    "INTERACTION_PENDING",
-                    toJson(interactionPayload),
-                    context.turnNumber
-                );
-            }
-        }
     }
 
     /**
@@ -1476,8 +1486,12 @@ public class MatchActionService {
      */
     @Transactional
     public void advancePhase(Long matchId, Long userId) {
-        ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN, MatchPhase.PERFORMANCE));
+        ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.RESET, MatchPhase.MAIN, MatchPhase.PERFORMANCE));
         if (context.blockedByPendingInteraction()) {
+            return;
+        }
+        if (context.phase == MatchPhase.RESET) {
+            advanceOpeningSetup(context, userId);
             return;
         }
         if (context.phase == MatchPhase.MAIN) {
@@ -1506,10 +1520,129 @@ public class MatchActionService {
         touchUpdatedAt(context.match);
         matchRepository.saveAndFlush(context.match);
 
+        List<Map<String, Object>> performanceStartGiftEffects = List.of();
+        List<Map<String, Object>> opponentPerformanceStartGiftEffects = List.of();
+        FollowupInteractionDecision performanceStartGiftDecision = null;
+        FollowupInteractionDecision opponentPerformanceStartGiftDecision = null;
+        List<Map<String, Object>> performanceEndGiftEffects = List.of();
+        List<Map<String, Object>> opponentPerformanceEndGiftEffects = List.of();
+        FollowupInteractionDecision performanceEndGiftDecision = null;
+        FollowupInteractionDecision opponentPerformanceEndGiftDecision = null;
+        if (context.phase == MatchPhase.MAIN && nextPhase == MatchPhase.PERFORMANCE) {
+            matchEffectService.recordPerformancePhaseSnapshot(matchId, userId, userId, context.turnNumber);
+            if (context.opponentUserId != null) {
+                matchEffectService.recordPerformancePhaseSnapshot(matchId, userId, context.opponentUserId, context.turnNumber);
+            }
+            performanceStartGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOwnPerformanceStart(
+                matchId,
+                userId,
+                context.turnNumber
+            );
+            if (!performanceStartGiftEffects.isEmpty()) {
+                performanceStartGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                    matchId,
+                    userId,
+                    null,
+                    null,
+                    buildGiftTriggerInteractionCards(matchId, userId, null, null, performanceStartGiftEffects),
+                    performanceStartGiftEffects,
+                    context.turnNumber
+                );
+            }
+            if (context.opponentUserId != null) {
+                opponentPerformanceStartGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOpponentPerformanceStart(
+                    matchId,
+                    context.opponentUserId,
+                    context.turnNumber
+                );
+                if (!opponentPerformanceStartGiftEffects.isEmpty()) {
+                    opponentPerformanceStartGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                        matchId,
+                        context.opponentUserId,
+                        null,
+                        null,
+                        buildGiftTriggerInteractionCards(
+                            matchId,
+                            context.opponentUserId,
+                            null,
+                            null,
+                            opponentPerformanceStartGiftEffects
+                        ),
+                        opponentPerformanceStartGiftEffects,
+                        context.turnNumber
+                    );
+                }
+            }
+        } else if (context.phase == MatchPhase.PERFORMANCE && nextPhase == MatchPhase.END) {
+            performanceEndGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOwnPerformanceEnd(
+                matchId,
+                userId,
+                context.turnNumber
+            );
+            if (!performanceEndGiftEffects.isEmpty()) {
+                performanceEndGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                    matchId,
+                    userId,
+                    null,
+                    null,
+                    buildGiftTriggerInteractionCards(matchId, userId, null, null, performanceEndGiftEffects),
+                    performanceEndGiftEffects,
+                    context.turnNumber
+                );
+            }
+            if (context.opponentUserId != null) {
+                opponentPerformanceEndGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOpponentPerformanceEnd(
+                    matchId,
+                    context.opponentUserId,
+                    context.turnNumber
+                );
+                if (!opponentPerformanceEndGiftEffects.isEmpty()) {
+                    opponentPerformanceEndGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                        matchId,
+                        context.opponentUserId,
+                        null,
+                        null,
+                        buildGiftTriggerInteractionCards(
+                            matchId,
+                            context.opponentUserId,
+                            null,
+                            null,
+                            opponentPerformanceEndGiftEffects
+                        ),
+                        opponentPerformanceEndGiftEffects,
+                        context.turnNumber
+                    );
+                }
+            }
+        }
+
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("fromPhase", context.phase.name());
         payload.put("toPhase", nextPhase.name());
         payload.put("firstPlayerFirstTurnSkip", context.phase == MatchPhase.MAIN && nextPhase == MatchPhase.END);
+        if (context.phase == MatchPhase.MAIN && nextPhase == MatchPhase.PERFORMANCE) {
+            payload.put("performanceStartGiftEffects", buildGiftTriggeredEffectDeferredSummary(performanceStartGiftEffects));
+            payload.put(
+                "opponentPerformanceStartGiftEffects",
+                buildGiftTriggeredEffectDeferredSummary(opponentPerformanceStartGiftEffects)
+            );
+            putFollowupDecisionPayload(payload, performanceStartGiftDecision);
+            if (opponentPerformanceStartGiftDecision != null) {
+                payload.put("opponentPendingInteractionDecisionId", opponentPerformanceStartGiftDecision.decisionId());
+                payload.put("opponentPendingInteractionDecisionType", opponentPerformanceStartGiftDecision.decisionType());
+            }
+        } else if (context.phase == MatchPhase.PERFORMANCE && nextPhase == MatchPhase.END) {
+            payload.put("performanceEndGiftEffects", buildGiftTriggeredEffectDeferredSummary(performanceEndGiftEffects));
+            payload.put(
+                "opponentPerformanceEndGiftEffects",
+                buildGiftTriggeredEffectDeferredSummary(opponentPerformanceEndGiftEffects)
+            );
+            putFollowupDecisionPayload(payload, performanceEndGiftDecision);
+            if (opponentPerformanceEndGiftDecision != null) {
+                payload.put("opponentPendingInteractionDecisionId", opponentPerformanceEndGiftDecision.decisionId());
+                payload.put("opponentPendingInteractionDecisionType", opponentPerformanceEndGiftDecision.decisionType());
+            }
+        }
         appendAction(
             context.match,
             userId,
@@ -1517,6 +1650,61 @@ public class MatchActionService {
             toJson(payload),
             context.turnNumber
         );
+    }
+
+    /**
+     * 推進開場設置流程。
+     */
+    private void advanceOpeningSetup(ActionContext context, Long userId) {
+        Long matchId = context.match.getId();
+        MatchPlayerEntity openingPlayer = matchPlayerRepository.findByMatchIdAndUserId(matchId, userId)
+            .orElseThrow(() -> new IllegalArgumentException("你不在此房間中"));
+        if (!openingPlayer.isMulliganDone()) {
+            throw new IllegalStateException("請先完成起手調度");
+        }
+        if (!hasOpeningCenterPlaced(matchId, userId)) {
+            throw new IllegalStateException("請先放置開場 CENTER Holomem");
+        }
+        if (hasOpeningSetupFinished(matchId, userId)) {
+            throw new IllegalStateException("你已完成開場設置");
+        }
+
+        appendAction(
+            context.match,
+            userId,
+            "OPENING_SETUP_DONE",
+            toJson(Map.of("userId", userId)),
+            context.turnNumber
+        );
+
+        Long nextUserId = resolveNextOpeningSetupUser(context.match, userId);
+        if (nextUserId != null) {
+            context.match.setCurrentTurnPlayerId(nextUserId);
+            context.match.setCurrentPhase(MatchPhase.RESET.name());
+            touchUpdatedAt(context.match);
+            matchRepository.saveAndFlush(context.match);
+            return;
+        }
+
+        context.match.setCurrentTurnPlayerId(context.match.getPlayerAId());
+        context.match.setCurrentPhase(MatchPhase.RESET.name());
+        touchUpdatedAt(context.match);
+        matchRepository.saveAndFlush(context.match);
+
+        Long liveStartInteractionId = createLiveStartPendingInteraction(matchId, context.match.getPlayerAId(), context.turnNumber);
+        if (liveStartInteractionId != null) {
+            Map<String, Object> interactionPayload = new LinkedHashMap<>();
+            interactionPayload.put("interactionId", liveStartInteractionId);
+            interactionPayload.put("interactionType", INTERACTION_TYPE_LIVE_START);
+            interactionPayload.put("sourceActionType", INTERACTION_TYPE_LIVE_START);
+            appendAction(
+                context.match,
+                context.match.getPlayerAId(),
+                "INTERACTION_PENDING",
+                toJson(interactionPayload),
+                context.turnNumber
+            );
+        }
     }
 
     /**
@@ -1623,6 +1811,8 @@ public class MatchActionService {
 
         Long holopowerCardInstanceId = null;
         Map<String, Object> collabEffectSummary = null;
+        List<Map<String, Object>> collabGiftTriggeredEffects = List.of();
+        Map<String, Object> collabGiftEffectSummary = null;
         Map<String, Object> collabTriggerSummary = null;
         MatchEffectService.TriggeredEffectPreview collabPreview = null;
         FollowupInteractionDecision collabTriggerConfirmDecision = null;
@@ -1635,23 +1825,29 @@ public class MatchActionService {
                 cardInstanceId
             );
             collabEffectSummary = buildTriggeredEffectDeferredSummary("COLLAB", collabPreview);
+            collabGiftTriggeredEffects = matchEffectService.previewGiftTriggeredEffectsOnCollab(
+                matchId,
+                userId,
+                cardInstanceId,
+                context.turnNumber
+            );
+            if (!collabGiftTriggeredEffects.isEmpty()) {
+                collabGiftEffectSummary = buildGiftTriggeredEffectDeferredSummary(collabGiftTriggeredEffects);
+            }
             collabTriggerSummary = matchEventHookService.onHolomemCollab(
                 matchId,
                 userId,
                 asString(currentHolomem.get("card_id")),
                 cardInstanceId
             );
-            if (collabPreview.hasEffect()) {
-                collabTriggerConfirmDecision = createTriggeredEffectConfirmPendingInteraction(
+            if (collabPreview.hasEffect() || !collabGiftTriggeredEffects.isEmpty()) {
+                collabTriggerConfirmDecision = createCollabTriggeredEffectConfirmPendingInteraction(
                     matchId,
                     userId,
-                    "COLLAB",
                     cardInstanceId,
                     asString(currentHolomem.get("card_id")),
-                    "COLLAB_EFFECT",
-                    "確認連動效果",
-                    buildTriggeredEffectConfirmMessage("COLLAB", collabPreview),
-                    List.of(buildInteractionSourceCardPayload(matchId, userId, cardInstanceId, asString(currentHolomem.get("card_id")), "COLLAB")),
+                    collabPreview,
+                    collabGiftTriggeredEffects,
                     context.turnNumber
                 );
             }
@@ -1667,6 +1863,11 @@ public class MatchActionService {
         }
         if (collabEffectSummary != null) {
             payload.put("collabEffect", collabEffectSummary);
+        }
+        if (collabGiftEffectSummary != null && toBoolean(collabGiftEffectSummary.get("deferred"))) {
+            payload.put("collabGiftEffect", collabGiftEffectSummary);
+        }
+        if (collabTriggerConfirmDecision != null) {
             putFollowupDecisionPayload(payload, collabTriggerConfirmDecision);
         }
         if (collabTriggerSummary != null) {
@@ -1675,9 +1876,12 @@ public class MatchActionService {
         payload.put(
             "triggerResolutionOrder",
             buildTriggeredResolutionOrder(
-                "COLLAB_EFFECT",
+                "COLLAB_TRIGGER",
                 100,
-                collabEffectSummary,
+                mergeEffectSummaryForChecks(
+                    collabEffectSummary,
+                    collabGiftEffectSummary == null ? List.of() : List.of(collabGiftEffectSummary)
+                ),
                 "COLLAB_EVENT_HOOK",
                 200,
                 collabTriggerSummary
@@ -1885,7 +2089,7 @@ public class MatchActionService {
 
     /**
      * 執行 バトンタッチ。
-     * 來源限 CENTER/COLLAB，目標限非休息 BACK；同時套用成本修正並支付 Cheer 成本。
+     * 來源限非休息 BACK，成本由該 BACK Holomem 支付，並與 CENTER 交換。
      */
     @Transactional
     public void batonTouch(Long matchId, Long userId, BatonTouchActionRequest request) {
@@ -1900,9 +2104,9 @@ public class MatchActionService {
             request == null ? null : request.getSourceHolomemCardInstanceId(),
             "sourceHolomemCardInstanceId"
         );
-        Long targetBackHolomemCardInstanceId = requirePositiveId(
-            request == null ? null : request.getTargetBackHolomemCardInstanceId(),
-            "targetBackHolomemCardInstanceId"
+        Long targetCenterHolomemCardInstanceId = requirePositiveId(
+            request == null ? null : request.getTargetCenterHolomemCardInstanceId(),
+            "targetCenterHolomemCardInstanceId"
         );
 
         Map<String, Object> source = jdbcTemplate.query(
@@ -1933,15 +2137,18 @@ public class MatchActionService {
             throw new IllegalArgumentException("找不到要執行バトンタッチ的 Holomem");
         }
         String sourceZone = normalizeZone(source.get("zone"));
-        if (!Set.of("CENTER", "COLLAB").contains(sourceZone)) {
-            throw new IllegalStateException("バトンタッチ 來源必須是 CENTER 或 COLLAB");
+        if (!"BACK".equals(sourceZone)) {
+            throw new IllegalStateException("バトンタッチ 來源必須是 BACK Holomem");
+        }
+        if (toBoolean(source.get("is_rested"))) {
+            throw new IllegalStateException("バトンタッチ 來源必須是非休息狀態的 BACK Holomem");
         }
         Long sourceHolomemId = asLong(source.get("id"));
         if (sourceHolomemId == null) {
             throw new IllegalStateException("來源 Holomem 資料異常");
         }
-        if (isStageActionLocked(matchId, userId, context.turnNumber, "BATON_TOUCH", sourceZone, sourceHolomemId)) {
-            throw new GameRuleException(GameErrorCode.STAGE_ACTION_LOCKED, "目前效果限制：不可バトンタッチ");
+        if (sourceHolomemCardInstanceId.equals(targetCenterHolomemCardInstanceId)) {
+            throw new IllegalStateException("バトンタッチ 來源與目標不可相同");
         }
 
         Map<String, Object> target = jdbcTemplate.query(
@@ -1966,21 +2173,23 @@ public class MatchActionService {
             },
             matchId,
             userId,
-            targetBackHolomemCardInstanceId
+            targetCenterHolomemCardInstanceId
         );
         if (target == null) {
-            throw new IllegalArgumentException("找不到要交換上場的 BACK Holomem");
+            throw new IllegalArgumentException("找不到要交換的 CENTER Holomem");
         }
         String targetZone = normalizeZone(target.get("zone"));
-        if (!"BACK".equals(targetZone)) {
-            throw new IllegalStateException("バトンタッチ 目標必須是 BACK Holomem");
-        }
-        if (toBoolean(target.get("is_rested"))) {
-            throw new IllegalStateException("バトンタッチ 目標必須是非休息狀態的 BACK Holomem");
+        if (!"CENTER".equals(targetZone)) {
+            throw new IllegalStateException("バトンタッチ 目標必須是 CENTER Holomem");
         }
         Long targetHolomemId = asLong(target.get("id"));
         if (targetHolomemId == null) {
             throw new IllegalStateException("目標 Holomem 資料異常");
+        }
+
+        if (isStageActionLocked(matchId, userId, context.turnNumber, "BATON_TOUCH", sourceZone, sourceHolomemId)
+            || isStageActionLocked(matchId, userId, context.turnNumber, "BATON_TOUCH", targetZone, targetHolomemId)) {
+            throw new GameRuleException(GameErrorCode.STAGE_ACTION_LOCKED, "目前效果限制：不可バトンタッチ");
         }
 
         int currentTurn = context.turnNumber;
@@ -1996,7 +2205,7 @@ public class MatchActionService {
         int moveSource = jdbcTemplate.update(
             """
             UPDATE match_holomems
-            SET zone = 'BACK',
+            SET zone = 'CENTER',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
               AND match_id = ?
@@ -2009,19 +2218,45 @@ public class MatchActionService {
         int moveTarget = jdbcTemplate.update(
             """
             UPDATE match_holomems
-            SET zone = ?,
+            SET zone = 'BACK',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
               AND match_id = ?
               AND owner_user_id = ?
             """,
-            sourceZone,
             targetHolomemId,
             matchId,
             userId
         );
         if (moveSource != 1 || moveTarget != 1) {
             throw new IllegalStateException("バトンタッチ 移動失敗，請重新整理後重試");
+        }
+
+        List<Map<String, Object>> batonTouchGiftTriggeredEffects = matchEffectService.previewGiftTriggeredEffectsOnBatonTouchBack(
+            matchId,
+            userId,
+            targetCenterHolomemCardInstanceId,
+            context.turnNumber
+        );
+        Map<String, Object> batonTouchGiftEffectSummary = null;
+        FollowupInteractionDecision batonTouchGiftDecision = null;
+        if (!batonTouchGiftTriggeredEffects.isEmpty()) {
+            batonTouchGiftEffectSummary = buildGiftTriggeredEffectDeferredSummary(batonTouchGiftTriggeredEffects);
+            batonTouchGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                matchId,
+                userId,
+                targetCenterHolomemCardInstanceId,
+                asString(target.get("card_id")),
+                buildGiftTriggerInteractionCards(
+                    matchId,
+                    userId,
+                    targetCenterHolomemCardInstanceId,
+                    asString(target.get("card_id")),
+                    batonTouchGiftTriggeredEffects
+                ),
+                batonTouchGiftTriggeredEffects,
+                context.turnNumber
+            );
         }
 
         context.match.setCurrentPhase(MatchPhase.MAIN.name());
@@ -2032,12 +2267,18 @@ public class MatchActionService {
         payload.put("sourceHolomemCardInstanceId", sourceHolomemCardInstanceId);
         payload.put("sourceCardId", asString(source.get("card_id")));
         payload.put("sourceFromZone", sourceZone);
-        payload.put("targetHolomemCardInstanceId", targetBackHolomemCardInstanceId);
+        payload.put("sourceToZone", "CENTER");
+        payload.put("targetHolomemCardInstanceId", targetCenterHolomemCardInstanceId);
         payload.put("targetCardId", asString(target.get("card_id")));
-        payload.put("targetToZone", sourceZone);
+        payload.put("targetFromZone", targetZone);
+        payload.put("targetToZone", "BACK");
         payload.put("requiredColorless", requiredColorless);
         payload.put("modifierColorless", batonTouchModifier);
         payload.put("cost", costSummary);
+        if (batonTouchGiftEffectSummary != null) {
+            payload.put("batonTouchGiftEffect", batonTouchGiftEffectSummary);
+            putFollowupDecisionPayload(payload, batonTouchGiftDecision);
+        }
 
         appendAction(
             context.match,
@@ -2121,10 +2362,11 @@ public class MatchActionService {
 
         jdbcTemplate.update(
             """
-            INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down)
-            VALUES (?, ?, FALSE)
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
             """,
             matchHolomemId,
+            cheerCardInstanceId,
             cheerCardId
         );
 
@@ -2231,7 +2473,26 @@ public class MatchActionService {
             matchId,
             asLong(attacker.get("id"))
         );
-        int turnArtDamageModifier = resolveTurnArtDamageModifier(matchId, userId, context.turnNumber);
+        // 藝能本身也可能帶有「依附著 Cheer 數量放大本次傷害」的文案。
+        // 這類效果不是 stage 上另一張卡提供的 aura，而是本次藝能自己的條件，因此獨立計算。
+        int artTextDamageBonus = matchEffectService.resolveArtTextDamageBonus(
+            matchId,
+            userId,
+            asLong(attacker.get("id")),
+            asString(art.get("effect_json_text"))
+        );
+        // 常駐 Gift 的藝能加成在攻擊時計算，避免把這類「無互動、無暫存」效果硬塞進 pending 流程。
+        int passiveGiftArtBonus = matchEffectService.resolvePassiveGiftArtBonus(
+            matchId,
+            userId,
+            asLong(attacker.get("id"))
+        );
+        int turnArtDamageModifier = resolveTurnArtDamageModifier(
+            matchId,
+            userId,
+            context.turnNumber,
+            asLong(attacker.get("id"))
+        );
         Map<String, Integer> requiredCheerCost = resolveArtCheerCost(asString(art.get("cost_cheer_json_text")));
         Map<String, Object> costSummary = payArtCost(
             matchId,
@@ -2252,11 +2513,17 @@ public class MatchActionService {
         );
         boolean hasOpponentHolomem = opponentHolomemCount != null && opponentHolomemCount > 0;
         TargetHolomem targetHolomem = null;
+        Map<String, Object> defenderSelfDownedHolderSnapshot = null;
         if (hasOpponentHolomem) {
             targetHolomem = resolveOpponentTargetHolomem(matchId, context.opponentUserId, targetCardInstanceId);
             if (targetHolomem == null) {
                 throw new IllegalStateException("DAMAGE 找不到可攻擊的對手 Holomen");
             }
+            defenderSelfDownedHolderSnapshot = matchEffectService.loadGiftHolderSnapshot(
+                matchId,
+                context.opponentUserId,
+                targetHolomem.holomemId()
+            );
             DamageRedirectTarget redirectTarget = resolveDamageRedirectTarget(
                 matchId,
                 context.opponentUserId,
@@ -2277,11 +2544,23 @@ public class MatchActionService {
                 criticalBonus = artCritical.bonus();
             }
         }
-        int incomingDamageReduction = hasOpponentHolomem
+        int turnIncomingDamageReduction = hasOpponentHolomem
             ? resolveIncomingDamageReduction(matchId, context.opponentUserId, context.turnNumber)
             : 0;
+        // 受擊方自己的常駐 Gift 也可能直接改寫這次實際傷害。
+        // 例如 `HSD07-009` 這種「這張卡自己受傷 -10」不是 turn effect，
+        // 因此要在這裡和 turn-based modifier 分開計算，避免兩種來源混成同一個 state 模型。
+        int passiveGiftIncomingDamageReduction = hasOpponentHolomem && targetHolomem != null
+            ? matchEffectService.resolvePassiveGiftIncomingDamageReduction(
+                matchId,
+                context.opponentUserId,
+                targetHolomem.holomemId()
+            )
+            : 0;
+        int incomingDamageReduction = turnIncomingDamageReduction + passiveGiftIncomingDamageReduction;
         int totalDamage = Math.max(
-            baseDamage + attachedSupportArtBonus + turnArtDamageModifier + criticalBonus - incomingDamageReduction,
+            baseDamage + attachedSupportArtBonus + artTextDamageBonus + passiveGiftArtBonus
+                + turnArtDamageModifier + criticalBonus - incomingDamageReduction,
             0
         );
         if (totalDamage <= 0) {
@@ -2326,7 +2605,47 @@ public class MatchActionService {
                 )
             );
         }
+        Map<String, Object> artDownTriggeredEffectSummary = hasOpponentHolomem && hasHolomemDowned(artSummary)
+            ? matchEffectService.applyArtDownTriggeredEffects(
+                matchId,
+                userId,
+                attackerCardInstanceId,
+                asString(art.get("effect_json_text"))
+            )
+            : Map.of(
+                "triggerType", "ART_DOWNED_OPPONENT",
+                "requestedEffects", List.of(),
+                "executedEffects", List.of(),
+                "unsupportedEffects", List.of(),
+                "skippedEffects", List.of(),
+                "applied", false
+            );
+        List<Map<String, Object>> defenderGiftTriggeredEffects = new ArrayList<>();
+        String downedTargetCardId = targetHolomem == null ? null : targetHolomem.cardId();
+        String downedTargetZone = targetHolomem == null ? null : targetHolomem.zone();
+        if (hasOpponentHolomem && hasHolomemDowned(artSummary)) {
+            defenderGiftTriggeredEffects.addAll(
+                matchEffectService.previewGiftTriggeredEffectsOnSelfDowned(
+                    matchId,
+                    context.opponentUserId,
+                    effectiveTargetCardInstanceId,
+                    downedTargetZone,
+                    context.turnNumber,
+                    defenderSelfDownedHolderSnapshot
+                )
+            );
+            defenderGiftTriggeredEffects.addAll(
+                matchEffectService.previewGiftTriggeredEffectsOnAllyDowned(
+                    matchId,
+                    context.opponentUserId,
+                    effectiveTargetCardInstanceId,
+                    downedTargetZone,
+                    context.turnNumber
+                )
+            );
+        }
         FollowupInteractionDecision postTriggerConfirmDecision = null;
+        FollowupInteractionDecision defenderGiftConfirmDecision = null;
         Map<String, Object> downEventPreview = extractDownEventPreview(artSummary);
         Map<String, Object> postTriggerEffectSummary = buildAttackArtPostTriggerDeferredSummary(
             giftTriggeredEffects,
@@ -2351,6 +2670,25 @@ public class MatchActionService {
                 context.turnNumber
             );
         }
+        Map<String, Object> defenderGiftEffectSummary = buildGiftTriggeredEffectDeferredSummary(defenderGiftTriggeredEffects);
+        if (!defenderGiftTriggeredEffects.isEmpty()) {
+            List<Map<String, Object>> defenderSourceCards = buildGiftTriggerInteractionCards(
+                matchId,
+                context.opponentUserId,
+                effectiveTargetCardInstanceId,
+                downedTargetCardId,
+                defenderGiftTriggeredEffects
+            );
+            defenderGiftConfirmDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                matchId,
+                context.opponentUserId,
+                effectiveTargetCardInstanceId,
+                downedTargetCardId,
+                defenderSourceCards,
+                defenderGiftTriggeredEffects,
+                context.turnNumber
+            );
+        }
 
         int attackerRested = jdbcTemplate.update(
             """
@@ -2371,7 +2709,7 @@ public class MatchActionService {
         }
 
         boolean hasNextPerformanceAction = hasAvailableArtAttacker(matchId, userId, context.turnNumber);
-        context.match.setCurrentPhase(hasNextPerformanceAction ? MatchPhase.PERFORMANCE.name() : MatchPhase.END.name());
+        context.match.setCurrentPhase(MatchPhase.PERFORMANCE.name());
         touchUpdatedAt(context.match);
         matchRepository.saveAndFlush(context.match);
 
@@ -2389,16 +2727,27 @@ public class MatchActionService {
         payload.put("costPayment", costSummary);
         payload.put("artBaseDamage", baseDamage);
         payload.put("attachedSupportArtBonus", attachedSupportArtBonus);
+        payload.put("artTextDamageBonus", artTextDamageBonus);
+        payload.put("passiveGiftArtBonus", passiveGiftArtBonus);
         payload.put("turnArtDamageModifier", turnArtDamageModifier);
         payload.put("criticalColor", artCritical == null ? null : artCritical.color());
         payload.put("criticalBonus", criticalBonus);
         payload.put("criticalApplied", criticalApplied);
+        payload.put("turnIncomingDamageReduction", turnIncomingDamageReduction);
+        payload.put("passiveGiftIncomingDamageReduction", passiveGiftIncomingDamageReduction);
         payload.put("incomingDamageReduction", incomingDamageReduction);
         payload.put("artTotalDamage", totalDamage);
         payload.put("effect", artSummary);
+        payload.put("artDownTriggeredEffects", artDownTriggeredEffectSummary);
         payload.put("postTriggerEffects", postTriggerEffectSummary);
+        payload.put("defenderGiftEffects", defenderGiftEffectSummary);
+        payload.put("hasNextPerformanceAction", hasNextPerformanceAction);
         payload.put("lostLifeCardInstanceId", lostLifeCardInstanceId);
         putFollowupDecisionPayload(payload, postTriggerConfirmDecision);
+        if (defenderGiftConfirmDecision != null) {
+            payload.put("defenderPendingInteractionDecisionId", defenderGiftConfirmDecision.decisionId());
+            payload.put("defenderPendingInteractionDecisionType", defenderGiftConfirmDecision.decisionType());
+        }
 
         appendAction(
             context.match,
@@ -2407,7 +2756,10 @@ public class MatchActionService {
             toJson(payload),
             context.turnNumber
         );
-        Map<String, Object> effectSummaryForChecks = mergeEffectSummaryForChecks(artSummary, List.of());
+        Map<String, Object> effectSummaryForChecks = mergeEffectSummaryForChecks(
+            artSummary,
+            List.of(artDownTriggeredEffectSummary)
+        );
         if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, effectSummaryForChecks)) {
             touchUpdatedAt(context.match);
             matchRepository.saveAndFlush(context.match);
@@ -2480,7 +2832,7 @@ public class MatchActionService {
         }
         return jdbcTemplate.query(
             """
-            SELECT h.id, h.match_card_id, m.main_color
+            SELECT h.id, h.match_card_id, h.card_id, h.zone, m.main_color
             FROM match_holomems h
             JOIN member_cards m ON m.card_id = h.card_id
             WHERE h.match_id = ?
@@ -2492,6 +2844,8 @@ public class MatchActionService {
                 ? new TargetHolomem(
                     rs.getLong("id"),
                     rs.getLong("match_card_id"),
+                    rs.getString("card_id"),
+                    normalizeZone(rs.getString("zone")),
                     normalizeZone(rs.getString("main_color"))
                 )
                 : null,
@@ -2503,11 +2857,20 @@ public class MatchActionService {
 
     /**
      * 計算本回合對攻擊方生效的傷害加成（非受傷減免類）。
+     *
+     * <p>這裡要同時支援兩種回合效果：
+     *
+     * <p>- 玩家層級 buff：例如「這回合自己所有 Holomem 的藝能 +20」
+     * <p>- 單體 buff：例如 `HBP06-084` 的「〈博衣こより〉1人のアーツ+20」
+     *
+     * <p>因此 SQL 不能只看 `affected_user_id`。若 payload 已記錄 `targetHolomemId`，就必須只在
+     * 「本次出招的攻擊者就是那張 Holomem」時才套用。否則會把單體加成誤放大成整個玩家都吃到。
      */
-    private int resolveTurnArtDamageModifier(Long matchId, Long userId, int currentTurn) {
+    private int resolveTurnArtDamageModifier(Long matchId, Long userId, int currentTurn, Long attackerHolomemId) {
         if (matchId == null || userId == null || currentTurn <= 0) {
             return 0;
         }
+        String attackerHolomemIdText = attackerHolomemId == null ? "" : attackerHolomemId.toString();
         Integer modifier = jdbcTemplate.query(
             """
             SELECT COALESCE(SUM(modifier_value), 0) AS total
@@ -2518,11 +2881,16 @@ public class MatchActionService {
               AND expires_turn >= ?
               AND COALESCE(payload ->> 'rawText', '') NOT LIKE '%受けるダメージ%'
               AND COALESCE(payload ->> 'rawText', '') NOT LIKE '%ダメージを受ける%'
+              AND (
+                COALESCE(payload ->> 'targetHolomemId', '') = ''
+                OR (payload ->> 'targetHolomemId') = ?
+              )
             """,
             rs -> rs.next() ? rs.getInt("total") : 0,
             matchId,
             userId,
-            currentTurn
+            currentTurn,
+            attackerHolomemIdText
         );
         return modifier == null ? 0 : modifier;
     }
@@ -2564,7 +2932,7 @@ public class MatchActionService {
         ActionContext context = loadActionContext(
             matchId,
             userId,
-            Set.of(MatchPhase.MAIN, MatchPhase.PERFORMANCE, MatchPhase.END)
+            Set.of(MatchPhase.END)
         );
         if (context.blockedByPendingInteraction()) {
             return;
@@ -2746,7 +3114,8 @@ public class MatchActionService {
         if (!matchPlayerRepository.existsByMatchIdAndUserId(matchId, userId)) {
             throw new IllegalArgumentException("你不在此房間中");
         }
-        if (match.getCurrentTurnPlayerId() == null || !match.getCurrentTurnPlayerId().equals(userId)) {
+        boolean isCurrentTurnPlayer = match.getCurrentTurnPlayerId() != null && match.getCurrentTurnPlayerId().equals(userId);
+        if (!isCurrentTurnPlayer && (!allowPendingDecision || !hasBlockingPendingDecision(matchId, userId))) {
             throw new GameRuleException(GameErrorCode.NOT_YOUR_TURN, "現在不是你的回合");
         }
 
@@ -2762,6 +3131,9 @@ public class MatchActionService {
         Long opponentUserId = resolveOpponent(match, userId);
         if (!allowPendingDecision && hasBlockingPendingDecision(matchId, userId)) {
             throw new GameRuleException(GameErrorCode.PENDING_INTERACTION_BLOCKED, "你有待處理的互動，請先完成確認");
+        }
+        if (!allowPendingDecision && hasAnyPendingDecision(matchId)) {
+            throw new GameRuleException(GameErrorCode.PENDING_INTERACTION_BLOCKED, "對戰中有待處理的互動，請先完成確認");
         }
 
         return new ActionContext(match, phase, turnNumber, opponentUserId, false);
@@ -2780,7 +3152,7 @@ public class MatchActionService {
         Map<String, Object> context = new LinkedHashMap<>();
         context.put("interactionType", INTERACTION_TYPE_LIVE_START);
         context.put("title", "LIVE START!!");
-        context.put("message", "雙方開場 CENTER 已設置完成，確認後開始對戰。");
+        context.put("message", "雙方開場舞台已設置完成，確認後翻開 CENTER 與 BACK 並開始對戰。");
         context.put("turnNumber", turnNumber);
         return jdbcTemplate.query(
             """
@@ -2829,6 +3201,24 @@ public class MatchActionService {
     }
 
     /**
+     * 推導下一位需完成開場設置的玩家。
+     */
+    private Long resolveNextOpeningSetupUser(MatchEntity match, Long currentUserId) {
+        if (match == null || currentUserId == null) {
+            return null;
+        }
+        Long playerAId = match.getPlayerAId();
+        Long playerBId = match.getPlayerBId();
+        if (currentUserId.equals(playerAId) && playerBId != null && !hasOpeningSetupFinished(match.getId(), playerBId)) {
+            return playerBId;
+        }
+        if (currentUserId.equals(playerBId) && playerAId != null && !hasOpeningSetupFinished(match.getId(), playerAId)) {
+            return playerAId;
+        }
+        return null;
+    }
+
+    /**
      * 判斷玩家是否已放置開場 CENTER Holomem。
      */
     private boolean hasOpeningCenterPlaced(Long matchId, Long userId) {
@@ -2839,6 +3229,25 @@ public class MatchActionService {
             WHERE match_id = ?
               AND owner_user_id = ?
               AND zone = 'CENTER'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        return count != null && count > 0;
+    }
+
+    /**
+     * 判斷玩家是否已完成開場設置確認。
+     */
+    private boolean hasOpeningSetupFinished(Long matchId, Long userId) {
+        Integer count = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'OPENING_SETUP_DONE'
             """,
             Integer.class,
             matchId,
@@ -4429,6 +4838,24 @@ public class MatchActionService {
     }
 
     /**
+     * 判斷此對戰是否存在任何 pending 決策。
+     */
+    private boolean hasAnyPendingDecision(Long matchId) {
+        Integer count = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND status = ?
+            """,
+            Integer.class,
+            matchId,
+            PENDING_STATUS
+        );
+        return count != null && count > 0;
+    }
+
+    /**
      * 判斷是否存在任何 pending 決策。
      */
     private boolean hasAnyPendingDecision(Long matchId, Long userId) {
@@ -4837,16 +5264,12 @@ public class MatchActionService {
                 matchId,
                 userId,
                 pending.sourceCardId(),
-                pending.sourceCardInstanceId()
+                pending.sourceCardInstanceId(),
+                extractJsonText(pending.contextNode(), "sourceLevelType")
             );
         }
         if ("COLLAB".equals(normalizedSourceActionType)) {
-            return matchEffectService.applyCollabTriggeredEffects(
-                matchId,
-                userId,
-                pending.sourceCardId(),
-                pending.sourceCardInstanceId()
-            );
+            return applyCollabPostTriggeredEffectsAfterConfirm(matchId, userId, pending, turnNumber);
         }
         if ("ATTACK_ART_POST_TRIGGER".equals(normalizedSourceActionType)) {
             return applyAttackArtPostTriggeredEffectsAfterConfirm(matchId, userId, pending, turnNumber);
@@ -4979,6 +5402,60 @@ public class MatchActionService {
             giftTriggers,
             "GIFT"
         );
+    }
+
+    /**
+     * COLLAB 確認後執行：整合 collab effect 與同時觸發的 Gift。
+     */
+    private Map<String, Object> applyCollabPostTriggeredEffectsAfterConfirm(
+        Long matchId,
+        Long userId,
+        PendingDecision pending,
+        int turnNumber
+    ) {
+        boolean hasCollabEffect = pending.contextNode() != null && pending.contextNode().path("hasCollabEffect").asBoolean(false);
+        Map<String, Object> collabSummary = null;
+        if (hasCollabEffect) {
+            collabSummary = matchEffectService.applyCollabTriggeredEffects(
+                matchId,
+                userId,
+                pending.sourceCardId(),
+                pending.sourceCardInstanceId()
+            );
+        }
+
+        List<Map<String, Object>> giftTriggers = extractGiftTriggerContexts(pending.contextNode());
+        Map<String, Object> giftSummary = null;
+        if (!giftTriggers.isEmpty()) {
+            giftSummary = applyGiftTriggeredEffectsFromContext(
+                matchId,
+                userId,
+                pending.sourceCardInstanceId(),
+                turnNumber,
+                giftTriggers,
+                "GIFT"
+            );
+        }
+
+        List<Map<String, Object>> executedEffects = new ArrayList<>();
+        List<Map<String, Object>> skippedEffects = new ArrayList<>();
+        List<String> unsupportedEffects = new ArrayList<>();
+        List<Map<String, Object>> triggeredGifts = new ArrayList<>();
+
+        collectTriggeredEffectSummary(collabSummary, executedEffects, skippedEffects, unsupportedEffects, null);
+        collectTriggeredEffectSummary(giftSummary, executedEffects, skippedEffects, unsupportedEffects, triggeredGifts);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("sourceActionType", "COLLAB");
+        result.put("collabEffect", collabSummary);
+        result.put("gift", giftSummary);
+        result.put("triggeredGifts", triggeredGifts);
+        result.put("executedEffects", executedEffects);
+        result.put("skippedEffects", skippedEffects);
+        result.put("unsupportedEffects", unsupportedEffects);
+        result.put("partiallyResolved", !skippedEffects.isEmpty() || !unsupportedEffects.isEmpty());
+        result.put("applied", collabSummary != null || !triggeredGifts.isEmpty());
+        return result;
     }
 
     /**
@@ -5150,6 +5627,16 @@ public class MatchActionService {
                 turnNumber,
                 giftHolderHolomemId
             );
+            if ((summary == null || summary.isEmpty()) && asLong(trigger.get("giftHolderCardInstanceId")) != null) {
+                summary = matchEffectService.applyStoredGiftTriggeredEffect(
+                    matchId,
+                    userId,
+                    triggerType,
+                    sourceCardInstanceId,
+                    triggerTargetCardInstanceId,
+                    trigger
+                );
+            }
             if (summary == null || summary.isEmpty()) {
                 continue;
             }
@@ -5192,6 +5679,54 @@ public class MatchActionService {
         return result;
     }
 
+    private void collectTriggeredEffectSummary(
+        Map<String, Object> summary,
+        List<Map<String, Object>> executedEffects,
+        List<Map<String, Object>> skippedEffects,
+        List<String> unsupportedEffects,
+        List<Map<String, Object>> triggeredGifts
+    ) {
+        if (summary == null || summary.isEmpty()) {
+            return;
+        }
+        Object summaryExecutedEffects = summary.get("executedEffects");
+        if (summaryExecutedEffects instanceof List<?> effects) {
+            for (Object effect : effects) {
+                if (effect instanceof Map<?, ?> effectMap) {
+                    executedEffects.add(new LinkedHashMap<>(castToMap(effectMap)));
+                }
+            }
+        }
+        Object summarySkippedEffects = summary.get("skippedEffects");
+        if (summarySkippedEffects instanceof List<?> effects) {
+            for (Object effect : effects) {
+                if (effect instanceof Map<?, ?> effectMap) {
+                    skippedEffects.add(new LinkedHashMap<>(castToMap(effectMap)));
+                }
+            }
+        }
+        Object summaryUnsupportedEffects = summary.get("unsupportedEffects");
+        if (summaryUnsupportedEffects instanceof List<?> effectTypes) {
+            for (Object effectType : effectTypes) {
+                String normalized = normalizeZone(effectType);
+                if (StringUtils.hasText(normalized) && !unsupportedEffects.contains(normalized)) {
+                    unsupportedEffects.add(normalized);
+                }
+            }
+        }
+        if (triggeredGifts == null) {
+            return;
+        }
+        Object gifts = summary.get("triggeredGifts");
+        if (gifts instanceof List<?> list) {
+            for (Object gift : list) {
+                if (gift instanceof Map<?, ?> map) {
+                    triggeredGifts.add(new LinkedHashMap<>(castToMap(map)));
+                }
+            }
+        }
+    }
+
     /**
      * 若本次確認來源為 GIFT，補寫每筆 `GIFT_TRIGGER` action（供 turn once / 追蹤）。
      */
@@ -5207,6 +5742,11 @@ public class MatchActionService {
         String sourceActionType = normalizeZone(effectSummary.get("sourceActionType"));
         Object triggeredGifts = effectSummary.get("triggeredGifts");
         if ("ATTACK_ART_POST_TRIGGER".equals(sourceActionType)) {
+            Object nestedGift = effectSummary.get("gift");
+            if (nestedGift instanceof Map<?, ?> map) {
+                triggeredGifts = castToMap(map).get("triggeredGifts");
+            }
+        } else if ("COLLAB".equals(sourceActionType)) {
             Object nestedGift = effectSummary.get("gift");
             if (nestedGift instanceof Map<?, ?> map) {
                 triggeredGifts = castToMap(map).get("triggeredGifts");
@@ -5246,6 +5786,10 @@ public class MatchActionService {
             trigger.put("sourceCardInstanceId", extractJsonLong(node, "sourceCardInstanceId"));
             trigger.put("triggerTargetCardInstanceId", extractJsonLong(node, "triggerTargetCardInstanceId"));
             trigger.put("giftHolderHolomemId", extractJsonLong(node, "giftHolderHolomemId"));
+            trigger.put("giftHolderCardInstanceId", extractJsonLong(node, "giftHolderCardInstanceId"));
+            trigger.put("giftHolderCardId", extractJsonText(node, "giftHolderCardId"));
+            trigger.put("giftHolderZone", extractJsonText(node, "giftHolderZone"));
+            trigger.put("rawText", extractJsonText(node, "rawText"));
             triggers.add(trigger);
         }
         return triggers;
@@ -5416,6 +5960,10 @@ public class MatchActionService {
             triggerPayload.put("sourceCardInstanceId", asLong(trigger.get("sourceCardInstanceId")));
             triggerPayload.put("triggerTargetCardInstanceId", asLong(trigger.get("triggerTargetCardInstanceId")));
             triggerPayload.put("giftHolderHolomemId", asLong(trigger.get("giftHolderHolomemId")));
+            triggerPayload.put("giftHolderCardInstanceId", asLong(trigger.get("giftHolderCardInstanceId")));
+            triggerPayload.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
+            triggerPayload.put("giftHolderZone", asString(trigger.get("giftHolderZone")));
+            triggerPayload.put("rawText", asString(trigger.get("rawText")));
             giftTriggers.add(triggerPayload);
         }
 
@@ -5574,6 +6122,10 @@ public class MatchActionService {
             triggerPayload.put("sourceCardInstanceId", asLong(trigger.get("sourceCardInstanceId")));
             triggerPayload.put("triggerTargetCardInstanceId", asLong(trigger.get("triggerTargetCardInstanceId")));
             triggerPayload.put("giftHolderHolomemId", asLong(trigger.get("giftHolderHolomemId")));
+            triggerPayload.put("giftHolderCardInstanceId", asLong(trigger.get("giftHolderCardInstanceId")));
+            triggerPayload.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
+            triggerPayload.put("giftHolderZone", asString(trigger.get("giftHolderZone")));
+            triggerPayload.put("rawText", asString(trigger.get("rawText")));
             giftTriggers.add(triggerPayload);
         }
         Map<String, Object> additionalContext = new LinkedHashMap<>();
@@ -5593,6 +6145,115 @@ public class MatchActionService {
             turnNumber,
             additionalContext
         );
+    }
+
+    private FollowupInteractionDecision createCollabTriggeredEffectConfirmPendingInteraction(
+        Long matchId,
+        Long userId,
+        Long sourceCardInstanceId,
+        String sourceCardId,
+        MatchEffectService.TriggeredEffectPreview collabPreview,
+        List<Map<String, Object>> giftTriggeredEffects,
+        int turnNumber
+    ) {
+        List<Map<String, Object>> cards = buildGiftTriggerInteractionCards(
+            matchId,
+            userId,
+            sourceCardInstanceId,
+            sourceCardId,
+            giftTriggeredEffects
+        );
+        if (cards.isEmpty() && sourceCardInstanceId != null && sourceCardInstanceId > 0) {
+            cards = List.of(buildInteractionSourceCardPayload(matchId, userId, sourceCardInstanceId, sourceCardId, "COLLAB"));
+        }
+
+        Map<String, Object> additionalContext = new LinkedHashMap<>();
+        additionalContext.put("hasCollabEffect", collabPreview != null && collabPreview.hasEffect());
+
+        List<Map<String, Object>> giftTriggers = new ArrayList<>();
+        for (Map<String, Object> trigger : giftTriggeredEffects) {
+            if (trigger == null || trigger.isEmpty()) {
+                continue;
+            }
+            Map<String, Object> triggerPayload = new LinkedHashMap<>();
+            triggerPayload.put("triggerType", normalizeZone(trigger.get("triggerType")));
+            triggerPayload.put("sourceCardInstanceId", asLong(trigger.get("sourceCardInstanceId")));
+            triggerPayload.put("triggerTargetCardInstanceId", asLong(trigger.get("triggerTargetCardInstanceId")));
+            triggerPayload.put("giftHolderHolomemId", asLong(trigger.get("giftHolderHolomemId")));
+            giftTriggers.add(triggerPayload);
+        }
+        additionalContext.put("giftTriggers", giftTriggers);
+        additionalContext.put("giftCount", giftTriggers.size());
+        additionalContext.put("triggerSections", buildCollabTriggerSections(collabPreview, giftTriggeredEffects));
+
+        return createTriggeredEffectConfirmPendingInteraction(
+            matchId,
+            userId,
+            "COLLAB",
+            sourceCardInstanceId,
+            sourceCardId,
+            "COLLAB_TRIGGER",
+            "確認連動觸發效果",
+            buildCollabTriggeredEffectConfirmMessage(collabPreview, giftTriggeredEffects),
+            cards,
+            turnNumber,
+            additionalContext
+        );
+    }
+
+    private String buildCollabTriggeredEffectConfirmMessage(
+        MatchEffectService.TriggeredEffectPreview collabPreview,
+        List<Map<String, Object>> giftTriggeredEffects
+    ) {
+        List<String> lines = new ArrayList<>();
+        if (collabPreview != null && collabPreview.hasEffect()) {
+            lines.add("[Collab]\n" + buildTriggeredEffectConfirmMessage("COLLAB", collabPreview).replaceFirst("^是否要執行本次觸發效果？\\n?", ""));
+        }
+        if (giftTriggeredEffects != null && !giftTriggeredEffects.isEmpty()) {
+            lines.add("[Gift]\n" + buildGiftTriggeredEffectDetails(giftTriggeredEffects));
+        }
+        if (lines.isEmpty()) {
+            return "是否要執行本次連動觸發效果？";
+        }
+        return "是否要執行本次連動觸發效果？\n" + String.join("\n\n", lines);
+    }
+
+    private List<Map<String, Object>> buildCollabTriggerSections(
+        MatchEffectService.TriggeredEffectPreview collabPreview,
+        List<Map<String, Object>> giftTriggeredEffects
+    ) {
+        List<Map<String, Object>> sections = new ArrayList<>();
+        if (collabPreview != null && collabPreview.hasEffect()) {
+            Map<String, Object> collabSection = new LinkedHashMap<>();
+            collabSection.put("sectionType", "COLLAB_EFFECT");
+            collabSection.put("title", "Collab");
+            collabSection.put("effectTypes", collabPreview.effectTypes() == null ? List.of() : collabPreview.effectTypes());
+            collabSection.put("rawText", collabPreview.rawText());
+            sections.add(collabSection);
+        }
+        if (giftTriggeredEffects != null && !giftTriggeredEffects.isEmpty()) {
+            List<Map<String, Object>> giftItems = new ArrayList<>();
+            for (Map<String, Object> trigger : giftTriggeredEffects) {
+                if (trigger == null || trigger.isEmpty()) {
+                    continue;
+                }
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("triggerType", normalizeZone(trigger.get("triggerType")));
+                item.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
+                item.put("rawText", asString(trigger.get("rawText")));
+                item.put("requestedEffects", toStringList(trigger.get("requestedEffects")));
+                giftItems.add(item);
+            }
+            if (!giftItems.isEmpty()) {
+                Map<String, Object> giftSection = new LinkedHashMap<>();
+                giftSection.put("sectionType", "GIFT");
+                giftSection.put("title", "Gift");
+                giftSection.put("count", giftItems.size());
+                giftSection.put("items", giftItems);
+                sections.add(giftSection);
+            }
+        }
+        return sections;
     }
 
     /**
@@ -6660,6 +7321,7 @@ public class MatchActionService {
         List<Map<String, Object>> attachedRows = jdbcTemplate.queryForList(
             """
             SELECT mhc.id AS cheer_row_id,
+                   mhc.match_card_id,
                    mhc.cheer_card_id,
                    cc.color
             FROM match_holomem_cheers mhc
@@ -6890,6 +7552,7 @@ public class MatchActionService {
         for (int i = 0; i < required; i++) {
             Map<String, Object> row = attachedRows.get(i);
             Long cheerRowId = asLong(row.get("cheer_row_id"));
+            Long cheerCardInstanceId = asLong(row.get("match_card_id"));
             String cheerCardId = asString(row.get("cheer_card_id"));
             String color = normalizeZone(row.get("color"));
             if (cheerRowId == null || !StringUtils.hasText(cheerCardId)) {
@@ -6903,7 +7566,7 @@ public class MatchActionService {
             if (deleted != 1) {
                 continue;
             }
-            Long archivedCardInstanceId = archiveStageCheerCard(matchId, ownerUserId, cheerCardId);
+            Long archivedCardInstanceId = archiveStageCheerCard(matchId, ownerUserId, cheerCardInstanceId, cheerCardId);
             paidCheerCardIds.add(cheerCardId);
             if (archivedCardInstanceId != null) {
                 paidCheerCardInstanceIds.add(archivedCardInstanceId);
@@ -6940,23 +7603,33 @@ public class MatchActionService {
      * 將場上的指定 Cheer 卡歸檔到 ARCHIVE。
      */
     private Long archiveStageCheerCard(Long matchId, Long ownerUserId, String cheerCardId) {
-        Long cheerCardInstanceId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'STAGE'
-              AND card_id = ?
-            ORDER BY id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            ownerUserId,
-            cheerCardId
-        );
-        if (cheerCardInstanceId == null) {
+        return archiveStageCheerCard(matchId, ownerUserId, null, cheerCardId);
+    }
+
+    /**
+     * 將場上的指定 Cheer 卡歸檔到 ARCHIVE，優先使用已綁定的實卡 instance。
+     */
+    private Long archiveStageCheerCard(Long matchId, Long ownerUserId, Long cheerCardInstanceId, String cheerCardId) {
+        Long resolvedCardInstanceId = cheerCardInstanceId;
+        if (resolvedCardInstanceId == null || resolvedCardInstanceId <= 0) {
+            resolvedCardInstanceId = jdbcTemplate.query(
+                """
+                SELECT id
+                FROM match_cards
+                WHERE match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'STAGE'
+                  AND card_id = ?
+                ORDER BY id
+                LIMIT 1
+                """,
+                rs -> rs.next() ? rs.getLong("id") : null,
+                matchId,
+                ownerUserId,
+                cheerCardId
+            );
+        }
+        if (resolvedCardInstanceId == null) {
             return null;
         }
         Integer nextArchiveOrder = jdbcTemplate.queryForObject(
@@ -6984,11 +7657,11 @@ public class MatchActionService {
               AND zone = 'STAGE'
             """,
             nextArchiveOrder == null ? 1 : nextArchiveOrder,
-            cheerCardInstanceId,
+            resolvedCardInstanceId,
             matchId,
             ownerUserId
         );
-        return updated == 1 ? cheerCardInstanceId : null;
+        return updated == 1 ? resolvedCardInstanceId : null;
     }
 
     /**
@@ -7044,7 +7717,7 @@ public class MatchActionService {
         if (requestedTargetCardInstanceId != null && requestedTargetCardInstanceId > 0) {
             return jdbcTemplate.query(
                 """
-                SELECT h.id, h.match_card_id, h.card_id, m.main_color
+                SELECT h.id, h.match_card_id, h.card_id, h.zone, m.main_color
                 FROM match_holomems h
                 JOIN member_cards m ON m.card_id = h.card_id
                 WHERE h.match_id = ?
@@ -7056,6 +7729,8 @@ public class MatchActionService {
                     ? new TargetHolomem(
                         rs.getLong("id"),
                         rs.getLong("match_card_id"),
+                        rs.getString("card_id"),
+                        normalizeZone(rs.getString("zone")),
                         normalizeZone(rs.getString("main_color"))
                     )
                     : null,
@@ -7066,7 +7741,7 @@ public class MatchActionService {
         }
         return jdbcTemplate.query(
             """
-            SELECT h.id, h.match_card_id, h.card_id, m.main_color
+            SELECT h.id, h.match_card_id, h.card_id, h.zone, m.main_color
             FROM match_holomems h
             JOIN member_cards m ON m.card_id = h.card_id
             WHERE h.match_id = ?
@@ -7078,6 +7753,8 @@ public class MatchActionService {
                 ? new TargetHolomem(
                     rs.getLong("id"),
                     rs.getLong("match_card_id"),
+                    rs.getString("card_id"),
+                    normalizeZone(rs.getString("zone")),
                     normalizeZone(rs.getString("main_color"))
                 )
                 : null,
@@ -7290,7 +7967,7 @@ public class MatchActionService {
     ) {
     }
 
-    private record TargetHolomem(Long holomemId, Long matchCardInstanceId, String mainColor) {
+    private record TargetHolomem(Long holomemId, Long matchCardInstanceId, String cardId, String zone, String mainColor) {
     }
 
     private record DamageRedirectTarget(Long effectId, TargetHolomem target) {

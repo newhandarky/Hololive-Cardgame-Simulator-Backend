@@ -471,10 +471,11 @@ public class GameActionExecutor {
         }
         jdbcTemplate.update(
             """
-            INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down)
-            VALUES (?, ?, FALSE)
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
             """,
             targetHolomemId,
+            action.cheerCardInstanceId(),
             cheerCardId
         );
         return ActionResult.success(

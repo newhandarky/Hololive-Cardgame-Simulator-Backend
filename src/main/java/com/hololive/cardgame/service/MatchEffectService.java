@@ -1,5 +1,6 @@
 package com.hololive.cardgame.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -11,12 +12,20 @@ import com.hololive.cardgame.game.action.GameActionExecutor;
 import com.hololive.cardgame.game.action.HolomemMoveZoneAction;
 import com.hololive.cardgame.game.action.ReduceLifeAction;
 import com.hololive.cardgame.game.action.SendCheerAction;
+import com.hololive.cardgame.service.effect.EffectTextParser;
+import com.hololive.cardgame.service.effect.GiftExecutionSummary;
+import com.hololive.cardgame.service.effect.GiftTriggerMatcher;
+import com.hololive.cardgame.service.effect.GiftTriggerPreviewService;
+import com.hololive.cardgame.service.effect.SearchCriteria;
+import com.hololive.cardgame.service.effect.SearchCriteriaParser;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -38,7 +47,6 @@ public class MatchEffectService {
     private static final Pattern TAG_PATTERN = Pattern.compile(
         "#([\\p{L}\\p{N}_'\\-]+?)(?=(?:を|が|に|で|と|へ|や|も|、|。|\\s|$))"
     );
-    private static final Pattern NAME_TOKEN_PATTERN = Pattern.compile("〈([^〉]+)〉");
     private static final Pattern ARTS_MODIFIER_PATTERN = Pattern.compile("アーツ\\s*([+＋\\-−]\\s*\\d+)");
     private static final Pattern DICE_AT_LEAST_PATTERN = Pattern.compile("(\\d+)\\s*以上の時");
     private static final Pattern DICE_AT_MOST_PATTERN = Pattern.compile("(\\d+)\\s*以下の時");
@@ -50,6 +58,12 @@ public class MatchEffectService {
     private static final Pattern ATTACHED_SUPPORT_ARTS_PATTERN = Pattern.compile(
         "この(?:マスコット|ツール|ファン)が付いているホロメンのアーツ\\s*([+＋−-]\\s*\\d+)"
     );
+    private static final Pattern PASSIVE_GIFT_HP_PATTERN = Pattern.compile(
+        "HP\\s*([+＋−-]\\s*\\d+)"
+    );
+    private static final Pattern PASSIVE_GIFT_DAMAGE_REDUCTION_VALUE_PATTERN = Pattern.compile(
+        "受けるダメージ\\s*[ー\\-−]\\s*(\\d+)"
+    );
     private static final Pattern BATON_TOUCH_COST_MODIFIER_PATTERN = Pattern.compile("バトンタッチに必要な無色\\s*[+＋]\\s*(\\d+)");
     private static final Pattern DOWN_EXTRA_LIFE_PATTERN = Pattern.compile("ライフを\\s*(\\d+)\\s*つ?減ら");
     private static final Pattern DOWN_EXTRA_LIFE_MINUS_PATTERN = Pattern.compile("ライフ\\s*[ー\\-−]\\s*(\\d+)");
@@ -59,6 +73,10 @@ public class MatchEffectService {
     private final DiceService diceService;
     private final EffectResolver effectResolver;
     private final GameActionExecutor gameActionExecutor;
+    private final EffectTextParser effectTextParser;
+    private final GiftTriggerMatcher giftTriggerMatcher;
+    private final GiftTriggerPreviewService giftTriggerPreviewService;
+    private final SearchCriteriaParser searchCriteriaParser;
 
     /**
      * 效果結算服務建構子。
@@ -75,6 +93,10 @@ public class MatchEffectService {
         this.diceService = diceService;
         this.effectResolver = effectResolver;
         this.gameActionExecutor = gameActionExecutor;
+        this.effectTextParser = new EffectTextParser(objectMapper);
+        this.giftTriggerMatcher = new GiftTriggerMatcher();
+        this.giftTriggerPreviewService = new GiftTriggerPreviewService();
+        this.searchCriteriaParser = new SearchCriteriaParser(jdbcTemplate, effectTextParser);
     }
 
     /**
@@ -114,8 +136,8 @@ public class MatchEffectService {
         Long targetHolomemCardInstanceId,
         boolean deferDownEvent
     ) {
-        JsonNode effectNode = parseEffectJson(effectJson);
-        JsonNode damageEffectNode = withDeferDownEventFlag(effectNode, deferDownEvent);
+        JsonNode effectNode = effectTextParser.parseEffectJson(effectJson);
+        JsonNode damageEffectNode = effectTextParser.withDeferDownEventFlag(effectNode, deferDownEvent);
         List<String> effectTypes = resolveEffectTypes(effectType, effectNode);
         List<Map<String, Object>> executed = new ArrayList<>();
         List<String> unsupported = new ArrayList<>();
@@ -292,7 +314,7 @@ public class MatchEffectService {
         String effectType,
         String effectJson
     ) {
-        JsonNode effectNode = parseEffectJson(effectJson);
+        JsonNode effectNode = effectTextParser.parseEffectJson(effectJson);
         List<String> effectTypes = resolveEffectTypes(effectType, effectNode);
         for (String type : effectTypes) {
             SelectionProbe probe = probeSelectionCandidates(matchId, userId, type, effectNode);
@@ -304,7 +326,7 @@ public class MatchEffectService {
                 continue;
             }
             return new SupportDecisionPlan(
-                normalizeEffectType(type),
+                effectTextParser.normalizeEffectType(type),
                 1,
                 maxSelect,
                 probe.candidates()
@@ -438,6 +460,304 @@ public class MatchEffectService {
     }
 
     /**
+     * 預覽「自己的這張 Holomem down」時會觸發的 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnSelfDowned(
+        Long matchId,
+        Long userId,
+        Long downedCardInstanceId,
+        String downedStageZone,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "SELF_DOWNED",
+            downedCardInstanceId,
+            downedCardInstanceId,
+            turnNumber,
+            false,
+            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone)
+        );
+    }
+
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnSelfDowned(
+        Long matchId,
+        Long userId,
+        Long downedCardInstanceId,
+        String downedStageZone,
+        int turnNumber,
+        Map<String, Object> holderSnapshot
+    ) {
+        if (holderSnapshot == null || holderSnapshot.isEmpty()) {
+            return previewGiftTriggeredEffectsOnSelfDowned(
+                matchId,
+                userId,
+                downedCardInstanceId,
+                downedStageZone,
+                turnNumber
+            );
+        }
+        Map<String, Object> summary = buildGiftTriggerSummary(
+            matchId,
+            userId,
+            turnNumber,
+            downedCardInstanceId,
+            downedCardInstanceId,
+            "SELF_DOWNED",
+            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone),
+            holderSnapshot,
+            false
+        );
+        return summary == null ? List.of() : List.of(summary);
+    }
+
+    /**
+     * 預覽「自己的 Holomem down」時會觸發的其他 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnAllyDowned(
+        Long matchId,
+        Long userId,
+        Long downedCardInstanceId,
+        String downedStageZone,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "ALLY_DOWNED",
+            downedCardInstanceId,
+            downedCardInstanceId,
+            turnNumber,
+            false,
+            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone)
+        );
+    }
+
+    /**
+     * 預覽「Holomem 進場後」會觸發的 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnStageEnter(
+        Long matchId,
+        Long userId,
+        Long enteredCardInstanceId,
+        String enteredStageZone,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "STAGE_ENTER",
+            enteredCardInstanceId,
+            enteredCardInstanceId,
+            turnNumber,
+            false,
+            loadGiftTriggerSourceContext(matchId, enteredCardInstanceId, enteredStageZone)
+        );
+    }
+
+    /**
+     * 預覽「自己的 Holomem 執行 Collab」時會觸發的 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnCollab(
+        Long matchId,
+        Long userId,
+        Long collabCardInstanceId,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "COLLAB",
+            collabCardInstanceId,
+            collabCardInstanceId,
+            turnNumber,
+            false,
+            loadGiftTriggerSourceContext(matchId, collabCardInstanceId, "COLLAB")
+        );
+    }
+
+    /**
+     * 預覽「Holomem 因 バトンタッチ 移回 BACK」時會觸發的 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnBatonTouchBack(
+        Long matchId,
+        Long userId,
+        Long movedToBackCardInstanceId,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "BATON_TOUCH_BACK",
+            movedToBackCardInstanceId,
+            movedToBackCardInstanceId,
+            turnNumber,
+            false,
+            loadGiftTriggerSourceContext(matchId, movedToBackCardInstanceId, "BACK")
+        );
+    }
+
+    /**
+     * 預覽「自己的表演階段開始」會觸發的 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnOwnPerformanceStart(
+        Long matchId,
+        Long userId,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "PERFORMANCE_START_SELF",
+            null,
+            null,
+            turnNumber,
+            false,
+            null
+        );
+    }
+
+    /**
+     * 預覽「對手的表演階段開始」會觸發的 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnOpponentPerformanceStart(
+        Long matchId,
+        Long userId,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "PERFORMANCE_START_OPPONENT",
+            null,
+            null,
+            turnNumber,
+            false,
+            null
+        );
+    }
+
+    /**
+     * 預覽「自己的表演階段結束」會觸發的 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnOwnPerformanceEnd(
+        Long matchId,
+        Long userId,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "PERFORMANCE_END_SELF",
+            null,
+            null,
+            turnNumber,
+            false,
+            null
+        );
+    }
+
+    /**
+     * 預覽「對手的表演階段結束」會觸發的 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnOpponentPerformanceEnd(
+        Long matchId,
+        Long userId,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "PERFORMANCE_END_OPPONENT",
+            null,
+            null,
+            turnNumber,
+            false,
+            null
+        );
+    }
+
+    /**
+     * 記錄表演階段開始時的快照，供表演結束條件判斷使用。
+     */
+    public void recordPerformancePhaseSnapshot(
+        Long matchId,
+        Long sourceUserId,
+        Long affectedUserId,
+        int turnNumber
+    ) {
+        if (matchId == null || affectedUserId == null || turnNumber <= 0) {
+            return;
+        }
+        Integer currentLife = jdbcTemplate.query(
+            """
+            SELECT current_life
+            FROM match_players
+            WHERE match_id = ?
+              AND user_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt("current_life") : null,
+            matchId,
+            affectedUserId
+        );
+        Map<String, Integer> holomemDamage = new LinkedHashMap<>();
+        jdbcTemplate.query(
+            """
+            SELECT id, COALESCE(damage_taken, 0) AS damage_taken
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+            ORDER BY id
+            """,
+            rs -> {
+                holomemDamage.put(Long.toString(rs.getLong("id")), rs.getInt("damage_taken"));
+            },
+            matchId,
+            affectedUserId
+        );
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'PERFORMANCE_SNAPSHOT'
+              AND expires_turn = ?
+            """,
+            matchId,
+            affectedUserId,
+            turnNumber
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_turn_effects (
+                match_id,
+                source_user_id,
+                affected_user_id,
+                effect_type,
+                stat_type,
+                modifier_value,
+                expires_turn,
+                payload
+            ) VALUES (?, ?, ?, ?, 'PERFORMANCE_SNAPSHOT', 0, ?, CAST(? AS jsonb))
+            """,
+            matchId,
+            sourceUserId,
+            affectedUserId,
+            "SYSTEM",
+            turnNumber,
+            effectTextParser.toJsonString(
+                Map.of(
+                    "turnNumber", turnNumber,
+                    "currentLife", currentLife == null ? 0 : currentLife,
+                    "holomemDamage", holomemDamage
+                )
+            )
+        );
+    }
+
+    /**
      * 依已選定 Gift 持有者執行一次觸發效果（供互動確認後使用）。
      */
     public Map<String, Object> applySingleGiftTriggeredEffect(
@@ -488,6 +808,7 @@ public class MatchEffectService {
         if (holder == null) {
             return null;
         }
+        GiftTriggerSourceContext sourceContext = loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null);
         return buildGiftTriggerSummary(
             matchId,
             userId,
@@ -495,8 +816,93 @@ public class MatchEffectService {
             sourceCardInstanceId,
             triggerTargetCardInstanceId,
             normalizedTriggerType,
+            sourceContext,
             holder,
             true
+        );
+    }
+
+    public Map<String, Object> applyStoredGiftTriggeredEffect(
+        Long matchId,
+        Long userId,
+        String triggerType,
+        Long sourceCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        Map<String, Object> storedTrigger
+    ) {
+        if (matchId == null || userId == null || storedTrigger == null || storedTrigger.isEmpty()) {
+            return null;
+        }
+        Long holderHolomemId = asLong(storedTrigger.get("giftHolderHolomemId"));
+        Long holderCardInstanceId = asLong(storedTrigger.get("giftHolderCardInstanceId"));
+        if (holderCardInstanceId == null || holderCardInstanceId <= 0) {
+            return null;
+        }
+        String normalizedTriggerType = normalizeGiftTriggerType(triggerType);
+        String giftText = loadGiftEffectText(asText(storedTrigger.get("rawText")));
+        if (!StringUtils.hasText(giftText)) {
+            return null;
+        }
+
+        GiftExecutionSummary execution = executeGiftEffectsForHolder(
+            matchId,
+            userId,
+            holderCardInstanceId,
+            triggerTargetCardInstanceId,
+            giftText
+        );
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("triggerType", normalizedTriggerType);
+        summary.put("giftHolderHolomemId", holderHolomemId);
+        summary.put("giftHolderCardInstanceId", holderCardInstanceId);
+        summary.put("giftHolderCardId", asText(storedTrigger.get("giftHolderCardId")));
+        summary.put("giftHolderZone", normalize(asText(storedTrigger.get("giftHolderZone"))));
+        summary.put("sourceCardInstanceId", sourceCardInstanceId);
+        summary.put("triggerTargetCardInstanceId", triggerTargetCardInstanceId);
+        summary.put("rawText", giftText);
+        summary.put("requestedEffects", execution.requestedEffects());
+        summary.put("executedEffects", execution.executedEffects());
+        summary.put("unsupportedEffects", execution.unsupportedEffects());
+        summary.put("skippedEffects", execution.skippedEffects());
+        return summary;
+    }
+
+    public Map<String, Object> loadGiftHolderSnapshot(Long matchId, Long userId, Long giftHolderHolomemId) {
+        if (matchId == null || userId == null || giftHolderHolomemId == null || giftHolderHolomemId <= 0) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT h.id AS holomem_id,
+                   h.match_card_id,
+                   h.card_id,
+                   h.zone,
+                   h.current_level,
+                   m.passive_effect_json::text AS passive_text
+            FROM match_holomems h
+            JOIN member_cards m ON m.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("holomem_id", rs.getLong("holomem_id"));
+                row.put("match_card_id", rs.getLong("match_card_id"));
+                row.put("card_id", rs.getString("card_id"));
+                row.put("zone", rs.getString("zone"));
+                row.put("current_level", rs.getString("current_level"));
+                row.put("passive_text", rs.getString("passive_text"));
+                return row;
+            },
+            matchId,
+            userId,
+            giftHolderHolomemId
         );
     }
 
@@ -527,7 +933,7 @@ public class MatchEffectService {
     }
 
     /**
-     * 依觸發事件執行 Gift 效果（目前已接 ART_USED、OPPONENT_DOWNED）。
+     * 依觸發事件執行 Gift 效果。
      */
     private List<Map<String, Object>> applyGiftTriggeredEffectsByTrigger(
         Long matchId,
@@ -538,7 +944,29 @@ public class MatchEffectService {
         int turnNumber,
         boolean executeEffects
     ) {
-        if (matchId == null || userId == null || sourceCardInstanceId == null || turnNumber <= 0) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            triggerType,
+            sourceCardInstanceId,
+            triggerTargetCardInstanceId,
+            turnNumber,
+            executeEffects,
+            loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null)
+        );
+    }
+
+    private List<Map<String, Object>> applyGiftTriggeredEffectsByTrigger(
+        Long matchId,
+        Long userId,
+        String triggerType,
+        Long sourceCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        int turnNumber,
+        boolean executeEffects,
+        GiftTriggerSourceContext sourceContext
+    ) {
+        if (matchId == null || userId == null || turnNumber <= 0) {
             return List.of();
         }
         String normalizedTriggerType = normalizeGiftTriggerType(triggerType);
@@ -565,13 +993,20 @@ public class MatchEffectService {
 
         List<Map<String, Object>> triggered = new ArrayList<>();
         for (Map<String, Object> holder : holders) {
+            Long effectiveSourceCardInstanceId = sourceCardInstanceId == null
+                ? asLong(holder.get("match_card_id"))
+                : sourceCardInstanceId;
+            GiftTriggerSourceContext effectiveSourceContext = sourceContext == null
+                ? loadGiftTriggerSourceContext(matchId, effectiveSourceCardInstanceId, asText(holder.get("zone")))
+                : sourceContext;
             Map<String, Object> summary = buildGiftTriggerSummary(
                 matchId,
                 userId,
                 turnNumber,
-                sourceCardInstanceId,
+                effectiveSourceCardInstanceId,
                 triggerTargetCardInstanceId,
                 normalizedTriggerType,
+                effectiveSourceContext,
                 holder,
                 executeEffects
             );
@@ -592,6 +1027,7 @@ public class MatchEffectService {
         Long sourceCardInstanceId,
         Long triggerTargetCardInstanceId,
         String normalizedTriggerType,
+        GiftTriggerSourceContext sourceContext,
         Map<String, Object> holder,
         boolean executeEffects
     ) {
@@ -603,7 +1039,7 @@ public class MatchEffectService {
         if (!StringUtils.hasText(giftText)) {
             return null;
         }
-        if (!matchesGiftTriggerType(giftText, normalizedTriggerType)) {
+        if (!giftTriggerMatcher.matchesGiftTriggerType(giftText, normalizedTriggerType)) {
             return null;
         }
         if (
@@ -616,6 +1052,7 @@ public class MatchEffectService {
                 holderZone,
                 holderLevel,
                 sourceCardInstanceId,
+                sourceContext,
                 giftText,
                 normalizedTriggerType
             )
@@ -634,44 +1071,18 @@ public class MatchEffectService {
         } else {
             execution = previewGiftEffects(giftText);
         }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("triggerType", normalizedTriggerType);
-        summary.put("giftHolderHolomemId", holderHolomemId);
-        summary.put("giftHolderCardInstanceId", holderCardInstanceId);
-        summary.put("giftHolderCardId", asText(holder.get("card_id")));
-        summary.put("giftHolderZone", holderZone);
-        summary.put("sourceCardInstanceId", sourceCardInstanceId);
-        summary.put("triggerTargetCardInstanceId", triggerTargetCardInstanceId);
-        summary.put("rawText", giftText);
-        summary.put("requestedEffects", execution.requestedEffects());
-        summary.put("executedEffects", execution.executedEffects());
-        summary.put("unsupportedEffects", execution.unsupportedEffects());
-        summary.put("skippedEffects", execution.skippedEffects());
-        summary.put("partiallyResolved", !execution.skippedEffects().isEmpty() || !execution.unsupportedEffects().isEmpty());
-        if (!executeEffects) {
-            summary.put("deferred", true);
-        }
-        return summary;
-    }
-
-    /**
-     * 判斷 Gift 文案是否符合本次觸發事件。
-     */
-    private boolean matchesGiftTriggerType(String giftText, String triggerType) {
-        if (!StringUtils.hasText(giftText)) {
-            return false;
-        }
-        if ("ART_USED".equals(triggerType)) {
-            return giftText.contains("アーツ") && giftText.contains("使った時");
-        }
-        if ("OPPONENT_DOWNED".equals(triggerType)) {
-            if (!giftText.contains("ダウン") || !giftText.contains("時")) {
-                return false;
-            }
-            return !giftText.contains("このホロメンがダウンした時");
-        }
-        return false;
+        return giftTriggerPreviewService.buildTriggerSummary(
+            normalizedTriggerType,
+            holderHolomemId,
+            holderCardInstanceId,
+            asText(holder.get("card_id")),
+            holderZone,
+            sourceCardInstanceId,
+            triggerTargetCardInstanceId,
+            giftText,
+            execution,
+            !executeEffects
+        );
     }
 
     /**
@@ -686,22 +1097,40 @@ public class MatchEffectService {
         String holderZone,
         String holderLevel,
         Long sourceCardInstanceId,
+        GiftTriggerSourceContext sourceContext,
         String giftText,
         String triggerType
     ) {
         if (giftText.contains("このホロメンが") && !sourceCardInstanceId.equals(holderCardInstanceId)) {
             return false;
         }
-        if (giftText.contains("センターポジション限定") && !"CENTER".equals(holderZone)) {
+        if (!matchesGiftTurnOwnershipCondition(matchId, userId, giftText)) {
             return false;
         }
-        if (giftText.contains("コラボポジション限定") && !"COLLAB".equals(holderZone)) {
+        if (!matchesGiftLifeComparisonCondition(matchId, userId, giftText)) {
+            return false;
+        }
+        if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(giftText, holderZone)) {
             return false;
         }
         if (giftText.contains("1stホロメンからBloomしているこのホロメン")) {
             if (!Set.of("SECOND", "BUZZ").contains(holderLevel)) {
                 return false;
             }
+        }
+        if ("SELF_DOWNED".equals(triggerType)
+            && !giftText.contains("このホロメンがダウンした時")
+            && !Objects.equals(sourceCardInstanceId, holderCardInstanceId)) {
+            // 像 `自分の〈さくらみこ〉がダウンした時` 這種具名文案，本身無法只靠文字判斷是 self 還是 ally。
+            // 這裡把「被打倒的來源卡就是 Gift 持有者自己」視為 SELF_DOWNED，讓具名文案能正確落到 self 路徑。
+            return false;
+        }
+        if ("ALLY_DOWNED".equals(triggerType)
+            && !giftText.contains("このホロメンがダウンした時")
+            && Objects.equals(sourceCardInstanceId, holderCardInstanceId)) {
+            // 同一張具名 down 文案會同時匹配 SELF / ALLY 的文字粗篩，因此這裡再用來源卡是否就是持有者自己
+            // 做第二層分流，避免 self down 被 ally 路徑重複收進來。
+            return false;
         }
         if (giftText.contains("ターンに1回") && isGiftAlreadyUsedThisTurn(matchId, userId, turnNumber, holderHolomemId)) {
             return false;
@@ -717,6 +1146,300 @@ public class MatchEffectService {
                 return false;
             }
         }
+        if (Set.of("SELF_DOWNED", "ALLY_DOWNED").contains(triggerType)
+            && !matchesGiftDownedSourceCondition(giftText, sourceContext, triggerType)) {
+            return false;
+        }
+        if ("COLLAB".equals(triggerType) && !matchesGiftCollabSourceCondition(giftText, sourceContext)) {
+            return false;
+        }
+        if ("BATON_TOUCH_BACK".equals(triggerType) && !matchesGiftBatonTouchBackSourceCondition(giftText, sourceContext)) {
+            return false;
+        }
+        if (Set.of("PERFORMANCE_END_SELF", "PERFORMANCE_END_OPPONENT").contains(triggerType)
+            && !matchesGiftPerformanceEndCondition(matchId, userId, turnNumber, holderHolomemId, giftText)) {
+            return false;
+        }
+        if ("STAGE_ENTER".equals(triggerType) && !matchesGiftStageEnterSourceCondition(giftText, sourceContext)) {
+            return false;
+        }
+        if (!matchesGiftHandCountCondition(matchId, userId, giftText)) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 檢查 Gift 文案是否要求特定回合歸屬。
+     *
+     * <p>這個判斷放在 eligibility 層，而不是 trigger matcher 層，原因是：
+     *
+     * <p>1. `ALLY_DOWNED` / `SELF_DOWNED` 只是事件種類，不能代表一定是誰的回合
+     * <p>2. `相手のターンで` / `自分のターンで` 需要結合當前對戰狀態才判得出來
+     *
+     * <p>因此它屬於「文字 + 目前對戰上下文」的條件，最適合留在這裡集中處理。
+     */
+    private boolean matchesGiftTurnOwnershipCondition(Long matchId, Long userId, String giftText) {
+        if (matchId == null || userId == null || !StringUtils.hasText(giftText)) {
+            return false;
+        }
+        if (!giftText.contains("相手のターン") && !giftText.contains("自分のターン")) {
+            return true;
+        }
+        Long currentTurnPlayerId = jdbcTemplate.query(
+            """
+            SELECT current_turn_player_id
+            FROM matches
+            WHERE id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("current_turn_player_id") : null,
+            matchId
+        );
+        if (currentTurnPlayerId == null) {
+            return false;
+        }
+        if (giftText.contains("相手のターン") && userId.equals(currentTurnPlayerId)) {
+            return false;
+        }
+        if (giftText.contains("自分のターン") && !userId.equals(currentTurnPlayerId)) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 檢查 Gift 文案中的生命值比較條件。
+     *
+     * <p>目前官方 Gift 常見的寫法有兩種：
+     *
+     * <p>- `自分のライフが相手以下`
+     * <p>- `自分のライフが相手のライフより少ない`
+     *
+     * <p>這裡故意集中成同一個 helper，避免每一張卡都在個別 effect executor 裡各自查一次
+     * `match_players.current_life`。之後如果再出現其他生命比較文案，只要在這裡擴充即可。
+     */
+    private boolean matchesGiftLifeComparisonCondition(Long matchId, Long userId, String giftText) {
+        if (matchId == null || userId == null || !StringUtils.hasText(giftText)) {
+            return false;
+        }
+        boolean requireLessOrEqual = giftText.contains("自分のライフが相手以下");
+        boolean requireStrictLess = giftText.contains("自分のライフが相手のライフより少ない")
+            || giftText.contains("自分のライフが相手より少ない");
+        if (!requireLessOrEqual && !requireStrictLess) {
+            return true;
+        }
+        Integer ownLife = jdbcTemplate.query(
+            """
+            SELECT current_life
+            FROM match_players
+            WHERE match_id = ?
+              AND user_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt("current_life") : null,
+            matchId,
+            userId
+        );
+        Integer opponentLife = jdbcTemplate.query(
+            """
+            SELECT current_life
+            FROM match_players
+            WHERE match_id = ?
+              AND user_id <> ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt("current_life") : null,
+            matchId,
+            userId
+        );
+        if (ownLife == null || opponentLife == null) {
+            return false;
+        }
+        if (requireLessOrEqual) {
+            return ownLife <= opponentLife;
+        }
+        return ownLife < opponentLife;
+    }
+
+    /**
+     * 檢查 Gift 文案中的手牌張數門檻。
+     *
+     * <p>目前先支援官方卡已出現的明確寫法：
+     *
+     * <p>- `自分の手札が5枚以上なら`
+     *
+     * <p>這類條件屬於純 eligibility 判斷，不需要等效果執行時才知道，因此和生命值比較一樣
+     * 集中放在 trigger eligibility 層處理。後續若再出現 `N 枚以下` 或 `剛好 N 枚` 之類文案，
+     * 直接在這裡擴充即可，不需要把查 `HAND` 張數的 SQL 散落到各個 effect executor。
+     */
+    private boolean matchesGiftHandCountCondition(Long matchId, Long userId, String giftText) {
+        if (matchId == null || userId == null || !StringUtils.hasText(giftText)) {
+            return false;
+        }
+        String normalizedText = effectTextParser.normalizeDigits(giftText);
+        Matcher atLeastMatcher = Pattern.compile("自分の手札が(\\d+)枚以上なら").matcher(normalizedText);
+        if (!atLeastMatcher.find()) {
+            return true;
+        }
+        int requiredHandCount = Integer.parseInt(atLeastMatcher.group(1));
+        Integer currentHandCount = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            rs -> rs.next() ? rs.getInt(1) : null,
+            matchId,
+            userId
+        );
+        return currentHandCount != null && currentHandCount >= requiredHandCount;
+    }
+
+    private boolean matchesGiftPerformanceEndCondition(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        Long holderHolomemId,
+        String giftText
+    ) {
+        PerformancePhaseSnapshot snapshot = loadPerformancePhaseSnapshot(matchId, userId, turnNumber);
+        if (snapshot == null) {
+            return false;
+        }
+        if (giftText.contains("そのパフォーマンスステップに自分のライフが減っていたら")) {
+            int currentLife = jdbcTemplate.query(
+                """
+                SELECT current_life
+                FROM match_players
+                WHERE match_id = ?
+                  AND user_id = ?
+                LIMIT 1
+                """,
+                rs -> rs.next() ? rs.getInt("current_life") : 0,
+                matchId,
+                userId
+            );
+            if (currentLife >= snapshot.currentLife()) {
+                return false;
+            }
+        }
+        if (giftText.contains("このホロメンのHPが減っていないなら")) {
+            if (holderHolomemId == null || holderHolomemId <= 0) {
+                return false;
+            }
+            Integer startDamage = snapshot.holomemDamage().get(holderHolomemId);
+            Integer currentDamage = jdbcTemplate.query(
+                """
+                SELECT COALESCE(damage_taken, 0)
+                FROM match_holomems
+                WHERE match_id = ?
+                  AND owner_user_id = ?
+                  AND id = ?
+                LIMIT 1
+                """,
+                rs -> rs.next() ? rs.getInt(1) : null,
+                matchId,
+                userId,
+                holderHolomemId
+            );
+            if (startDamage == null || currentDamage == null || !startDamage.equals(currentDamage)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean matchesGiftStageEnterSourceCondition(String giftText, GiftTriggerSourceContext sourceContext) {
+        if (!StringUtils.hasText(giftText) || sourceContext == null) {
+            return false;
+        }
+        if (giftText.contains("バックホロメン") && !"BACK".equals(sourceContext.stageZone())) {
+            return false;
+        }
+        if (giftText.contains("センターホロメン") && !"CENTER".equals(sourceContext.stageZone())) {
+            return false;
+        }
+        if (!giftTriggerMatcher.matchesGiftStageEnterSourceLevelCondition(giftText, sourceContext.levelType())) {
+            return false;
+        }
+        String requiredTag = searchCriteriaParser.resolveTagFromKnownTags(giftText);
+        if (StringUtils.hasText(requiredTag) && !rowTagsContains(sourceContext.tagsJson(), requiredTag)) {
+            return false;
+        }
+        return true;
+    }
+
+    private boolean matchesGiftCollabSourceCondition(String giftText, GiftTriggerSourceContext sourceContext) {
+        if (!StringUtils.hasText(giftText) || sourceContext == null) {
+            return false;
+        }
+        if (!"COLLAB".equals(sourceContext.stageZone())) {
+            return false;
+        }
+        if (!giftTriggerMatcher.matchesGiftStageEnterSourceLevelCondition(giftText, sourceContext.levelType())) {
+            return false;
+        }
+        String requiredTag = searchCriteriaParser.resolveTagFromKnownTags(giftText);
+        if (StringUtils.hasText(requiredTag) && !rowTagsContains(sourceContext.tagsJson(), requiredTag)) {
+            return false;
+        }
+        return giftTriggerMatcher.matchesGiftDownedSourceNameCondition(giftText, sourceContext.cardName());
+    }
+
+    private boolean matchesGiftBatonTouchBackSourceCondition(String giftText, GiftTriggerSourceContext sourceContext) {
+        if (!StringUtils.hasText(giftText) || sourceContext == null) {
+            return false;
+        }
+        if (!"BACK".equals(sourceContext.stageZone())) {
+            return false;
+        }
+        if (giftText.contains("バックホロメン") && !"BACK".equals(sourceContext.stageZone())) {
+            return false;
+        }
+        if (!giftTriggerMatcher.matchesGiftStageEnterSourceLevelCondition(giftText, sourceContext.levelType())) {
+            return false;
+        }
+        String requiredTag = searchCriteriaParser.resolveTagFromKnownTags(giftText);
+        if (StringUtils.hasText(requiredTag) && !rowTagsContains(sourceContext.tagsJson(), requiredTag)) {
+            return false;
+        }
+        return giftTriggerMatcher.matchesGiftExplicitSourceNameCondition(giftText, sourceContext.cardName());
+    }
+
+    private boolean matchesGiftDownedSourceCondition(
+        String giftText,
+        GiftTriggerSourceContext sourceContext,
+        String triggerType
+    ) {
+        if (!StringUtils.hasText(giftText) || sourceContext == null) {
+            return false;
+        }
+        if (!Set.of("SELF_DOWNED", "ALLY_DOWNED").contains(triggerType)) {
+            return true;
+        }
+        if (giftText.contains("バックホロメン") && !"BACK".equals(sourceContext.stageZone())) {
+            return false;
+        }
+        if (giftText.contains("センターホロメン") && !"CENTER".equals(sourceContext.stageZone())) {
+            return false;
+        }
+        if (giftText.contains("コラボホロメン") && !"COLLAB".equals(sourceContext.stageZone())) {
+            return false;
+        }
+        if (!giftTriggerMatcher.matchesGiftStageEnterSourceLevelCondition(giftText, sourceContext.levelType())) {
+            return false;
+        }
+        String requiredTag = searchCriteriaParser.resolveTagFromKnownTags(giftText);
+        if (StringUtils.hasText(requiredTag) && !rowTagsContains(sourceContext.tagsJson(), requiredTag)) {
+            return false;
+        }
+        if (!giftTriggerMatcher.matchesGiftDownedSourceNameCondition(giftText, sourceContext.cardName())) {
+            return false;
+        }
         return true;
     }
 
@@ -731,111 +1454,276 @@ public class MatchEffectService {
         String giftText
     ) {
         JsonNode giftNode = objectMapper.valueToTree(Map.of("rawText", giftText));
-        List<String> effectTypes = inferBloomEffectTypes(giftText);
+        int clauseSeparatorIndex = findClauseSeparator(giftText);
+        List<String> costEffectTypes = clauseSeparatorIndex >= 0 ? inferBloomEffectTypes(extractCostClause(giftText)) : List.of();
+        List<String> resolvedEffectTypes = clauseSeparatorIndex >= 0 ? inferBloomEffectTypes(extractResolvedEffectClause(giftText)) : List.of();
+        boolean hasMeaningfulSequentialCost = hasMeaningfulSequentialCost(costEffectTypes);
+        List<String> effectTypes;
+        if (clauseSeparatorIndex >= 0 && hasMeaningfulSequentialCost) {
+            effectTypes = mergeEffectTypes(costEffectTypes, resolvedEffectTypes);
+        } else if (clauseSeparatorIndex >= 0 && !resolvedEffectTypes.isEmpty()) {
+            // 不是所有 `：` 都代表「成本：效果」。
+            //
+            // 像 `HBP05-035` 這種 Gift 文案：
+            // `...ダウンした時に使える：自分のデッキから...`
+            //
+            // 冒號前只是觸發敘述，沒有任何可支付成本。若這裡硬把前半句當成本段，
+            // `inferBloomEffectTypes(...)` 只會得到 `UNIMPLEMENTED`，接著被誤判成
+            // 「前置成本未支付」，導致真正的 SEARCH 永遠不會執行。
+            //
+            // 因此只有在冒號前確實解析出可執行的成本 effect 時，才走 sequential cost。
+            // 否則直接以冒號後的主要效果段為準。
+            effectTypes = resolvedEffectTypes;
+        } else {
+            effectTypes = inferBloomEffectTypes(giftText);
+        }
         List<Map<String, Object>> executed = new ArrayList<>();
         List<String> unsupported = new ArrayList<>();
         List<Map<String, Object>> skippedEffects = new ArrayList<>();
-        for (String effectType : effectTypes) {
-            String targetType = inferBloomTargetType(effectType);
-            try {
-                switch (effectType) {
-                    case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, giftNode));
-                    case "SEARCH" -> executed.add(executeSearchEffect(matchId, userId, effectType, giftNode, null));
-                    case "RETURN_TO_HAND" -> executed.add(
-                        executeReturnToHandEffect(matchId, userId, effectType, giftNode, null)
-                    );
-                    case "RETURN_TO_DECK_TOP" -> executed.add(
-                        executeReturnToDeckTopEffect(matchId, userId, effectType, giftNode, null)
-                    );
-                    case "ADD_CHEER" -> executed.add(
-                        executeAddCheerEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                    );
-                    case "DAMAGE" -> executed.add(
-                        executeDamageEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            giftNode,
-                            targetType,
-                            triggerTargetCardInstanceId
-                        )
-                    );
-                    case "REATTACH" -> executed.add(
-                        executeReattachEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                    );
-                    case "SUMMON_TO_STAGE" -> executed.add(executeSummonToStageEffect(matchId, userId, effectType, giftNode));
-                    case "REVEAL_TO_ARCHIVE" -> executed.add(
-                        executeRevealToArchiveEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "BLOOM_FROM_ARCHIVE" -> executed.add(
-                        executeBloomFromArchiveEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
-                        executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "DISCARD_HAND" -> executed.add(executeDiscardHandEffect(matchId, userId, effectType, giftNode));
-                    case "REST" -> executed.add(
-                        executeRestEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                    );
-                    case "SWAP_CENTER_BACK" -> executed.add(
-                        executeSwapCenterBackEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "MOVE_TO_HOLOPOWER" -> executed.add(
-                        executeMoveToHolopowerEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "DOWN_NO_LIFE" -> executed.add(
-                        executeDownNoLifeEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "DOWN_EXTRA_LIFE" -> executed.add(
-                        executeDownExtraLifeEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
-                        executeBatonTouchCostModifierEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                    );
-                    case "ACTION_LOCK" -> executed.add(
-                        executeActionLockEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                    );
-                    case "ALLOW_EXTRA_BLOOM" -> executed.add(
-                        executeAllowExtraBloomEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "LOOK_TOP_DECK" -> executed.add(
-                        executeLookTopDeckEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "LOOK_OPPONENT_HAND" -> executed.add(
-                        executeLookOpponentHandEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "LOOK_HOLOPOWER" -> executed.add(
-                        executeLookHolopowerEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "SWAP_WITH_COLLAB" -> executed.add(
-                        executeSwapWithCollabEffect(matchId, userId, effectType, giftNode, holderCardInstanceId)
-                    );
-                    case "HEAL" -> executed.add(
-                        executeHealEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId)
-                    );
-                    case "BUFF", "DEBUFF" -> executed.add(
-                        executeBuffDebuffEffect(matchId, userId, effectType, giftNode, targetType)
-                    );
-                    case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
-                        executeMatchResultEffect(matchId, userId, effectType, giftNode)
-                    );
-                    case "UNIMPLEMENTED" -> executed.add(
-                        executeNoOpEffect(effectType, giftNode, "尚未支援的 GIFT 效果")
-                    );
-                    default -> {
-                        unsupported.add(effectType);
-                        Map<String, Object> skipped = buildSkippedEffect(effectType, "UNSUPPORTED_EFFECT");
-                        executed.add(skipped);
-                        skippedEffects.add(skipped);
-                    }
+        List<Map<String, Object>> costExecutions = new ArrayList<>();
+        if (clauseSeparatorIndex >= 0 && hasMeaningfulSequentialCost) {
+            for (String effectType : costEffectTypes) {
+                executeGiftEffectSafely(
+                    matchId,
+                    userId,
+                    holderCardInstanceId,
+                    triggerTargetCardInstanceId,
+                    giftNode,
+                    effectType,
+                    executed,
+                    unsupported,
+                    skippedEffects,
+                    costExecutions
+                );
+            }
+            if (!costEffectTypes.isEmpty() && !areSequentialCostEffectsSatisfied(costExecutions)) {
+                for (String effectType : resolvedEffectTypes) {
+                    Map<String, Object> skipped = buildSkippedEffect(effectType, "前置成本未支付");
+                    executed.add(skipped);
+                    skippedEffects.add(skipped);
                 }
-            } catch (RuntimeException ex) {
-                Map<String, Object> skipped = buildSkippedEffect(effectType, ex.getMessage());
-                executed.add(skipped);
-                skippedEffects.add(skipped);
+            } else {
+                for (String effectType : resolvedEffectTypes) {
+                    executeGiftEffectSafely(
+                        matchId,
+                        userId,
+                        holderCardInstanceId,
+                        triggerTargetCardInstanceId,
+                        giftNode,
+                        effectType,
+                        executed,
+                        unsupported,
+                        skippedEffects,
+                        null
+                    );
+                }
+            }
+        } else {
+            for (String effectType : effectTypes) {
+                executeGiftEffectSafely(
+                    matchId,
+                    userId,
+                    holderCardInstanceId,
+                    triggerTargetCardInstanceId,
+                    giftNode,
+                    effectType,
+                    executed,
+                    unsupported,
+                    skippedEffects,
+                    null
+                );
             }
         }
         return new GiftExecutionSummary(effectTypes, executed, unsupported, skippedEffects);
+    }
+
+    /**
+     * 判斷冒號前是否真的存在「需要先支付」的成本效果。
+     *
+     * <p>目前 `inferBloomEffectTypes(...)` 在完全看不懂的句段上，會保底回傳 `UNIMPLEMENTED`。
+     * 這對一般效果偵測是可接受的，但若直接拿來當 sequential cost 判斷，就會把
+     * `使える：`、`次の能力を得る：` 這類純敘述前半句誤認成成本段。
+     *
+     * <p>因此這裡要求冒號前至少要解析出一個「真正可執行」的 effect type，才視為有成本。
+     */
+    private boolean hasMeaningfulSequentialCost(List<String> costEffectTypes) {
+        if (costEffectTypes == null || costEffectTypes.isEmpty()) {
+            return false;
+        }
+        for (String effectType : costEffectTypes) {
+            if (StringUtils.hasText(effectType) && !"UNIMPLEMENTED".equals(normalize(effectType))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 以一致方式執行單一 Gift effect type，並把結果回填到各摘要集合。
+     *
+     * <p>這一層把「單一 effect 的 switch 分派」從主流程抽出，讓 `成本段` 與 `效果段` 可以共用同一套
+     * 執行邏輯。否則只要一加入 `成本：效果` 的序列規則，就會把整段 switch 複製兩次，後續維護容易分叉。
+     */
+    private void executeGiftEffectSafely(
+        Long matchId,
+        Long userId,
+        Long holderCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        JsonNode giftNode,
+        String effectType,
+        List<Map<String, Object>> executed,
+        List<String> unsupported,
+        List<Map<String, Object>> skippedEffects,
+        List<Map<String, Object>> costExecutions
+    ) {
+        try {
+            Map<String, Object> summary = executeGiftEffectByType(
+                matchId,
+                userId,
+                holderCardInstanceId,
+                triggerTargetCardInstanceId,
+                giftNode,
+                effectType
+            );
+            if (summary != null) {
+                executed.add(summary);
+                if (costExecutions != null) {
+                    costExecutions.add(summary);
+                }
+            }
+        } catch (UnsupportedOperationException ex) {
+            unsupported.add(effectType);
+            Map<String, Object> skipped = buildSkippedEffect(effectType, "UNSUPPORTED_EFFECT");
+            executed.add(skipped);
+            skippedEffects.add(skipped);
+            if (costExecutions != null) {
+                costExecutions.add(skipped);
+            }
+        } catch (RuntimeException ex) {
+            Map<String, Object> skipped = buildSkippedEffect(effectType, ex.getMessage());
+            executed.add(skipped);
+            skippedEffects.add(skipped);
+            if (costExecutions != null) {
+                costExecutions.add(skipped);
+            }
+        }
+    }
+
+    /**
+     * 執行單一 Gift effect type 的實際分派。
+     */
+    private Map<String, Object> executeGiftEffectByType(
+        Long matchId,
+        Long userId,
+        Long holderCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        JsonNode giftNode,
+        String effectType
+    ) {
+        String targetType = inferBloomTargetType(effectType);
+        return switch (effectType) {
+            case "DRAW" -> executeDrawEffect(matchId, userId, effectType, giftNode);
+            case "SEARCH" -> executeSearchEffect(matchId, userId, effectType, giftNode, null);
+            case "RETURN_TO_HAND" -> executeReturnToHandEffect(matchId, userId, effectType, giftNode, null);
+            case "RETURN_TO_DECK_TOP" -> executeReturnToDeckTopEffect(matchId, userId, effectType, giftNode, null);
+            case "ADD_CHEER" -> executeAddCheerEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
+            case "DAMAGE" -> executeDamageEffect(
+                matchId,
+                userId,
+                effectType,
+                giftNode,
+                targetType,
+                triggerTargetCardInstanceId
+            );
+            case "REATTACH" -> executeReattachEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
+            case "SUMMON_TO_STAGE" -> executeSummonToStageEffect(matchId, userId, effectType, giftNode);
+            case "REVEAL_TO_ARCHIVE" -> executeRevealToArchiveEffect(matchId, userId, effectType, giftNode);
+            case "BLOOM_FROM_ARCHIVE" -> executeBloomFromArchiveEffect(matchId, userId, effectType, giftNode);
+            case "RETURN_CHEER_TO_DECK_BOTTOM" -> executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, giftNode);
+            case "DISCARD_HAND" -> executeDiscardHandEffect(matchId, userId, effectType, giftNode);
+            case "REST" -> executeRestEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
+            case "SWAP_CENTER_BACK" -> executeSwapCenterBackEffect(matchId, userId, effectType, giftNode);
+            case "MOVE_TO_HOLOPOWER" -> executeMoveToHolopowerEffect(matchId, userId, effectType, giftNode);
+            case "DOWN_NO_LIFE" -> executeDownNoLifeEffect(matchId, userId, effectType, giftNode);
+            case "DOWN_EXTRA_LIFE" -> executeDownExtraLifeEffect(matchId, userId, effectType, giftNode);
+            case "BATON_TOUCH_COST_MODIFIER" -> executeBatonTouchCostModifierEffect(
+                matchId,
+                userId,
+                effectType,
+                giftNode,
+                targetType,
+                holderCardInstanceId
+            );
+            case "ACTION_LOCK" -> executeActionLockEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
+            case "ALLOW_EXTRA_BLOOM" -> executeAllowExtraBloomEffect(matchId, userId, effectType, giftNode);
+            case "LOOK_TOP_DECK" -> executeLookTopDeckEffect(matchId, userId, effectType, giftNode);
+            case "LOOK_OPPONENT_HAND" -> executeLookOpponentHandEffect(matchId, userId, effectType, giftNode);
+            case "LOOK_HOLOPOWER" -> executeLookHolopowerEffect(matchId, userId, effectType, giftNode);
+            case "SWAP_WITH_COLLAB" -> executeSwapWithCollabEffect(matchId, userId, effectType, giftNode, holderCardInstanceId);
+            case "HEAL" -> executeHealEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
+            case "BUFF", "DEBUFF" -> executeBuffDebuffEffect(matchId, userId, effectType, giftNode, targetType);
+            case "MATCH_RESULT", "WIN", "LOSE" -> executeMatchResultEffect(matchId, userId, effectType, giftNode);
+            case "UNIMPLEMENTED" -> executeNoOpEffect(effectType, giftNode, "尚未支援的 GIFT 效果");
+            default -> throw new UnsupportedOperationException("UNSUPPORTED_GIFT_EFFECT");
+        };
+    }
+
+    /**
+     * 判斷 `成本段` 是否真的支付成功。
+     *
+     * <p>只要成本段中的任一效果沒有真正生效，例如：
+     *
+     * <p>- `discardApplied = 0`
+     * <p>- `removeApplied = 0`
+     * <p>- `applied = false`
+     *
+     * <p>就視為後段效果不能繼續執行。
+     */
+    private boolean areSequentialCostEffectsSatisfied(List<Map<String, Object>> costExecutions) {
+        if (costExecutions == null || costExecutions.isEmpty()) {
+            return false;
+        }
+        for (Map<String, Object> summary : costExecutions) {
+            if (!isEffectSummaryApplied(summary)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 嘗試以共通欄位判斷單一 effect summary 是否有實際生效。
+     */
+    private boolean isEffectSummaryApplied(Map<String, Object> summary) {
+        if (summary == null || summary.isEmpty()) {
+            return false;
+        }
+        Object applied = summary.get("applied");
+        if (applied instanceof Boolean appliedFlag) {
+            return appliedFlag;
+        }
+        for (Map.Entry<String, Object> entry : summary.entrySet()) {
+            if (entry.getKey() == null || !entry.getKey().endsWith("Applied")) {
+                continue;
+            }
+            Object value = entry.getValue();
+            if (value instanceof Number number && number.intValue() > 0) {
+                return true;
+            }
+        }
+        Object moved = summary.get("moved");
+        return moved instanceof Boolean movedFlag && movedFlag;
+    }
+
+    private List<String> mergeEffectTypes(List<String> first, List<String> second) {
+        LinkedHashSet<String> merged = new LinkedHashSet<>();
+        if (first != null) {
+            merged.addAll(first);
+        }
+        if (second != null) {
+            merged.addAll(second);
+        }
+        return new ArrayList<>(merged);
     }
 
     /**
@@ -853,18 +1741,205 @@ public class MatchEffectService {
         String normalized = normalize(triggerType);
         return switch (normalized) {
             case "OPPONENT_DOWNED", "DOWNED", "DOWNED_OPPONENT" -> "OPPONENT_DOWNED";
+            case "SELF_DOWNED", "DOWNED_SELF", "OWN_SELF_DOWNED" -> "SELF_DOWNED";
+            case "ALLY_DOWNED", "OWN_DOWNED", "OWN_HOLOMEM_DOWNED", "FRIENDLY_DOWNED" -> "ALLY_DOWNED";
+            case "COLLAB", "ON_COLLAB", "SELF_COLLAB" -> "COLLAB";
+            case "BATON_TOUCH_BACK", "BATON_TOUCH_MOVE_TO_BACK", "ON_BATON_TOUCH_BACK" -> "BATON_TOUCH_BACK";
+            case "PERFORMANCE_START_SELF", "OWN_PERFORMANCE_START", "PERFORMANCE_START" -> "PERFORMANCE_START_SELF";
+            case "PERFORMANCE_START_OPPONENT", "OPPONENT_PERFORMANCE_START" -> "PERFORMANCE_START_OPPONENT";
+            case "PERFORMANCE_END_SELF", "OWN_PERFORMANCE_END", "PERFORMANCE_END" -> "PERFORMANCE_END_SELF";
+            case "PERFORMANCE_END_OPPONENT", "OPPONENT_PERFORMANCE_END" -> "PERFORMANCE_END_OPPONENT";
+            case "STAGE_ENTER", "ENTER_STAGE", "HOLOMEM_ENTER", "ON_HOLOMEM_ENTER" -> "STAGE_ENTER";
             default -> "ART_USED";
         };
+    }
+
+    private PerformancePhaseSnapshot loadPerformancePhaseSnapshot(Long matchId, Long userId, int turnNumber) {
+        if (matchId == null || userId == null || turnNumber <= 0) {
+            return null;
+        }
+        String payloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'PERFORMANCE_SNAPSHOT'
+              AND expires_turn = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : null,
+            matchId,
+            userId,
+            turnNumber
+        );
+        JsonNode payloadNode = effectTextParser.parseEffectJson(payloadText);
+        if (payloadNode == null || payloadNode.isNull() || !payloadNode.isObject()) {
+            return null;
+        }
+        int currentLife = payloadNode.path("currentLife").asInt(0);
+        Map<Long, Integer> holomemDamage = new LinkedHashMap<>();
+        JsonNode damageNode = payloadNode.get("holomemDamage");
+        if (damageNode != null && damageNode.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> fields = damageNode.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                try {
+                    holomemDamage.put(Long.parseLong(field.getKey()), field.getValue().asInt(0));
+                } catch (NumberFormatException ignored) {
+                    // ignore invalid snapshot key
+                }
+            }
+        }
+        return new PerformancePhaseSnapshot(currentLife, holomemDamage);
+    }
+
+    private GiftTriggerSourceContext loadGiftTriggerSourceContext(
+        Long matchId,
+        Long sourceCardInstanceId,
+        String fallbackStageZone
+    ) {
+        if (matchId == null || sourceCardInstanceId == null || sourceCardInstanceId <= 0) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT mc.card_id,
+                   c.name,
+                   m.level_type,
+                   c.tags_json::text AS tags_json,
+                   h.zone AS stage_zone
+            FROM match_cards mc
+            JOIN cards c ON c.card_id = mc.card_id
+            LEFT JOIN member_cards m ON m.card_id = mc.card_id
+            LEFT JOIN match_holomems h
+              ON h.match_id = mc.match_id
+             AND h.match_card_id = mc.id
+            WHERE mc.match_id = ?
+              AND mc.id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                String stageZone = normalize(rs.getString("stage_zone"));
+                if (!StringUtils.hasText(stageZone)) {
+                    stageZone = normalize(fallbackStageZone);
+                }
+                return new GiftTriggerSourceContext(
+                    rs.getString("card_id"),
+                    rs.getString("name"),
+                    rs.getString("level_type"),
+                    stageZone,
+                    rs.getString("tags_json")
+                );
+            },
+            matchId,
+            sourceCardInstanceId
+        );
     }
 
     /**
      * Gift 效果執行摘要。
      */
-    private record GiftExecutionSummary(
-        List<String> requestedEffects,
-        List<Map<String, Object>> executedEffects,
-        List<String> unsupportedEffects,
-        List<Map<String, Object>> skippedEffects
+    private record GiftTriggerSourceContext(
+        String cardId,
+        String cardName,
+        String levelType,
+        String stageZone,
+        String tagsJson
+    ) {}
+
+    private record PerformancePhaseSnapshot(
+        int currentLife,
+        Map<Long, Integer> holomemDamage
+    ) {}
+
+    /**
+     * 描述常駐藝能加成的受益者。
+     *
+     * <p>目前只保留常駐 Gift 判斷真正需要的欄位，避免把完整 Holomem state 傳遞到每個 helper。
+     */
+    private record StaticArtBonusTargetContext(
+        Long holomemId,
+        String stageZone,
+        String levelType,
+        Set<String> tags
+    ) {}
+
+    /**
+     * 描述「藝能自己文字所提供的加成」受益者。
+     *
+     * <p>和中心位常駐 Gift 不同，這類加成直接寫在藝能文案內，常見模式是：
+     *
+     * <p>- `このホロメンのエール1枚につき、このアーツ+20`
+     *
+     * <p>- `自分のライフが3以下の時、このアーツ+70`
+     *
+     * <p>因此除了基本站位/等級/tag，還必須帶出：
+     *
+     * <p>- 實際附著 Cheer 數量
+     * <p>- 目前玩家的 LIFE
+     *
+     * <p>才能在攻擊時計算像 `HSD13-007`、`HSD07-009` 這類條件加傷。
+     */
+    private record ArtSelfBonusTargetContext(
+        Long holomemId,
+        String stageZone,
+        String levelType,
+        Set<String> tags,
+        int attachedCheerCount,
+        int currentLife
+    ) {}
+
+    /**
+     * 描述提供常駐 Gift 的 holder。
+     */
+    private record PassiveGiftHolderContext(
+        Long holomemId,
+        String stageZone,
+        String passiveEffectJsonText
+    ) {}
+
+    /**
+     * 描述「常駐 Gift HP 加成」的受益者。
+     *
+     * <p>目前只先保留 `HSD13-007` 這類判斷真正需要的欄位：
+     *
+     * <p>- 自己是誰（避免把「このホロメン」誤套到別人身上）
+     * <p>- 站位 / 等級 / tag（保留未來擴到其他自動常駐文案的空間）
+     * <p>- 身上的 Cheer 數量（像 `このホロメンのエール1枚につき` 會直接用到）
+     */
+    private record PassiveGiftHpTargetContext(
+        Long holomemId,
+        String stageZone,
+        String levelType,
+        Set<String> tags,
+        int attachedCheerCount
+    ) {}
+
+    /**
+     * 描述「常駐 Gift 受傷減免」的受益者。
+     *
+     * <p>這和 HP 加成類似，也只保留目前規則判斷真正需要的欄位；差別是受傷減免文案目前先聚焦：
+     *
+     * <p>- `このホロメンが受けるダメージ-10`
+     * <p>- `自分のコラボホロメンが受けるダメージ-10`
+     * <p>- `このホロメンと自分のコラボホロメンが受けるダメージ-10`
+     *
+     * <p>因此這裡只需要知道：
+     *
+     * <p>- 受擊目標是不是 holder 自己
+     * <p>- 受擊目標目前是不是在 `COLLAB`
+     *
+     * <p>先把這個 target context 單獨抽出來，可以避免後面在 matcher 裡反覆 query stage zone，
+     * 也讓 `HSD07-009` / `HBP06-009` 這種固定格式共享同一條保守主幹。
+     */
+    private record PassiveGiftIncomingDamageReductionTargetContext(
+        Long holomemId,
+        String stageZone
     ) {}
 
     /**
@@ -882,10 +1957,200 @@ public class MatchEffectService {
     }
 
     /**
+     * 計算由我方中心位常駐 Gift 提供給攻擊者的藝能傷害加成。
+     *
+     * <p>這個入口目前只處理「不需要建立 pending、也不需要額外互動」的常駐型被動效果。
+     * 例如 `HSD08-004` 這種：
+     *
+     * <p>- holder 必須在 `CENTER`
+     * <p>- 指定我方某個站位/標籤/等級的 Holomem
+     * <p>- 直接讓該 Holomem 的藝能 `+N`
+     *
+     * <p>這裡刻意不把它做成完整常駐效果引擎，原因是目前專案仍在逐步補齊卡效，若直接引入
+     * 一整套 aura / layer 系統，風險會遠高於收益。先把「攻擊時計算可驗證的靜態加成」抽成
+     * 單一入口，可以讓後續每張類似卡片都沿用同一條主幹。
+     */
+    public int resolvePassiveGiftArtBonus(Long matchId, Long userId, Long attackerHolomemId) {
+        if (matchId == null || userId == null || attackerHolomemId == null) {
+            return 0;
+        }
+        StaticArtBonusTargetContext attackerContext = loadStaticArtBonusTargetContext(matchId, userId, attackerHolomemId);
+        if (attackerContext == null) {
+            return 0;
+        }
+        List<PassiveGiftHolderContext> holderContexts = loadPassiveGiftHolderContexts(matchId, userId);
+        if (holderContexts.isEmpty()) {
+            return 0;
+        }
+        int total = 0;
+        for (PassiveGiftHolderContext holderContext : holderContexts) {
+            total += resolvePassiveGiftArtBonusFromHolder(holderContext, attackerContext);
+        }
+        return total;
+    }
+
+    /**
+     * 計算藝能自己文字提供的即時傷害加成。
+     *
+     * <p>這和常駐 Gift 最大差別在於：來源不是 stage 上另一個 holder，而是「這張藝能自己的 raw text」。
+     * 目前先保守支援像 `HSD13-007` 這種：
+     *
+     * <p>- 文案明確寫 `このホロメンのエール1枚につき`
+     * <p>- 加成對象明確寫 `このアーツ`
+     * <p>- 數值是固定的 `+N`
+     *
+     * <p>先把這一類常見格式集中成單一入口，後續若出現更多「依附著資源數量放大藝能傷害」的卡，
+     * 可以在這裡往外擴，而不是每張卡都在 `attackArt(...)` 各自補特例。
+     */
+    public int resolveArtTextDamageBonus(Long matchId, Long userId, Long attackerHolomemId, String artEffectJsonText) {
+        if (matchId == null || userId == null || attackerHolomemId == null || !StringUtils.hasText(artEffectJsonText)) {
+            return 0;
+        }
+        ArtSelfBonusTargetContext attackerContext = loadArtSelfBonusTargetContext(matchId, userId, attackerHolomemId);
+        if (attackerContext == null) {
+            return 0;
+        }
+        return resolveArtTextDamageBonusFromRawText(extractAttachedSupportRawText(artEffectJsonText), attackerContext);
+    }
+
+    /**
+     * 計算我方常駐 Gift 對指定受擊 Holomem 提供的受傷減免。
+     *
+     * <p>目前先保守支援兩種已驗證的官方固定文案：
+     *
+     * <p>- `HSD07-009`：`[センターポジション限定]このホロメンが受けるダメージ-10`
+     * <p>- `HBP06-009`：`[センターポジション限定]自分のコラボホロメンが受けるダメージ-10`
+     *
+     * <p>這裡刻意不提早抽象成完整常駐防禦 aura 引擎，而是維持一個保守入口：
+     *
+     * <p>- 只掃描我方中心位 holder
+     * <p>- 只接受固定的受保護對象描述
+     * <p>- 只回傳最終減傷數值
+     *
+     * <p>這樣做可以先讓既有 `attackArt(...)` 在不改結算模型的前提下，吃到官方已知被動減傷卡，
+     * 同時避免把其他尚未完整建模的防禦文案誤判成已支援。
+     */
+    public int resolvePassiveGiftIncomingDamageReduction(Long matchId, Long userId, Long targetHolomemId) {
+        if (matchId == null || userId == null || targetHolomemId == null) {
+            return 0;
+        }
+        PassiveGiftIncomingDamageReductionTargetContext targetContext =
+            loadPassiveGiftIncomingDamageReductionTargetContext(matchId, userId, targetHolomemId);
+        if (targetContext == null) {
+            return 0;
+        }
+        List<PassiveGiftHolderContext> holderContexts = loadPassiveGiftHolderContexts(matchId, userId);
+        if (holderContexts.isEmpty()) {
+            return 0;
+        }
+        int total = 0;
+        for (PassiveGiftHolderContext holderContext : holderContexts) {
+            total += resolvePassiveGiftIncomingDamageReductionFromHolder(holderContext, targetContext);
+        }
+        return total;
+    }
+
+    /**
+     * 計算指定 Holomem 受到自己常駐 Gift 影響的 HP 加成。
+     *
+     * <p>這個入口目前先處理像 `HSD13-007` 這種：
+     *
+     * <p>- 文案本身就是常駐 Gift
+     * <p>- 不需要 pending / confirm
+     * <p>- 加成目標就是「這張 Holomem 自己」
+     * <p>- 數值和當前附著 Cheer 數量有關
+     *
+     * <p>因此這裡刻意先做成「讀取目標 Holomem 自己的 passive gift，直接算出 HP bonus」，
+     * 避免太早引入完整 aura/layer 系統，卻仍能讓 `GameState` 與傷害判定吃到正確數值。
+     */
+    public int resolvePassiveGiftHpBonus(Long matchId, Long userId, Long targetHolomemId) {
+        if (matchId == null || userId == null || targetHolomemId == null) {
+            return 0;
+        }
+        PassiveGiftHpTargetContext targetContext = loadPassiveGiftHpTargetContext(matchId, userId, targetHolomemId);
+        if (targetContext == null) {
+            return 0;
+        }
+        PassiveGiftHolderContext holderContext = loadPassiveGiftHolderContext(matchId, userId, targetHolomemId);
+        if (holderContext == null) {
+            return 0;
+        }
+        return resolvePassiveGiftHpBonusFromHolder(holderContext, targetContext);
+    }
+
+    /**
+     * 在 Holomem 完成 Bloom 後，檢查是否有「不需要 pending、但會立刻改變本回合 Bloom 規則」的常駐 Gift。
+     *
+     * <p>目前先聚焦處理像 `HSD10-004` 這種「Bloom 完自己後，若條件成立，允許同回合再 Bloom 一次」
+     * 的文案。這類效果有兩個特性：
+     *
+     * <p>1. 它不是一般 `SELF_DOWNED / STAGE_ENTER / PERFORMANCE_START` 之類的事件觸發 Gift
+     * <p>2. 它也不是單純攻擊時計算的靜態加成，而是會改變後續動作合法性
+     *
+     * <p>若把它硬塞進既有 pending trigger 流程，會讓「沒有選擇、沒有確認」的效果也多一層互動；
+     * 反過來若完全不處理，Bloom 第二次就永遠會被一般規則擋掉。因此這裡獨立做一個
+     * 「Bloom 後立即檢查」入口，把結果寫進 `match_turn_effects.ALLOW_EXTRA_BLOOM`，再交給既有
+     * `MatchActionService.findExtraBloomAllowanceId(...)` 流程消耗。
+     */
+    public Map<String, Object> applyPassiveGiftExtraBloomAllowanceOnBloom(
+        Long matchId,
+        Long userId,
+        Long bloomedHolomemId,
+        Long holderCardInstanceId,
+        String holderCardId
+    ) {
+        if (matchId == null || userId == null || bloomedHolomemId == null || holderCardInstanceId == null) {
+            return Map.of("effectType", "ALLOW_EXTRA_BLOOM", "applied", false, "reason", "缺少 Bloom 後靜態 Gift 所需參數");
+        }
+
+        String passiveText = loadPassiveEffectText(holderCardId);
+        String giftText = loadGiftEffectText(passiveText);
+        if (!StringUtils.hasText(giftText) || !giftText.contains("もう1回Bloomできる")) {
+            return Map.of("effectType", "ALLOW_EXTRA_BLOOM", "applied", false, "reason", "此卡沒有額外 Bloom 的靜態 Gift");
+        }
+
+        ObjectNode effectNode = objectMapper.createObjectNode();
+        effectNode.put("rawText", giftText);
+        return executeAllowExtraBloomEffect(
+            matchId,
+            userId,
+            "ALLOW_EXTRA_BLOOM",
+            effectNode,
+            bloomedHolomemId,
+            holderCardInstanceId
+        );
+    }
+
+    /**
      * Bloom 觸發效果入口（含條件判斷、執行結果摘要）。
      */
     public TriggeredEffectPreview previewBloomTriggeredEffect(String bloomCardId) {
-        BloomEffectPlan bloomPlan = resolveBloomEffectPlan(bloomCardId);
+        BloomEffectPlan bloomPlan = resolveBloomEffectPlan(bloomCardId, null);
+        return new TriggeredEffectPreview(
+            bloomPlan.hasBloomEffect(),
+            bloomPlan.effectTypes(),
+            bloomPlan.rawText(),
+            bloomPlan.diceRoll()
+        );
+    }
+
+    /**
+     * Bloom 觸發效果預覽（含來源等級條件）。
+     */
+    public TriggeredEffectPreview previewBloomTriggeredEffect(
+        Long matchId,
+        Long userId,
+        String bloomCardId,
+        Long selfHolomemCardInstanceId,
+        String sourceLevelType
+    ) {
+        BloomEffectPlan bloomPlan = resolveBloomEffectPlan(
+            bloomCardId,
+            new BloomRuntimeContext(
+                sourceLevelType,
+                loadCollabRuntimeContext(matchId, userId, selfHolomemCardInstanceId)
+            )
+        );
         return new TriggeredEffectPreview(
             bloomPlan.hasBloomEffect(),
             bloomPlan.effectTypes(),
@@ -933,7 +2198,26 @@ public class MatchEffectService {
         String bloomCardId,
         Long selfHolomemCardInstanceId
     ) {
-        BloomEffectPlan bloomPlan = resolveBloomEffectPlan(bloomCardId);
+        return applyBloomTriggeredEffects(matchId, userId, bloomCardId, selfHolomemCardInstanceId, null);
+    }
+
+    /**
+     * Bloom 觸發效果入口（含來源等級條件）。
+     */
+    public Map<String, Object> applyBloomTriggeredEffects(
+        Long matchId,
+        Long userId,
+        String bloomCardId,
+        Long selfHolomemCardInstanceId,
+        String sourceLevelType
+    ) {
+        BloomEffectPlan bloomPlan = resolveBloomEffectPlan(
+            bloomCardId,
+            new BloomRuntimeContext(
+                sourceLevelType,
+                loadCollabRuntimeContext(matchId, userId, selfHolomemCardInstanceId)
+            )
+        );
         if (!bloomPlan.hasBloomEffect()) {
             Map<String, Object> summary = new LinkedHashMap<>();
             summary.put("hasBloomEffect", false);
@@ -949,9 +2233,20 @@ public class MatchEffectService {
         List<String> unsupported = new ArrayList<>();
         List<Map<String, Object>> skippedEffects = new ArrayList<>();
         Integer diceRoll = bloomPlan.diceRoll();
-        JsonNode bloomEffectNode = bloomPlan.effectNode();
+        ObjectNode bloomEffectNode = mutableEffectNode(bloomPlan.effectNode());
         String normalizedBloomCardId = normalize(bloomCardId);
         int archivedStackCostCount = -1;
+        Integer oddRollCount = null;
+        if (normalizedBloomCardId.startsWith("HBP04-059")) {
+            DiceResolution resolution = resolveDiceResolution(bloomEffectNode);
+            bloomEffectNode.put("diceRoll", resolution.chosenRoll());
+            bloomEffectNode.set("diceRolls", objectMapper.valueToTree(resolution.rolls()));
+            bloomEffectNode.put("diceRollCountApplied", resolution.rolls().size());
+            oddRollCount = (int) resolution.rolls().stream().filter(roll -> roll % 2 == 1).count();
+            bloomEffectNode.put("value", oddRollCount);
+            bloomEffectNode.put("oddRollCount", oddRollCount);
+            diceRoll = resolution.chosenRoll();
+        }
 
         for (String effectType : effectTypes) {
             String targetType = inferBloomTargetType(effectType);
@@ -1035,6 +2330,9 @@ public class MatchEffectService {
                             targetType,
                             selfHolomemCardInstanceId
                         )
+                    );
+                    case "REMOVE_STAGE_CHEER" -> executed.add(
+                        executeRemoveStageCheerEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "SUMMON_TO_STAGE" -> executed.add(
                         executeSummonToStageEffect(matchId, userId, effectType, bloomEffectNode)
@@ -1178,6 +2476,12 @@ public class MatchEffectService {
         summary.put("rawText", bloomPlan.rawText());
         if (diceRoll != null) {
             summary.put("diceRoll", diceRoll);
+        }
+        if (bloomEffectNode.has("diceRolls")) {
+            summary.put("diceRolls", objectMapper.convertValue(bloomEffectNode.get("diceRolls"), new TypeReference<List<Integer>>() {}));
+        }
+        if (oddRollCount != null) {
+            summary.put("oddRollCount", oddRollCount);
         }
         return summary;
     }
@@ -1451,7 +2755,7 @@ public class MatchEffectService {
         if (override != null && override > 0) {
             return override;
         }
-        String rawText = normalizeDigits(extractText(collabEffectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(collabEffectNode, "rawText", "rawEffect"));
         if (StringUtils.hasText(rawText) && rawText.contains("バックホロメン")) {
             return null;
         }
@@ -1462,11 +2766,11 @@ public class MatchEffectService {
      * Collab MOVE_ZONE 目標側解析：可由 effectNode 覆寫，文案含「このホロメン」時預設 SELF。
      */
     private String resolveCollabMoveTargetType(JsonNode collabEffectNode, String fallbackTargetType) {
-        String override = normalizeEffectType(readText(collabEffectNode, "moveTargetType", "move_target_type"));
+        String override = effectTextParser.normalizeEffectType(readText(collabEffectNode, "moveTargetType", "move_target_type"));
         if (StringUtils.hasText(override)) {
             return override;
         }
-        String rawText = normalizeDigits(extractText(collabEffectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(collabEffectNode, "rawText", "rawEffect"));
         if (StringUtils.hasText(rawText) && rawText.contains("このホロメン")) {
             return "SELF";
         }
@@ -1486,7 +2790,7 @@ public class MatchEffectService {
         if (override != null && override > 0) {
             return override;
         }
-        String rawText = normalizeDigits(extractText(collabEffectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(collabEffectNode, "rawText", "rawEffect"));
         if (StringUtils.hasText(rawText) && rawText.contains("このホロメン")) {
             return fallbackSelfCardInstanceId;
         }
@@ -1502,7 +2806,7 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
@@ -1606,12 +2910,12 @@ public class MatchEffectService {
         JsonNode effectNode,
         List<Long> selectedCardInstanceIds
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         String searchSourceZone = resolveSearchSourceZone(effectNode, rawText);
         boolean searchFromDeck = "DECK".equals(searchSourceZone);
         int requestedCount = resolveSearchCount(effectNode);
         int searchCount = Math.max(requestedCount, 1);
-        SearchCriteria criteria = resolveSearchCriteria(effectNode);
+        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         int lookTopCount = resolveSearchLookTopCount(effectNode, rawText);
         boolean archiveUnselectedTopWindow = toBoolean(
             readBoolean(
@@ -1810,13 +3114,13 @@ public class MatchEffectService {
         JsonNode effectNode,
         List<Long> selectedCardInstanceIds
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
         int requestedCount = resolveActionCount(effectNode, "手札に戻", 1);
         int returnCount = Math.max(requestedCount, 1);
-        SearchCriteria criteria = resolveSearchCriteria(effectNode);
+        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         boolean excludeLimitedSupport = rawText.contains("LIMITED以外");
 
         List<Map<String, Object>> candidates = loadCandidatesFromZone(
@@ -1885,13 +3189,13 @@ public class MatchEffectService {
         JsonNode effectNode,
         List<Long> selectedCardInstanceIds
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
         int requestedCount = resolveActionCount(effectNode, "デッキの上に戻", 1);
         int returnCount = Math.max(requestedCount, 1);
-        SearchCriteria criteria = resolveSearchCriteria(effectNode);
+        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
 
         List<Map<String, Object>> candidates = loadCandidatesFromZone(matchId, userId, "ARCHIVE", criteria, false);
         List<Map<String, Object>> selected = selectSearchCards(candidates, selectedCardInstanceIds, returnCount);
@@ -1964,7 +3268,7 @@ public class MatchEffectService {
         String targetType,
         Long targetHolomemCardInstanceId
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
@@ -2040,12 +3344,13 @@ public class MatchEffectService {
                 }
                 Long cheerRowId = jdbcTemplate.query(
                     """
-                    INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down)
-                    VALUES (?, ?, FALSE)
+                    INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+                    VALUES (?, ?, ?, FALSE)
                     RETURNING id
                     """,
                     rs -> rs.next() ? rs.getLong("id") : null,
                     targetHolomemId,
+                    cardInstanceId,
                     cheerCardId
                 );
                 movedCheerCardIds.add(cheerCardId);
@@ -2058,6 +3363,7 @@ public class MatchEffectService {
             List<Map<String, Object>> attachedRows = jdbcTemplate.queryForList(
                 """
                 SELECT c.id AS cheer_row_id,
+                       c.match_card_id,
                        c.cheer_card_id,
                        c.match_holomem_id
                 FROM match_holomem_cheers c
@@ -2077,6 +3383,7 @@ public class MatchEffectService {
                     break;
                 }
                 Long cheerRowId = asLong(row.get("cheer_row_id"));
+                Long cheerCardInstanceId = asLong(row.get("match_card_id"));
                 Long fromHolomemId = asLong(row.get("match_holomem_id"));
                 String cheerCardId = asText(row.get("cheer_card_id"));
                 if (cheerRowId == null || !StringUtils.hasText(cheerCardId)) {
@@ -2094,12 +3401,13 @@ public class MatchEffectService {
                 }
                 Long newCheerRowId = jdbcTemplate.query(
                     """
-                    INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down)
-                    VALUES (?, ?, FALSE)
+                    INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+                    VALUES (?, ?, ?, FALSE)
                     RETURNING id
                     """,
                     rs -> rs.next() ? rs.getLong("id") : null,
                     targetHolomemId,
+                    cheerCardInstanceId,
                     cheerCardId
                 );
                 movedCheerCardIds.add(cheerCardId);
@@ -2140,12 +3448,13 @@ public class MatchEffectService {
                     }
                     Long newCheerRowId = jdbcTemplate.query(
                         """
-                        INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down)
-                        VALUES (?, ?, FALSE)
+                        INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+                        VALUES (?, ?, ?, FALSE)
                         RETURNING id
                         """,
                         rs -> rs.next() ? rs.getLong("id") : null,
                         targetHolomemId,
+                        cardInstanceId,
                         cheerCardId
                     );
                     movedCheerCardIds.add(cheerCardId);
@@ -2179,7 +3488,7 @@ public class MatchEffectService {
     ) {
         int requestedCount = resolveActionCount(effectNode, "ステージに出", 1);
         int summonCount = Math.max(requestedCount, 1);
-        SearchCriteria resolved = resolveSearchCriteria(effectNode);
+        SearchCriteria resolved = searchCriteriaParser.resolveSearchCriteria(effectNode);
         SearchCriteria criteria = new SearchCriteria(
             "MEMBER",
             resolved.levelType(),
@@ -2299,7 +3608,7 @@ public class MatchEffectService {
     ) {
         int requestedCount = resolveActionCount(effectNode, "アーカイブ", 1);
         int archiveCount = Math.max(requestedCount, 1);
-        SearchCriteria criteria = resolveSearchCriteria(effectNode);
+        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         List<Map<String, Object>> candidates = loadCandidatesFromZone(
             matchId,
             userId,
@@ -2363,7 +3672,7 @@ public class MatchEffectService {
         JsonNode effectNode
     ) {
         int currentTurn = resolveCurrentTurnNumber(matchId);
-        SearchCriteria criteria = resolveSearchCriteria(effectNode);
+        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         String requiredLevel = StringUtils.hasText(criteria.levelType()) ? criteria.levelType() : "DEBUT";
 
         List<Map<String, Object>> targetCandidates = jdbcTemplate.query(
@@ -2562,7 +3871,7 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         String colorFilter = resolveCheerColorFilter(rawText);
         int requestedCount = resolveActionCount(effectNode, "エールデッキの下に戻", 1);
         int returnCount = Math.max(requestedCount, 1);
@@ -2573,6 +3882,7 @@ public class MatchEffectService {
             candidates = jdbcTemplate.query(
                 """
                 SELECT hc.id AS cheer_row_id,
+                       hc.match_card_id,
                        hc.cheer_card_id AS card_id,
                        cc.color
                 FROM match_holomem_cheers hc
@@ -2587,6 +3897,8 @@ public class MatchEffectService {
                 (rs, rowNum) -> {
                     Map<String, Object> row = new LinkedHashMap<>();
                     row.put("cheer_row_id", rs.getLong("cheer_row_id"));
+                    long matchCardId = rs.getLong("match_card_id");
+                    row.put("match_card_id", rs.wasNull() ? null : matchCardId);
                     row.put("card_id", rs.getString("card_id"));
                     row.put("color", rs.getString("color"));
                     return row;
@@ -2635,22 +3947,25 @@ public class MatchEffectService {
             }
             Long cardInstanceId;
             if (fromStageAttachedCheer) {
-                cardInstanceId = jdbcTemplate.query(
-                    """
-                    SELECT id
-                    FROM match_cards
-                    WHERE match_id = ?
-                      AND owner_user_id = ?
-                      AND zone = 'STAGE'
-                      AND card_id = ?
-                    ORDER BY id
-                    LIMIT 1
-                    """,
-                    rs -> rs.next() ? rs.getLong("id") : null,
-                    matchId,
-                    userId,
-                    cardId
-                );
+                cardInstanceId = asLong(row.get("match_card_id"));
+                if (cardInstanceId == null || cardInstanceId <= 0) {
+                    cardInstanceId = jdbcTemplate.query(
+                        """
+                        SELECT id
+                        FROM match_cards
+                        WHERE match_id = ?
+                          AND owner_user_id = ?
+                          AND zone = 'STAGE'
+                          AND card_id = ?
+                        ORDER BY id
+                        LIMIT 1
+                        """,
+                        rs -> rs.next() ? rs.getLong("id") : null,
+                        matchId,
+                        userId,
+                        cardId
+                    );
+                }
             } else {
                 cardInstanceId = asLong(row.get("id"));
             }
@@ -2715,29 +4030,45 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
+        String discardClause = extractCostClause(rawText);
+        SearchCriteria discardCriteria = resolveSearchCriteriaFromRawText(discardClause);
         int requestedCount = resolveActionCount(effectNode, "手札", 1);
         int discardCount = Math.max(requestedCount, 1);
 
-        List<Map<String, Object>> handCards = jdbcTemplate.query(
-            """
-            SELECT id, card_id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'HAND'
-            ORDER BY order_index NULLS LAST, id
-            LIMIT ?
-            """,
-            (rs, rowNum) -> {
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", rs.getLong("id"));
-                row.put("card_id", rs.getString("card_id"));
-                return row;
-            },
-            matchId,
-            userId,
-            discardCount
-        );
+        List<Map<String, Object>> handCards;
+        if (discardCriteria.isEmpty()) {
+            handCards = jdbcTemplate.query(
+                """
+                SELECT id, card_id
+                FROM match_cards
+                WHERE match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'HAND'
+                ORDER BY order_index NULLS LAST, id
+                LIMIT ?
+                """,
+                (rs, rowNum) -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", rs.getLong("id"));
+                    row.put("card_id", rs.getString("card_id"));
+                    return row;
+                },
+                matchId,
+                userId,
+                discardCount
+            );
+        } else {
+            // 某些官方文案把「要丟哪一張手牌」寫在冒號前的成本段，例如：
+            // `自分の手札の#FLOW GLOWを持つホロメン1枚をアーカイブできる：...`
+            //
+            // 若這裡仍沿用「拿手牌前 N 張」的舊邏輯，就會把不符合條件的手牌誤當成本。
+            // 因此只在成本段能解析出條件時，切換成同一套 SearchCriteria 過濾流程。
+            handCards = new ArrayList<>(loadCandidatesFromZone(matchId, userId, "HAND", discardCriteria, false));
+            if (handCards.size() > discardCount) {
+                handCards = new ArrayList<>(handCards.subList(0, discardCount));
+            }
+        }
 
         List<Long> discardedCardInstanceIds = new ArrayList<>();
         List<String> discardedCardIds = new ArrayList<>();
@@ -2776,6 +4107,9 @@ public class MatchEffectService {
         summary.put("effectType", effectType);
         summary.put("discardRequested", discardCount);
         summary.put("discardApplied", discardedCardInstanceIds.size());
+        if (!discardCriteria.isEmpty()) {
+            summary.put("discardCriteria", buildCriteriaSummary(discardCriteria));
+        }
         summary.put("discardedCardInstanceIds", discardedCardInstanceIds);
         summary.put("discardedCardIds", discardedCardIds);
         return summary;
@@ -2792,7 +4126,7 @@ public class MatchEffectService {
         String targetType,
         Long targetHolomemCardInstanceId
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
@@ -2861,7 +4195,7 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
@@ -2960,7 +4294,7 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
@@ -3030,7 +4364,7 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
@@ -3242,10 +4576,10 @@ public class MatchEffectService {
         String targetType,
         Long targetHolomemCardInstanceId
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
-        int modifier = extractByPattern(rawText, BATON_TOUCH_COST_MODIFIER_PATTERN);
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
+        int modifier = effectTextParser.extractByPattern(rawText, BATON_TOUCH_COST_MODIFIER_PATTERN);
         if (modifier <= 0) {
-            modifier = extractInt(effectNode, 0, "modifier", "value", "amount");
+            modifier = effectTextParser.extractInt(effectNode, 0, "modifier", "value", "amount");
         }
         if (modifier <= 0) {
             return executeNoOpEffect(effectType, effectNode, "找不到有效的バトンタッチ無色修正值");
@@ -3304,7 +4638,7 @@ public class MatchEffectService {
             "DEBUFF",
             modifier,
             expiresTurn,
-            toJsonString(Map.of("targetHolomemId", targetHolomemId, "rawText", rawText))
+            effectTextParser.toJsonString(Map.of("targetHolomemId", targetHolomemId, "rawText", rawText))
         );
 
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -3326,6 +4660,33 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
+        return executeAllowExtraBloomEffect(matchId, userId, effectType, effectNode, null, null);
+    }
+
+    /**
+     * 設定本回合額外 Bloom 許可效果。
+     *
+     * <p>這個 effectType 被多張官方卡共用，但它們的條件並不一樣：
+     *
+     * <p>- `HBP05-040`：Life <= 3，且目標是本回合已 Bloom 的特定 CENTER 成員
+     * <p>- `HSD10-004`：自己的推し是〈輪堂千速〉、相手ステージ有 1st，且目標就是「這張剛 Bloom 的自己」
+     *
+     * <p>因此這裡不再把規則寫死成單一卡特例，而是先讀文案，再用保守條件把 allowance 寫到
+     * `match_turn_effects`。只要 target 最終沒有被唯一辨識出來，就回傳 skipped，避免誤放寬 Bloom 規則。
+     */
+    private Map<String, Object> executeAllowExtraBloomEffect(
+        Long matchId,
+        Long userId,
+        String effectType,
+        JsonNode effectNode,
+        Long preferredTargetHolomemId,
+        Long holderCardInstanceId
+    ) {
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
+        if (!StringUtils.hasText(rawText)) {
+            return executeNoOpEffect(effectType, effectNode, "沒有可判讀的額外 Bloom 文案");
+        }
+
         int currentLife = jdbcTemplate.query(
             """
             SELECT current_life
@@ -3337,11 +4698,22 @@ public class MatchEffectService {
             matchId,
             userId
         );
-        if (currentLife > 3) {
-            return executeNoOpEffect(effectType, effectNode, "條件不成立：目前 Life 大於 3");
+        Integer maxAllowedLife = resolveExtraBloomLifeThreshold(rawText);
+        if (maxAllowedLife != null && currentLife > maxAllowedLife) {
+            return executeNoOpEffect(effectType, effectNode, "條件不成立：目前 Life 大於 " + maxAllowedLife);
         }
 
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String requiredOshiName = resolveRequiredOshiName(rawText);
+        if (StringUtils.hasText(requiredOshiName)) {
+            String currentOshiName = resolvePlayerOshiCardName(matchId, userId);
+            if (!requiredOshiName.equals(currentOshiName)) {
+                return executeNoOpEffect(effectType, effectNode, "條件不成立：推しホロメン不符合要求");
+            }
+        }
+        if (rawText.contains("相手のステージに1stホロメンがいる") && !hasOpponentStageHolomemWithLevel(matchId, userId, "FIRST")) {
+            return executeNoOpEffect(effectType, effectNode, "條件不成立：相手ステージ沒有 1st Holomem");
+        }
+
         List<String> allowedNames = new ArrayList<>();
         if (rawText.contains("〈さくらみこ〉")) {
             allowedNames.add("さくらみこ");
@@ -3350,12 +4722,53 @@ public class MatchEffectService {
             allowedNames.add("星街すいせい");
         }
 
-        Map<String, Object> target = jdbcTemplate.query(
+        int currentTurn = resolveCurrentTurnNumber(matchId);
+
+        Map<String, Object> target;
+        if (preferredTargetHolomemId != null && rawText.contains("このホロメン")) {
+            target = jdbcTemplate.query(
+                """
+                SELECT h.id AS holomem_id,
+                       h.match_card_id,
+                       h.card_id,
+                       c.name,
+                       h.zone,
+                       h.last_bloom_turn
+                FROM match_holomems h
+                JOIN cards c ON c.card_id = h.card_id
+                WHERE h.match_id = ?
+                  AND h.owner_user_id = ?
+                  AND h.id = ?
+                LIMIT 1
+                """,
+                rs -> {
+                    if (!rs.next()) {
+                        return null;
+                    }
+                    if (asInt(rs.getObject("last_bloom_turn")) != currentTurn) {
+                        return null;
+                    }
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("holomem_id", rs.getLong("holomem_id"));
+                    row.put("match_card_id", rs.getLong("match_card_id"));
+                    row.put("card_id", rs.getString("card_id"));
+                    row.put("name", rs.getString("name"));
+                    row.put("zone", rs.getString("zone"));
+                    return row;
+                },
+                matchId,
+                userId,
+                preferredTargetHolomemId
+            );
+        } else {
+            String requiredZone = rawText.contains("センターホロメン") ? "CENTER" : null;
+            target = jdbcTemplate.query(
             """
             SELECT h.id AS holomem_id,
                    h.match_card_id,
                    h.card_id,
-                   c.name
+                   c.name,
+                   h.zone
             FROM match_holomems h
             JOIN cards c ON c.card_id = h.card_id
             WHERE h.match_id = ?
@@ -3367,6 +4780,10 @@ public class MatchEffectService {
             rs -> {
                 while (rs.next()) {
                     String name = rs.getString("name");
+                    String zone = rs.getString("zone");
+                    if (StringUtils.hasText(requiredZone) && !requiredZone.equals(effectTextParser.normalizeEffectType(zone))) {
+                        continue;
+                    }
                     if (!allowedNames.isEmpty() && !containsAnyName(name, allowedNames)) {
                         continue;
                     }
@@ -3375,20 +4792,40 @@ public class MatchEffectService {
                     row.put("match_card_id", rs.getLong("match_card_id"));
                     row.put("card_id", rs.getString("card_id"));
                     row.put("name", name);
+                    row.put("zone", zone);
                     return row;
                 }
                 return null;
             },
             matchId,
             userId,
-            currentLife <= 3 ? resolveCurrentTurnNumber(matchId) : -1
-        );
+            currentTurn
+            );
+        }
         if (target == null) {
-            return executeNoOpEffect(effectType, effectNode, "沒有符合條件且本回合已 Bloom 的 CENTER 目標");
+            return executeNoOpEffect(effectType, effectNode, "沒有符合條件且本回合已 Bloom 的目標");
         }
 
         Long targetHolomemId = asLong(target.get("holomem_id"));
-        int currentTurn = resolveCurrentTurnNumber(matchId);
+        Integer existingAllowanceCount = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'ALLOW_EXTRA_BLOOM'
+              AND expires_turn >= ?
+              AND (payload ->> 'targetHolomemId') = ?
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            userId,
+            currentTurn,
+            targetHolomemId.toString()
+        );
+        if (existingAllowanceCount != null && existingAllowanceCount > 0) {
+            return executeNoOpEffect(effectType, effectNode, "本回合已存在同目標的額外 Bloom 許可");
+        }
         int inserted = jdbcTemplate.update(
             """
             INSERT INTO match_turn_effects (
@@ -3407,12 +4844,14 @@ public class MatchEffectService {
             userId,
             "BUFF",
             currentTurn,
-            toJsonString(
+            effectTextParser.toJsonString(
                 Map.of(
                     "targetHolomemId", targetHolomemId,
                     "targetHolomemCardInstanceId", asLong(target.get("match_card_id")),
                     "targetCardId", asText(target.get("card_id")),
-                    "targetName", asText(target.get("name"))
+                    "targetName", asText(target.get("name")),
+                    "holderCardInstanceId", holderCardInstanceId,
+                    "rawText", rawText
                 )
             )
         );
@@ -3424,8 +4863,82 @@ public class MatchEffectService {
         summary.put("targetHolomemCardInstanceId", asLong(target.get("match_card_id")));
         summary.put("targetCardId", asText(target.get("card_id")));
         summary.put("targetName", asText(target.get("name")));
+        summary.put("targetZone", asText(target.get("zone")));
         summary.put("expiresTurn", currentTurn);
         return summary;
+    }
+
+    /**
+     * 從文案抽出「Life 必須不高於多少」的門檻。
+     *
+     * <p>目前只處理額外 Bloom 相關卡文中已出現且可穩定辨識的寫法，避免把其它數字條件誤吃進來。
+     */
+    private Integer resolveExtraBloomLifeThreshold(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return null;
+        }
+        if (rawText.contains("ライフが3以下")) {
+            return 3;
+        }
+        if (rawText.contains("ライフが4以下")) {
+            return 4;
+        }
+        return null;
+    }
+
+    /**
+     * 從額外 Bloom 文案中擷取推し名稱限制。
+     */
+    private String resolveRequiredOshiName(String rawText) {
+        if (!StringUtils.hasText(rawText) || !rawText.contains("推しホロメン")) {
+            return null;
+        }
+        Matcher matcher = Pattern.compile("推しホロメンが〈([^〉]+)〉").matcher(rawText);
+        return matcher.find() ? matcher.group(1).trim() : null;
+    }
+
+    /**
+     * 讀取玩家目前的推し名稱。
+     */
+    private String resolvePlayerOshiCardName(Long matchId, Long userId) {
+        return jdbcTemplate.query(
+            """
+            SELECT c.name
+            FROM match_players mp
+            JOIN cards c ON c.card_id = mp.oshi_card_id
+            WHERE mp.match_id = ?
+              AND mp.user_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("name") : null,
+            matchId,
+            userId
+        );
+    }
+
+    /**
+     * 判斷對手場上是否存在指定等級的 Holomem。
+     */
+    private boolean hasOpponentStageHolomemWithLevel(Long matchId, Long userId, String levelType) {
+        Long opponentUserId = resolveOpponentUserId(matchId, userId);
+        if (opponentUserId == null || !StringUtils.hasText(levelType)) {
+            return false;
+        }
+        Integer count = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone IN ('CENTER', 'COLLAB', 'BACK')
+              AND current_level = ?
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            opponentUserId,
+            levelType
+        );
+        return count != null && count > 0;
     }
 
     /**
@@ -3439,7 +4952,7 @@ public class MatchEffectService {
         String targetType,
         Long targetHolomemCardInstanceId
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
         List<String> actions = new ArrayList<>();
         if (rawText.contains("バトンタッチ") && rawText.contains("できない")) {
             actions.add("BATON_TOUCH");
@@ -3514,7 +5027,7 @@ public class MatchEffectService {
             affectedUserId,
             "DEBUFF",
             expiresTurn,
-            toJsonString(payload)
+            effectTextParser.toJsonString(payload)
         );
 
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -3539,7 +5052,7 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (rawText.contains("マスコットが付いている")) {
             Integer mascotAttachedCount = jdbcTemplate.queryForObject(
                 """
@@ -3629,7 +5142,7 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         boolean lookOpponent = rawText.contains("相手");
         Long lookedUserId = lookOpponent ? resolveOpponentUserId(matchId, userId) : userId;
         if (lookedUserId == null || lookedUserId <= 0) {
@@ -3694,7 +5207,7 @@ public class MatchEffectService {
         JsonNode effectNode,
         Long selfHolomemCardInstanceId
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         Long sourceHolomemId = resolveTargetHolomemId(matchId, userId, selfHolomemCardInstanceId);
         if (sourceHolomemId == null) {
             sourceHolomemId = jdbcTemplate.query(
@@ -3831,40 +5344,21 @@ public class MatchEffectService {
         String targetType,
         Long targetHolomemCardInstanceId
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
+        String addCheerEffectClause = extractResolvedEffectClause(rawText);
         boolean preferSelfBackTarget =
             !isOpponentTargetType(normalize(targetType))
-                && StringUtils.hasText(rawText)
-                && rawText.contains("バックホロメン");
+                && StringUtils.hasText(addCheerEffectClause)
+                && addCheerEffectClause.contains("バックホロメン");
 
-        Long targetHolomemId;
-        if (preferSelfBackTarget) {
-            targetHolomemId = jdbcTemplate.query(
-                """
-                SELECT id
-                FROM match_holomems
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'BACK'
-                ORDER BY id
-                LIMIT 1
-                """,
-                rs -> rs.next() ? rs.getLong("id") : null,
-                matchId,
-                userId
-            );
-            if (targetHolomemId == null) {
-                return executeNoOpEffect(effectType, effectNode, "找不到可附加的 BACK Holomem");
-            }
-        } else {
-            targetHolomemId = resolveEffectTargetHolomemId(
-                matchId,
-                userId,
-                targetType,
-                targetHolomemCardInstanceId,
-                false
-            );
-        }
+        Long targetHolomemId = resolvePreferredAddCheerTargetHolomemId(
+            matchId,
+            userId,
+            targetType,
+            targetHolomemCardInstanceId,
+            addCheerEffectClause,
+            preferSelfBackTarget
+        );
         if (targetHolomemId == null) {
             throw new IllegalStateException("ADD_CHEER 需要指定可用的我方 Holomen");
         }
@@ -3874,7 +5368,7 @@ public class MatchEffectService {
         List<Long> attachedCardInstanceIds = new ArrayList<>();
         List<String> sourceZones = new ArrayList<>();
         for (int i = 0; i < attachCount; i++) {
-            Map<String, Object> source = findAttachableCheerCard(matchId, userId);
+            Map<String, Object> source = resolvePreferredAddCheerSource(matchId, userId, addCheerEffectClause);
             if (source == null) {
                 break;
             }
@@ -3920,10 +5414,11 @@ public class MatchEffectService {
             if (moved == 1) {
                 jdbcTemplate.update(
                     """
-                    INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down)
-                    VALUES (?, ?, FALSE)
+                    INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+                    VALUES (?, ?, ?, FALSE)
                     """,
                     targetHolomemId,
+                    cardInstanceId,
                     cardId
                 );
                 attachedCardInstanceIds.add(cardInstanceId);
@@ -3939,6 +5434,162 @@ public class MatchEffectService {
         summary.put("attachedCheerCardInstanceIds", attachedCardInstanceIds);
         summary.put("sourceZones", sourceZones);
         return summary;
+    }
+
+    /**
+     * ADD_CHEER 會混到兩種不同需求：
+     * 1. 純粹把某張可用 Cheer 貼到預設目標。
+     * 2. 文案明確限制「只能從 Archive」或「只能貼到帶指定 tag 的 Holomem」。
+     *
+     * 這裡先把「不需要額外互動、可由文案穩定推斷」的條件集中處理，
+     * 讓 Gift / Bloom / Collab 共用同一套 deterministic 選目標規則。
+     */
+    private Long resolvePreferredAddCheerTargetHolomemId(
+        Long matchId,
+        Long userId,
+        String targetType,
+        Long targetHolomemCardInstanceId,
+        String rawText,
+        boolean preferSelfBackTarget
+    ) {
+        String targetClause = extractAddCheerTargetClause(rawText);
+        String requiredTag = searchCriteriaParser.resolveTagFromKnownTags(targetClause);
+        String requiredZone = resolveRequiredAddCheerTargetZone(targetClause, preferSelfBackTarget);
+        String requiredLevelType = resolveRequiredAddCheerTargetLevelType(targetClause);
+        String requiredNameContains = resolveTargetNameContains(targetClause);
+
+        // 只要文案沒有額外限制，就維持既有 targetType 解析邏輯，避免改動面過大。
+        if (
+            !StringUtils.hasText(requiredTag) &&
+            !StringUtils.hasText(requiredZone) &&
+            !StringUtils.hasText(requiredLevelType) &&
+            !StringUtils.hasText(requiredNameContains)
+        ) {
+            return resolveEffectTargetHolomemId(
+                matchId,
+                userId,
+                targetType,
+                targetHolomemCardInstanceId,
+                false
+            );
+        }
+
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder(
+            """
+            SELECT h.id
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            JOIN member_cards m ON m.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+            """
+        );
+        args.add(matchId);
+        args.add(userId);
+
+        if (StringUtils.hasText(requiredZone)) {
+            sql.append("\n  AND h.zone = ?");
+            args.add(requiredZone);
+        }
+        if (StringUtils.hasText(requiredLevelType)) {
+            sql.append("\n  AND m.level_type = ?");
+            args.add(requiredLevelType);
+        }
+        if (StringUtils.hasText(requiredNameContains)) {
+            sql.append("\n  AND c.name ILIKE '%' || ? || '%'");
+            args.add(requiredNameContains);
+        }
+        if (StringUtils.hasText(requiredTag)) {
+            sql.append("\n  AND c.tags_json @> to_jsonb(ARRAY[?]::text[])");
+            args.add(requiredTag);
+        }
+
+        sql.append(
+            """
+
+            ORDER BY CASE h.zone
+                        WHEN 'CENTER' THEN 1
+                        WHEN 'COLLAB' THEN 2
+                        WHEN 'BACK' THEN 3
+                        ELSE 9
+                     END,
+                     h.id
+            LIMIT 1
+            """
+        );
+
+        Long restrictedTarget = jdbcTemplate.query(sql.toString(), rs -> rs.next() ? rs.getLong("id") : null, args.toArray());
+        if (restrictedTarget != null) {
+            return restrictedTarget;
+        }
+
+        // 有些效果文案同時帶 tag/zone 條件，找不到符合者時應視為不能執行，
+        // 不能回退成隨便貼到中心，否則會把「限定目標」做成「任意目標」。
+        return null;
+    }
+
+    /**
+     * 從文案推斷 ADD_CHEER 的來源區。
+     *
+     * 目前先補齊專案裡最常見且已經有官方卡需求的兩種來源：
+     * - アーカイブのエール
+     * - エールデッキの上から
+     *
+     * 若文案沒有明示，仍保留原本的 CHEER_DECK > ARCHIVE > HAND fallback。
+     */
+    private Map<String, Object> resolvePreferredAddCheerSource(Long matchId, Long userId, String rawText) {
+        String sourceClause = extractAddCheerSourceClause(rawText);
+        SearchCriteria sourceCriteria = resolveSearchCriteriaFromRawText(sourceClause);
+
+        if (StringUtils.hasText(sourceClause) && sourceClause.contains("アーカイブの")) {
+            return findCheerCardFromZone(matchId, userId, "ARCHIVE", sourceCriteria);
+        }
+        if (StringUtils.hasText(sourceClause) && sourceClause.contains("エールデッキ")) {
+            return findCheerCardFromZone(matchId, userId, "CHEER_DECK", sourceCriteria);
+        }
+        return findAttachableCheerCard(matchId, userId);
+    }
+
+    /**
+     * 由文案判斷 ADD_CHEER 的目標區位限制。
+     */
+    private String resolveRequiredAddCheerTargetZone(String rawText, boolean preferSelfBackTarget) {
+        if (!StringUtils.hasText(rawText)) {
+            return preferSelfBackTarget ? "BACK" : "";
+        }
+        if (rawText.contains("バックホロメン")) {
+            return "BACK";
+        }
+        if (rawText.contains("コラボホロメン")) {
+            return "COLLAB";
+        }
+        if (rawText.contains("センターホロメン")) {
+            return "CENTER";
+        }
+        return preferSelfBackTarget ? "BACK" : "";
+    }
+
+    /**
+     * 由文案判斷 ADD_CHEER 的目標等級限制。
+     */
+    private String resolveRequiredAddCheerTargetLevelType(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return "";
+        }
+        if (rawText.contains("2ndホロメン")) {
+            return "SECOND";
+        }
+        if (rawText.contains("1stホロメン")) {
+            return "FIRST";
+        }
+        if (rawText.contains("Debutホロメン")) {
+            return "DEBUT";
+        }
+        if (rawText.contains("Spotホロメン")) {
+            return "SPOT";
+        }
+        return "";
     }
 
     /**
@@ -3962,11 +5613,11 @@ public class MatchEffectService {
             return executeNoOpEffect(effectType, effectNode, "找不到可支付疊卡成本的 Holomem");
         }
 
-        int archiveRequested = extractInt(effectNode, 1, "stackArchiveCount", "archiveCount", "stackCostCount", "costCount");
+        int archiveRequested = effectTextParser.extractInt(effectNode, 1, "stackArchiveCount", "archiveCount", "stackCostCount", "costCount");
         if (archiveRequested <= 0) {
             archiveRequested = 1;
         }
-        String requiredLevelType = normalizeLevelType(extractText(effectNode, "stackCostLevelType", "costLevelType"));
+        String requiredLevelType = normalizeLevelType(effectTextParser.extractText(effectNode, "stackCostLevelType", "costLevelType"));
         if (!StringUtils.hasText(requiredLevelType)) {
             requiredLevelType = "DEBUT";
         }
@@ -4080,7 +5731,7 @@ public class MatchEffectService {
         String targetType,
         Long targetHolomemCardInstanceId
     ) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
         if (rawText.contains("かわりに受ける")) {
             return executeDamageRedirectPreparationEffect(
                 matchId,
@@ -4188,7 +5839,8 @@ public class MatchEffectService {
             targetCardId
         );
         int attachedSupportHpBonus = resolveAttachedSupportHpBonus(matchId, targetHolomemId);
-        int hp = Math.max(baseHp + attachedSupportHpBonus, 0);
+        int passiveGiftHpBonus = resolvePassiveGiftHpBonus(matchId, targetOwnerUserId, targetHolomemId);
+        int hp = Math.max(baseHp + attachedSupportHpBonus + passiveGiftHpBonus, 0);
         int damageTaken = asInt(holomemState.get("damage_taken"));
 
         boolean downed = hp > 0 && damageTaken >= hp;
@@ -4329,7 +5981,7 @@ public class MatchEffectService {
             affectedUserId,
             "DEBUFF",
             currentTurn,
-            toJsonString(payload)
+            effectTextParser.toJsonString(payload)
         );
 
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -4459,7 +6111,7 @@ public class MatchEffectService {
         int removeCount = Math.max(removeRequested, 1);
         List<Map<String, Object>> cheerRows = jdbcTemplate.queryForList(
             """
-            SELECT id, cheer_card_id
+            SELECT id, cheer_card_id, match_card_id
             FROM match_holomem_cheers
             WHERE match_holomem_id = ?
             ORDER BY id
@@ -4473,6 +6125,7 @@ public class MatchEffectService {
         List<String> removedCheerCardIds = new ArrayList<>();
         for (Map<String, Object> row : cheerRows) {
             Long cheerRowId = asLong(row.get("id"));
+            Long cheerCardInstanceId = asLong(row.get("match_card_id"));
             String cheerCardId = asText(row.get("cheer_card_id"));
             if (cheerRowId == null || !StringUtils.hasText(cheerCardId)) {
                 continue;
@@ -4486,7 +6139,12 @@ public class MatchEffectService {
                 continue;
             }
             removedCheerCardIds.add(cheerCardId);
-            Long archivedCardInstanceId = moveCheerCardInstanceToArchive(matchId, targetOwnerUserId, cheerCardId);
+            Long archivedCardInstanceId = moveCheerCardInstanceToArchive(
+                matchId,
+                targetOwnerUserId,
+                cheerCardInstanceId,
+                cheerCardId
+            );
             if (archivedCardInstanceId != null) {
                 archivedCardInstanceIds.add(archivedCardInstanceId);
             }
@@ -4499,6 +6157,74 @@ public class MatchEffectService {
         summary.put("removeRequested", removeCount);
         summary.put("removeApplied", removedCheerCardIds.size());
         summary.put("removedCheerCardIds", removedCheerCardIds);
+        summary.put("archivedCheerCardInstanceIds", archivedCardInstanceIds);
+        return summary;
+    }
+
+    /**
+     * 執行移除場上 Cheer 效果，從自己場上任一 Holomem 的附屬 Cheer 中移除指定數量。
+     */
+    private Map<String, Object> executeRemoveStageCheerEffect(
+        Long matchId,
+        Long userId,
+        String effectType,
+        JsonNode effectNode
+    ) {
+        int removeRequested = resolveCheerCount(effectNode, 1);
+        int removeCount = Math.max(removeRequested, 1);
+        List<Map<String, Object>> cheerRows = jdbcTemplate.queryForList(
+            """
+            SELECT hc.id, hc.cheer_card_id, hc.match_holomem_id, hc.match_card_id
+            FROM match_holomem_cheers hc
+            JOIN match_holomems h ON h.id = hc.match_holomem_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+            ORDER BY h.id, hc.id
+            LIMIT ?
+            """,
+            matchId,
+            userId,
+            removeCount
+        );
+
+        List<Long> archivedCardInstanceIds = new ArrayList<>();
+        List<String> removedCheerCardIds = new ArrayList<>();
+        List<Long> sourceHolomemIds = new ArrayList<>();
+        for (Map<String, Object> row : cheerRows) {
+            Long cheerRowId = asLong(row.get("id"));
+            String cheerCardId = asText(row.get("cheer_card_id"));
+            Long sourceHolomemId = asLong(row.get("match_holomem_id"));
+            Long cheerCardInstanceId = asLong(row.get("match_card_id"));
+            if (cheerRowId == null || !StringUtils.hasText(cheerCardId) || sourceHolomemId == null) {
+                continue;
+            }
+            int deleted = jdbcTemplate.update(
+                "DELETE FROM match_holomem_cheers WHERE id = ? AND match_holomem_id = ?",
+                cheerRowId,
+                sourceHolomemId
+            );
+            if (deleted != 1) {
+                continue;
+            }
+            removedCheerCardIds.add(cheerCardId);
+            sourceHolomemIds.add(sourceHolomemId);
+            Long archivedCardInstanceId = moveCheerCardInstanceToArchive(
+                matchId,
+                userId,
+                cheerCardInstanceId,
+                cheerCardId
+            );
+            if (archivedCardInstanceId != null) {
+                archivedCardInstanceIds.add(archivedCardInstanceId);
+            }
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", effectType);
+        summary.put("removeRequested", removeCount);
+        summary.put("removeApplied", removedCheerCardIds.size());
+        summary.put("removedCheerCardIds", removedCheerCardIds);
+        summary.put("sourceHolomemIds", sourceHolomemIds);
         summary.put("archivedCheerCardInstanceIds", archivedCardInstanceIds);
         return summary;
     }
@@ -4551,7 +6277,7 @@ public class MatchEffectService {
         String fromZone = normalize(holomem.get("zone"));
         String toZone = resolveMoveDestinationZone(effectNode);
         boolean restAfterMove = shouldRestAfterMove(effectNode);
-        String rawText = extractText(effectNode, "rawText", "rawEffect");
+        String rawText = effectTextParser.extractText(effectNode, "rawText", "rawEffect");
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
@@ -4769,11 +6495,21 @@ public class MatchEffectService {
         int currentTurn = resolveCurrentTurnNumber(matchId);
         int expiresTurn = currentTurn;
         List<Long> affectedUserIds = resolveAffectedUserIds(matchId, userId, targetType);
+        boolean requireSingleTarget = rawTextRequiresSingleArtTarget(effectNode);
+        Map<String, Object> targetHolomem = resolveBuffDebuffTargetHolomem(matchId, userId, targetType, effectNode);
         int inserted = 0;
-        if (modifier != 0 && !affectedUserIds.isEmpty()) {
+        if (modifier != 0 && !affectedUserIds.isEmpty() && (!requireSingleTarget || (targetHolomem != null && !targetHolomem.isEmpty()))) {
             for (Long affectedUserId : affectedUserIds) {
                 if (affectedUserId == null || affectedUserId <= 0) {
                     continue;
+                }
+                Map<String, Object> payload = new LinkedHashMap<>();
+                payload.put("rawText", effectTextParser.extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
+                if (targetHolomem != null && !targetHolomem.isEmpty()) {
+                    payload.put("targetHolomemId", asLong(targetHolomem.get("holomem_id")));
+                    payload.put("targetHolomemCardInstanceId", asLong(targetHolomem.get("match_card_id")));
+                    payload.put("targetCardId", asText(targetHolomem.get("card_id")));
+                    payload.put("targetName", asText(targetHolomem.get("name")));
                 }
                 inserted += jdbcTemplate.update(
                     """
@@ -4794,7 +6530,7 @@ public class MatchEffectService {
                     effectType,
                     modifier,
                     expiresTurn,
-                    toJsonString(Map.of("rawText", extractText(effectNode, "rawText", "rawEffect", "rawHeader")))
+                    effectTextParser.toJsonString(payload)
                 );
             }
         }
@@ -4808,10 +6544,132 @@ public class MatchEffectService {
         summary.put("expiresTurn", expiresTurn);
         summary.put("affectedUserIds", affectedUserIds);
         summary.put("appliedCount", inserted);
+        if (targetHolomem != null && !targetHolomem.isEmpty()) {
+            summary.put("targetHolomemId", asLong(targetHolomem.get("holomem_id")));
+            summary.put("targetHolomemCardInstanceId", asLong(targetHolomem.get("match_card_id")));
+            summary.put("targetCardId", asText(targetHolomem.get("card_id")));
+            summary.put("targetName", asText(targetHolomem.get("name")));
+        }
         if (modifier == 0) {
             summary.put("reason", "找不到可用的傷害修正值");
+        } else if (requireSingleTarget && (targetHolomem == null || targetHolomem.isEmpty())) {
+            summary.put("reason", "找不到唯一可套用的單體藝能加成目標");
         }
         return summary;
+    }
+
+    /**
+     * 嘗試由 BUFF/DEBUFF 文案解析出唯一 Holomem 目標。
+     *
+     * <p>目前先處理像 `HBP06-084` 這種：
+     *
+     * <p>- `このターンの間`
+     * <p>- `自分のステージの〈博衣こより〉1人のアーツ+20`
+     *
+     * <p>若文案沒有「1人」這種單體限制，就維持原本的玩家層級 turn modifier。
+     * 若文案要求單體，但盤面上找不到唯一合法目標，就回傳 `null`，交由 caller 視為 skipped，
+     * 避免把「選 1 人」偷做成「全體都吃到」。
+     */
+    private Map<String, Object> resolveBuffDebuffTargetHolomem(
+        Long matchId,
+        Long userId,
+        String targetType,
+        JsonNode effectNode
+    ) {
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
+        if (!rawTextRequiresSingleArtTarget(rawText)) {
+            return null;
+        }
+
+        List<Long> affectedUserIds = resolveAffectedUserIds(matchId, userId, targetType);
+        if (affectedUserIds.size() != 1) {
+            return null;
+        }
+        Long affectedUserId = affectedUserIds.get(0);
+        if (affectedUserId == null || affectedUserId <= 0) {
+            return null;
+        }
+
+        SearchCriteria criteria = resolveSearchCriteriaFromRawText(rawText);
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder(
+            """
+            SELECT h.id AS holomem_id,
+                   h.match_card_id,
+                   h.card_id,
+                   c.name,
+                   h.zone
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            JOIN member_cards m ON m.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone IN ('CENTER','COLLAB','BACK')
+            """
+        );
+        args.add(matchId);
+        args.add(affectedUserId);
+
+        if (rawText.contains("センターホロメン")) {
+            sql.append("\n  AND h.zone = 'CENTER'");
+        } else if (rawText.contains("コラボホロメン")) {
+            sql.append("\n  AND h.zone = 'COLLAB'");
+        } else if (rawText.contains("バックホロメン")) {
+            sql.append("\n  AND h.zone = 'BACK'");
+        }
+        if (StringUtils.hasText(criteria.levelType())) {
+            sql.append("\n  AND m.level_type = ?");
+            args.add(criteria.levelType());
+        }
+        if (StringUtils.hasText(criteria.nameContains())) {
+            sql.append("\n  AND c.name ILIKE '%' || ? || '%'");
+            args.add(criteria.nameContains());
+        }
+        if (StringUtils.hasText(criteria.tag())) {
+            sql.append("\n  AND c.tags_json @> to_jsonb(ARRAY[?]::text[])");
+            args.add(criteria.tag());
+        }
+
+        sql.append(
+            """
+
+            ORDER BY CASE h.zone
+                        WHEN 'CENTER' THEN 1
+                        WHEN 'COLLAB' THEN 2
+                        WHEN 'BACK' THEN 3
+                        ELSE 9
+                     END,
+                     h.id
+            """
+        );
+
+        List<Map<String, Object>> matches = jdbcTemplate.query(
+            sql.toString(),
+            (rs, rowNum) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("holomem_id", rs.getLong("holomem_id"));
+                row.put("match_card_id", rs.getLong("match_card_id"));
+                row.put("card_id", rs.getString("card_id"));
+                row.put("name", rs.getString("name"));
+                row.put("zone", rs.getString("zone"));
+                return row;
+            },
+            args.toArray()
+        );
+        return matches.size() == 1 ? matches.get(0) : null;
+    }
+
+    private boolean rawTextRequiresSingleArtTarget(JsonNode effectNode) {
+        return rawTextRequiresSingleArtTarget(
+            effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect", "rawHeader"))
+        );
+    }
+
+    /**
+     * 判斷文案是否要求「選 1 張 Holomem 吃本回合藝能修正」。
+     */
+    private boolean rawTextRequiresSingleArtTarget(String rawText) {
+        return StringUtils.hasText(rawText) && rawText.contains("1人") && rawText.contains("アーツ");
     }
 
     /**
@@ -4822,7 +6680,7 @@ public class MatchEffectService {
         summary.put("effectType", effectType);
         summary.put("applied", false);
         summary.put("reason", reason);
-        summary.put("rawText", extractText(effectNode, "rawText", "rawEffect"));
+        summary.put("rawText", effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         return summary;
     }
 
@@ -4831,7 +6689,7 @@ public class MatchEffectService {
      */
     private Map<String, Object> buildSkippedEffect(String effectType, String reason) {
         Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", normalizeEffectType(effectType));
+        summary.put("effectType", effectTextParser.normalizeEffectType(effectType));
         summary.put("applied", false);
         summary.put("skipped", true);
         summary.put("reason", StringUtils.hasText(reason) ? reason : "EFFECT_SKIPPED");
@@ -4860,7 +6718,7 @@ public class MatchEffectService {
         matchResult.put("reason", decision.reason());
 
         Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", normalizeEffectType(effectType));
+        summary.put("effectType", effectTextParser.normalizeEffectType(effectType));
         summary.put("applied", true);
         summary.put("matchResult", matchResult);
         return summary;
@@ -4875,17 +6733,17 @@ public class MatchEffectService {
         Long actorUserId,
         Long opponentUserId
     ) {
-        String explicitResult = normalizeEffectType(readText(effectNode, "result", "outcome", "matchResult"));
-        String normalizedEffectType = normalizeEffectType(effectType);
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
+        String explicitResult = effectTextParser.normalizeEffectType(readText(effectNode, "result", "outcome", "matchResult"));
+        String normalizedEffectType = effectTextParser.normalizeEffectType(effectType);
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
 
         String resolvedReason = readText(effectNode, "reason");
         if (!StringUtils.hasText(resolvedReason)) {
             resolvedReason = "CARD_EFFECT_MATCH_RESULT";
         }
 
-        String winnerToken = normalizeEffectType(readText(effectNode, "winner", "winnerSide", "winnerUser"));
-        String loserToken = normalizeEffectType(readText(effectNode, "loser", "loserSide", "loserUser"));
+        String winnerToken = effectTextParser.normalizeEffectType(readText(effectNode, "winner", "winnerSide", "winnerUser"));
+        String loserToken = effectTextParser.normalizeEffectType(readText(effectNode, "loser", "loserSide", "loserUser"));
 
         if ("WIN".equals(normalizedEffectType) || "LOSE".equals(normalizedEffectType) || "DRAW".equals(normalizedEffectType)) {
             explicitResult = normalizedEffectType;
@@ -4952,7 +6810,7 @@ public class MatchEffectService {
      * 判斷 winner/loser token 是否代表雙方（平手）。
      */
     private boolean isBothToken(String token) {
-        String normalized = normalizeEffectType(token);
+        String normalized = effectTextParser.normalizeEffectType(token);
         return "BOTH".equals(normalized) || "ALL".equals(normalized);
     }
 
@@ -4960,7 +6818,7 @@ public class MatchEffectService {
      * 將 side token（SELF/OPPONENT 等）解析成實際 userId。
      */
     private Long resolveSideUserId(String sideToken, Long actorUserId, Long opponentUserId) {
-        String normalized = normalizeEffectType(sideToken);
+        String normalized = effectTextParser.normalizeEffectType(sideToken);
         return switch (normalized) {
             case "SELF", "YOU", "ME", "ACTOR", "CURRENT" -> actorUserId;
             case "OPPONENT", "ENEMY", "OTHER" -> opponentUserId;
@@ -4977,7 +6835,7 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
-        String normalizedType = normalizeEffectType(effectType);
+        String normalizedType = effectTextParser.normalizeEffectType(effectType);
         return switch (normalizedType) {
             case "SEARCH" -> probeSearchCandidates(matchId, userId, effectNode);
             case "RETURN_TO_HAND" -> probeReturnToHandCandidates(matchId, userId, effectNode);
@@ -4991,9 +6849,9 @@ public class MatchEffectService {
      */
     private SelectionProbe probeSearchCandidates(Long matchId, Long userId, JsonNode effectNode) {
         int requestedCount = Math.max(resolveSearchCount(effectNode), 1);
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         int lookTopCount = resolveSearchLookTopCount(effectNode, rawText);
-        SearchCriteria criteria = resolveSearchCriteria(effectNode);
+        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         List<Map<String, Object>> rows = lookTopCount > 0
             ? filterCandidatesByCriteria(loadTopDeckWindow(matchId, userId, lookTopCount), criteria)
             : loadSearchCandidates(matchId, userId, criteria);
@@ -5007,12 +6865,12 @@ public class MatchEffectService {
      * 探測 RETURN_TO_HAND 的候選清單與可選張數。
      */
     private SelectionProbe probeReturnToHandCandidates(Long matchId, Long userId, JsonNode effectNode) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, "RETURN_TO_HAND")) {
             return null;
         }
         int requestedCount = Math.max(resolveActionCount(effectNode, "手札に戻", 1), 1);
-        SearchCriteria criteria = resolveSearchCriteria(effectNode);
+        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         boolean excludeLimitedSupport = rawText.contains("LIMITED以外");
         List<Map<String, Object>> rows = loadCandidatesFromZone(
             matchId,
@@ -5031,12 +6889,12 @@ public class MatchEffectService {
      * 探測 RETURN_TO_DECK_TOP 的候選清單與可選張數。
      */
     private SelectionProbe probeReturnToDeckTopCandidates(Long matchId, Long userId, JsonNode effectNode) {
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (!shouldApplyByDice(rawText, effectNode, "RETURN_TO_DECK_TOP")) {
             return null;
         }
         int requestedCount = Math.max(resolveActionCount(effectNode, "デッキの上に戻", 1), 1);
-        SearchCriteria criteria = resolveSearchCriteria(effectNode);
+        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         List<Map<String, Object>> rows = loadCandidatesFromZone(
             matchId,
             userId,
@@ -5101,11 +6959,15 @@ public class MatchEffectService {
      * 解析 Bloom 效果計畫，優先結構化 JSON，否則回退文案推斷。
      */
     private BloomEffectPlan resolveBloomEffectPlan(String bloomCardId) {
+        return resolveBloomEffectPlan(bloomCardId, null);
+    }
+
+    private BloomEffectPlan resolveBloomEffectPlan(String bloomCardId, BloomRuntimeContext runtimeContext) {
         String passiveText = loadPassiveEffectText(bloomCardId);
         if (!StringUtils.hasText(passiveText)) {
             return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
         }
-        JsonNode passiveNode = parseEffectJson(passiveText);
+        JsonNode passiveNode = effectTextParser.parseEffectJson(passiveText);
         BloomEffectPlan structured = resolveStructuredBloomEffectPlan(passiveNode);
         if (structured != null && structured.hasBloomEffect()) {
             return structured;
@@ -5116,12 +6978,12 @@ public class MatchEffectService {
             return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
         }
         List<String> effectTypes = inferBloomEffectTypes(bloomText);
-        Integer diceRoll = resolveBloomDiceRoll(bloomText);
+        String normalizedCardId = normalize(bloomCardId);
+        Integer diceRoll = normalizedCardId.startsWith("HBP04-059") ? null : resolveBloomDiceRoll(bloomText);
         Map<String, Object> bloomEffectPayload = new LinkedHashMap<>();
         bloomEffectPayload.put("type", "UNIMPLEMENTED");
         bloomEffectPayload.put("effects", effectTypes);
         bloomEffectPayload.put("rawText", bloomText);
-        String normalizedCardId = normalize(bloomCardId);
         if (normalizedCardId.startsWith("HSD02-007")) {
             bloomEffectPayload.put("effects", List.of("SEARCH"));
             bloomEffectPayload.put("value", 1);
@@ -5137,6 +6999,59 @@ public class MatchEffectService {
             bloomEffectPayload.put("value", 20);
             bloomEffectPayload.put("damageTargetZone", "COLLAB");
             effectTypes = List.of("ARCHIVE_STACK_CARD", "DAMAGE");
+        }
+        if (normalizedCardId.startsWith("HSD07-007")) {
+            bloomEffectPayload.put("effects", List.of("SWAP_WITH_COLLAB"));
+            effectTypes = List.of("SWAP_WITH_COLLAB");
+        }
+        if (normalizedCardId.startsWith("HBP04-059")) {
+            int ownHandCount = runtimeContext == null || runtimeContext.common() == null
+                ? 0
+                : runtimeContext.common().ownHandCount();
+            if (ownHandCount <= 0) {
+                return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), bloomText, diceRoll);
+            }
+            bloomEffectPayload.put("effects", List.of("DISCARD_HAND", "DRAW"));
+            bloomEffectPayload.put("value", 0);
+            bloomEffectPayload.put("diceRollCount", 3);
+            bloomEffectPayload.put("oddRollsDrawCount", true);
+            effectTypes = List.of("DISCARD_HAND", "DRAW");
+        }
+        if (normalizedCardId.startsWith("HBP02-016")) {
+            if (!"DEBUT".equals(normalizeLevelType(runtimeContext == null ? null : runtimeContext.sourceLevelType()))) {
+                return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), bloomText, diceRoll);
+            }
+            bloomEffectPayload.put("effects", List.of("SEARCH"));
+            bloomEffectPayload.put("value", 1);
+            bloomEffectPayload.put("searchSourceZone", "DECK");
+            ObjectNode criteriaNode = objectMapper.createObjectNode();
+            criteriaNode.put("cardType", "MEMBER");
+            criteriaNode.put("tag", "#3期生");
+            var anyOf = criteriaNode.putArray("anyOf");
+            anyOf.addObject().put("levelType", "DEBUT");
+            anyOf.addObject().put("levelType", "FIRST");
+            anyOf.addObject().put("levelType", "SPOT");
+            bloomEffectPayload.put("searchCriteria", criteriaNode);
+            effectTypes = List.of("SEARCH");
+        }
+        if (normalizedCardId.startsWith("HBP06-081")) {
+            String oshiCardName = runtimeContext == null || runtimeContext.common() == null
+                ? null
+                : runtimeContext.common().oshiCardName();
+            int ownedStageCheerCount = runtimeContext == null || runtimeContext.common() == null
+                ? 0
+                : runtimeContext.common().ownedStageCheerCount();
+            if (!StringUtils.hasText(oshiCardName) || !"大空スバル".equals(oshiCardName.trim()) || ownedStageCheerCount <= 0) {
+                return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), bloomText, diceRoll);
+            }
+            bloomEffectPayload.put("effects", List.of("REMOVE_STAGE_CHEER", "SEARCH"));
+            bloomEffectPayload.put("value", 1);
+            bloomEffectPayload.put("searchSourceZone", "DECK");
+            ObjectNode criteriaNode = objectMapper.createObjectNode();
+            criteriaNode.put("cardType", "MEMBER");
+            criteriaNode.put("nameContains", "大空スバル");
+            bloomEffectPayload.put("searchCriteria", criteriaNode);
+            effectTypes = List.of("REMOVE_STAGE_CHEER", "SEARCH");
         }
         if (diceRoll != null) {
             bloomEffectPayload.put("diceRoll", diceRoll);
@@ -5158,7 +7073,7 @@ public class MatchEffectService {
         if (!StringUtils.hasText(passiveText)) {
             return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
         }
-        JsonNode passiveNode = parseEffectJson(passiveText);
+        JsonNode passiveNode = effectTextParser.parseEffectJson(passiveText);
         BloomEffectPlan structured = resolveStructuredCollabEffectPlan(passiveNode);
         if (structured != null && structured.hasBloomEffect()) {
             return structured;
@@ -5269,7 +7184,7 @@ public class MatchEffectService {
 
         // HBP06-078：先支付「此卡附屬エール 1」成本，再搜尋與推し同名 Debut。
         if (normalizedCardId.startsWith("HBP06-078")) {
-            if (!StringUtils.hasText(runtimeContext.oshiCardName())) {
+            if (runtimeContext == null || !StringUtils.hasText(runtimeContext.oshiCardName())) {
                 return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), basePlan.rawText(), basePlan.diceRoll());
             }
             adjustedEffects = List.of("REMOVE_CHEER", "SEARCH");
@@ -5287,7 +7202,7 @@ public class MatchEffectService {
         }
 
         // HSD10-008：只有看到對手手牌中有 SUPPORT 時才追加 DRAW。
-        if (normalizedCardId.startsWith("HSD10-008") && !runtimeContext.opponentHandHasSupport()) {
+        if (normalizedCardId.startsWith("HSD10-008") && runtimeContext != null && !runtimeContext.opponentHandHasSupport()) {
             adjustedEffects.removeIf("DRAW"::equals);
             if (adjustedEffects.isEmpty()) {
                 return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), basePlan.rawText(), basePlan.diceRoll());
@@ -5297,12 +7212,12 @@ public class MatchEffectService {
         }
 
         // HSD13-015：先退回場上エール；若場上無可退回エール則整段不觸發。
-        if (normalizedCardId.startsWith("HSD13-015") && runtimeContext.ownedStageCheerCount() <= 0) {
+        if (normalizedCardId.startsWith("HSD13-015") && runtimeContext != null && runtimeContext.ownedStageCheerCount() <= 0) {
             return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), basePlan.rawText(), basePlan.diceRoll());
         }
 
         // HSD10-009：查看牌庫頂張數 = 對手目前手牌張數（至少 1，避免空查詢退化）。
-        if (normalizedCardId.startsWith("HSD10-009")) {
+        if (normalizedCardId.startsWith("HSD10-009") && runtimeContext != null) {
             int lookTopCount = Math.max(runtimeContext.opponentHandCount(), 1);
             adjustedNode.put("lookTopCount", lookTopCount);
             if (!adjustedEffects.contains("SEARCH")) {
@@ -5333,6 +7248,7 @@ public class MatchEffectService {
                 null,
                 null,
                 null,
+                0,
                 0,
                 false,
                 0
@@ -5421,9 +7337,23 @@ public class MatchEffectService {
         );
 
         Long opponentUserId = resolveOpponentUserId(matchId, userId);
+        int ownHandCount = 0;
         int opponentHandCount = 0;
         boolean opponentHandHasSupport = false;
         int ownedStageCheerCount = 0;
+        Integer selfHandCount = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            userId
+        );
+        ownHandCount = selfHandCount == null ? 0 : Math.max(selfHandCount, 0);
         if (opponentUserId != null && opponentUserId > 0) {
             Integer handCount = jdbcTemplate.query(
                 """
@@ -5477,6 +7407,7 @@ public class MatchEffectService {
             centerRow == null ? null : asText(centerRow.get("name")),
             oshiCardName,
             firstBackHolomemCardInstanceId,
+            ownHandCount,
             opponentHandCount,
             opponentHandHasSupport,
             ownedStageCheerCount
@@ -5547,7 +7478,7 @@ public class MatchEffectService {
         }
 
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("type", normalizeEffectType(readText(bloomNode, "type")));
+        payload.put("type", effectTextParser.normalizeEffectType(readText(bloomNode, "type")));
         payload.put("effects", effectTypes);
         if (StringUtils.hasText(rawText)) {
             payload.put("rawText", rawText);
@@ -5601,7 +7532,7 @@ public class MatchEffectService {
         }
 
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("type", normalizeEffectType(readText(collabNode, "type")));
+        payload.put("type", effectTextParser.normalizeEffectType(readText(collabNode, "type")));
         payload.put("effects", effectTypes);
         if (StringUtils.hasText(rawText)) {
             payload.put("rawText", rawText);
@@ -5758,7 +7689,7 @@ public class MatchEffectService {
      */
     private List<String> inferBloomEffectTypes(String bloomText) {
         Set<String> effectTypes = new LinkedHashSet<>();
-        String text = normalizeDigits(bloomText == null ? "" : bloomText);
+        String text = effectTextParser.normalizeDigits(bloomText == null ? "" : bloomText);
         if (!StringUtils.hasText(text)) {
             effectTypes.add("UNIMPLEMENTED");
             return new ArrayList<>(effectTypes);
@@ -5805,7 +7736,7 @@ public class MatchEffectService {
         if (text.contains("エール") && (text.contains("アーカイブできる") || text.contains("アーカイブする"))) {
             effectTypes.add("REMOVE_CHEER");
         }
-        if (text.contains("手札") && text.contains("アーカイブする")) {
+        if (text.contains("手札") && (text.contains("アーカイブする") || text.contains("アーカイブできる"))) {
             effectTypes.add("DISCARD_HAND");
         }
         if (text.contains("お休みさせる")) {
@@ -5940,22 +7871,22 @@ public class MatchEffectService {
                 for (JsonNode node : effectsNode) {
                     if (node.isTextual() && StringUtils.hasText(node.asText())) {
                         hasStructuredEffects = true;
-                        effectTypes.add(normalizeEffectType(node.asText()));
+                        effectTypes.add(effectTextParser.normalizeEffectType(node.asText()));
                     }
                 }
             }
         }
         if (!hasStructuredEffects && StringUtils.hasText(effectType)) {
-            effectTypes.add(normalizeEffectType(effectType));
+            effectTypes.add(effectTextParser.normalizeEffectType(effectType));
         }
         if (!hasStructuredEffects && effectNode != null && effectNode.hasNonNull("type")) {
-            effectTypes.add(normalizeEffectType(effectNode.path("type").asText()));
+            effectTypes.add(effectTextParser.normalizeEffectType(effectNode.path("type").asText()));
         }
         if (hasStructuredEffects && StringUtils.hasText(effectType)) {
-            effectTypes.add(normalizeEffectType(effectType));
+            effectTypes.add(effectTextParser.normalizeEffectType(effectType));
         }
         if (hasStructuredEffects && effectNode != null && effectNode.hasNonNull("type")) {
-            effectTypes.add(normalizeEffectType(effectNode.path("type").asText()));
+            effectTypes.add(effectTextParser.normalizeEffectType(effectNode.path("type").asText()));
         }
         return new ArrayList<>(effectTypes);
     }
@@ -5964,11 +7895,11 @@ public class MatchEffectService {
      * 解析檢索可選數量，優先讀結構化欄位，否則回退文字規則推斷。
      */
     private int resolveSearchCount(JsonNode effectNode) {
-        int fromFields = extractInt(effectNode, 0, "value", "cards", "amount");
+        int fromFields = effectTextParser.extractInt(effectNode, 0, "value", "cards", "amount");
         if (fromFields > 0) {
             return fromFields;
         }
-        String text = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String text = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         Matcher range = SEARCH_RANGE_PATTERN.matcher(text);
         if (range.find()) {
             try {
@@ -5977,7 +7908,7 @@ public class MatchEffectService {
                 // 解析失敗時回退到下一規則
             }
         }
-        int count = extractByPattern(text, SEARCH_COUNT_PATTERN);
+        int count = effectTextParser.extractByPattern(text, SEARCH_COUNT_PATTERN);
         if (count > 0) {
             return count;
         }
@@ -5988,11 +7919,11 @@ public class MatchEffectService {
      * 解析「看牌庫頂」的觀察張數，支援欄位值與原文正則推斷。
      */
     private int resolveSearchLookTopCount(JsonNode effectNode, String rawText) {
-        int fromFields = extractInt(effectNode, 0, "lookTopCount", "lookCount", "peekCount");
+        int fromFields = effectTextParser.extractInt(effectNode, 0, "lookTopCount", "lookCount", "peekCount");
         if (fromFields > 0) {
             return fromFields;
         }
-        String text = normalizeDigits(rawText);
+        String text = effectTextParser.normalizeDigits(rawText);
         Matcher matcher = SEARCH_LOOK_TOP_COUNT_PATTERN.matcher(text);
         if (matcher.find()) {
             try {
@@ -6008,11 +7939,11 @@ public class MatchEffectService {
      * 解析 SEARCH 的來源區，預設為 DECK，可由 effectNode 或文案覆寫。
      */
     private String resolveSearchSourceZone(JsonNode effectNode, String rawText) {
-        String explicit = normalizeEffectType(readText(effectNode, "searchSourceZone", "sourceZone", "searchFromZone"));
+        String explicit = effectTextParser.normalizeEffectType(readText(effectNode, "searchSourceZone", "sourceZone", "searchFromZone"));
         if ("DECK".equals(explicit) || "ARCHIVE".equals(explicit) || "HOLOPOWER".equals(explicit) || "HAND".equals(explicit)) {
             return explicit;
         }
-        String text = normalizeDigits(rawText);
+        String text = effectTextParser.normalizeDigits(rawText);
         if (
             text.contains("ホロパワー")
                 && (text.contains("見る") || text.contains("見"))
@@ -6030,11 +7961,11 @@ public class MatchEffectService {
      * 解析 MOVE_TO_HOLOPOWER 的來源區，預設 DECK。
      */
     private String resolveMoveToHolopowerSourceZone(JsonNode effectNode, String rawText) {
-        String explicit = normalizeEffectType(readText(effectNode, "holopowerSourceZone", "moveSourceZone", "sourceZone"));
+        String explicit = effectTextParser.normalizeEffectType(readText(effectNode, "holopowerSourceZone", "moveSourceZone", "sourceZone"));
         if ("DECK".equals(explicit) || "ARCHIVE".equals(explicit) || "HAND".equals(explicit)) {
             return explicit;
         }
-        String text = normalizeDigits(rawText);
+        String text = effectTextParser.normalizeDigits(rawText);
         if (text.contains("手札") && text.contains("ホロパワーにする")) {
             return "HAND";
         }
@@ -6048,11 +7979,11 @@ public class MatchEffectService {
      * 解析通用動作張數（如回手/棄牌），不足時用關鍵字與預設值補齊。
      */
     private int resolveActionCount(JsonNode effectNode, String fallbackToken, int defaultValue) {
-        int fromFields = extractInt(effectNode, 0, "value", "cards", "amount");
+        int fromFields = effectTextParser.extractInt(effectNode, 0, "value", "cards", "amount");
         if (fromFields > 0) {
             return fromFields;
         }
-        String text = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String text = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         Matcher range = SEARCH_RANGE_PATTERN.matcher(text);
         if (range.find()) {
             try {
@@ -6061,7 +7992,7 @@ public class MatchEffectService {
                 // 解析失敗時回退到下一規則
             }
         }
-        int count = extractByPattern(text, SEARCH_COUNT_PATTERN);
+        int count = effectTextParser.extractByPattern(text, SEARCH_COUNT_PATTERN);
         if (count > 0) {
             return count;
         }
@@ -6075,7 +8006,7 @@ public class MatchEffectService {
      * 當 Bloom 文案包含骰子條件時擲骰，否則回傳 null。
      */
     private Integer resolveBloomDiceRoll(String bloomText) {
-        String text = normalizeDigits(bloomText);
+        String text = effectTextParser.normalizeDigits(bloomText);
         if (!StringUtils.hasText(text) || !text.contains("サイコロ")) {
             return null;
         }
@@ -6094,7 +8025,7 @@ public class MatchEffectService {
             }
             return evaluateDiceCondition(explicitCondition, diceRoll);
         }
-        String text = normalizeDigits(rawText);
+        String text = effectTextParser.normalizeDigits(rawText);
         if (!StringUtils.hasText(text) || !text.contains("サイコロ")) {
             return true;
         }
@@ -6137,17 +8068,17 @@ public class MatchEffectService {
             return null;
         }
         JsonNode perEffect = effectNode.get("effectDiceConditions");
-        String normalizedEffectType = normalizeEffectType(effectType);
+        String normalizedEffectType = effectTextParser.normalizeEffectType(effectType);
         if (perEffect != null && perEffect.isObject()) {
             JsonNode conditionNode = perEffect.get(normalizedEffectType);
             if (conditionNode == null) {
                 conditionNode = perEffect.get(effectType);
             }
             if (conditionNode != null && conditionNode.isTextual()) {
-                return normalizeEffectType(conditionNode.asText());
+                return effectTextParser.normalizeEffectType(conditionNode.asText());
             }
         }
-        return normalizeEffectType(readText(effectNode, "diceCondition", "dice_condition"));
+        return effectTextParser.normalizeEffectType(readText(effectNode, "diceCondition", "dice_condition"));
     }
 
     /**
@@ -6157,7 +8088,7 @@ public class MatchEffectService {
         if (!StringUtils.hasText(condition)) {
             return true;
         }
-        String normalized = normalizeEffectType(condition);
+        String normalized = effectTextParser.normalizeEffectType(condition);
         if ("ODD".equals(normalized)) {
             return diceRoll % 2 == 1;
         }
@@ -6208,7 +8139,7 @@ public class MatchEffectService {
      * 取得本次效果要使用的骰值，並回填到 effectNode 供後續摘要使用。
      */
     private int resolveDiceRoll(JsonNode effectNode) {
-        int fromNode = extractInt(effectNode, 0, "diceRoll");
+        int fromNode = effectTextParser.extractInt(effectNode, 0, "diceRoll");
         if (fromNode >= 1 && fromNode <= 6) {
             return fromNode;
         }
@@ -6255,11 +8186,11 @@ public class MatchEffectService {
      * 解析擲骰次數，包含欄位讀取與文案推斷，並限制最大次數。
      */
     private int resolveDiceRollCount(JsonNode effectNode) {
-        int fromField = extractInt(effectNode, 0, "diceRollCount", "diceCount", "rollCount");
+        int fromField = effectTextParser.extractInt(effectNode, 0, "diceRollCount", "diceCount", "rollCount");
         if (fromField > 0) {
             return Math.min(fromField, 6);
         }
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         Matcher matcher = DICE_ROLL_COUNT_PATTERN.matcher(rawText);
         if (matcher.find()) {
             try {
@@ -6278,11 +8209,11 @@ public class MatchEffectService {
      * 解析多骰取值策略（如取大/取小），預設使用 FIRST。
      */
     private String resolveDicePickStrategy(JsonNode effectNode) {
-        String explicit = normalizeEffectType(readText(effectNode, "dicePickStrategy", "dicePick", "diceSelect"));
+        String explicit = effectTextParser.normalizeEffectType(readText(effectNode, "dicePickStrategy", "dicePick", "diceSelect"));
         if (StringUtils.hasText(explicit)) {
             return explicit;
         }
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         if (rawText.contains("大きい方")) {
             return "MAX";
         }
@@ -6296,11 +8227,11 @@ public class MatchEffectService {
      * 解析固定骰值效果（如「視為 X」）。
      */
     private Integer resolveFixedDiceValue(JsonNode effectNode) {
-        int fromField = extractInt(effectNode, 0, "fixedDiceValue", "diceFixedValue", "forcedDiceValue");
+        int fromField = effectTextParser.extractInt(effectNode, 0, "fixedDiceValue", "diceFixedValue", "forcedDiceValue");
         if (fromField >= 1 && fromField <= 6) {
             return fromField;
         }
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         Matcher matcher = Pattern.compile("(\\d+)\\s*として扱う").matcher(rawText);
         if (matcher.find()) {
             try {
@@ -6313,145 +8244,6 @@ public class MatchEffectService {
             }
         }
         return null;
-    }
-
-    /**
-     * 解析單一檢索條件入口，支援結構化條件與原文推斷。
-     */
-    private SearchCriteria resolveSearchCriteria(JsonNode effectNode) {
-        JsonNode criteriaNode = effectNode == null ? null : effectNode.get("searchCriteria");
-        String rawText = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
-        return resolveSearchCriteriaNode(criteriaNode, rawText, true);
-    }
-
-    /**
-     * 將 JSON 條件節點轉為 SearchCriteria，必要時從 rawText 補齊缺欄。
-     */
-    private SearchCriteria resolveSearchCriteriaNode(JsonNode criteriaNode, String rawText, boolean allowRawInference) {
-        String cardType = normalizeCardType(readText(criteriaNode, "cardType"));
-        String levelType = normalizeLevelType(readText(criteriaNode, "level", "levelType"));
-        String tag = readText(criteriaNode, "tag");
-        String nameContains = readText(criteriaNode, "nameContains");
-        String color = normalizeColorType(readText(criteriaNode, "color", "mainColor", "cheerColor"));
-        Boolean rested = readBoolean(criteriaNode, "rested", "isRested", "requireRested", "mustBeRested");
-        Boolean active = readBoolean(criteriaNode, "active", "isActive", "mustBeActive");
-        if (rested == null && active != null) {
-            rested = !active;
-        }
-        Integer minRemainHp = extractNullableInt(
-            criteriaNode,
-            "minRemainHp",
-            "remainHpMin",
-            "remainingHpMin",
-            "minHp",
-            "hpMin",
-            "hpAtLeast"
-        );
-        Integer maxRemainHp = extractNullableInt(
-            criteriaNode,
-            "maxRemainHp",
-            "remainHpMax",
-            "remainingHpMax",
-            "maxHp",
-            "hpMax",
-            "hpAtMost"
-        );
-        List<SearchCriteria> allOf = resolveCriteriaList(criteriaNode == null ? null : criteriaNode.get("allOf"), rawText);
-        List<SearchCriteria> anyOf = resolveCriteriaList(criteriaNode == null ? null : criteriaNode.get("anyOf"), rawText);
-
-        if (!allowRawInference) {
-            return new SearchCriteria(cardType, levelType, tag, nameContains, color, rested, minRemainHp, maxRemainHp, allOf, anyOf);
-        }
-
-        if (!StringUtils.hasText(cardType)) {
-            if (rawText.contains("ホロメン")) {
-                cardType = "MEMBER";
-            } else if (rawText.contains("エール")) {
-                cardType = "CHEER";
-            } else if (
-                rawText.contains("サポート")
-                || rawText.contains("ツール")
-                || rawText.contains("イベント")
-                || rawText.contains("ファン")
-                || rawText.contains("マスコット")
-            ) {
-                cardType = "SUPPORT";
-            }
-        }
-        if (!StringUtils.hasText(levelType)) {
-            if (rawText.contains("Debut")) {
-                levelType = "DEBUT";
-            } else if (rawText.contains("1st")) {
-                levelType = "FIRST";
-            } else if (rawText.contains("2nd")) {
-                levelType = "SECOND";
-            } else if (rawText.contains("Buzz")) {
-                levelType = "BUZZ";
-            } else if (rawText.contains("Spot")) {
-                levelType = "SPOT";
-            }
-        }
-        if (!StringUtils.hasText(tag)) {
-            tag = resolveTagFromKnownTags(rawText);
-        }
-        if (!StringUtils.hasText(tag)) {
-            Matcher matcher = TAG_PATTERN.matcher(rawText);
-            if (matcher.find()) {
-                tag = "#" + matcher.group(1);
-            }
-        }
-        if (!StringUtils.hasText(nameContains)) {
-            Matcher nameTokenMatcher = NAME_TOKEN_PATTERN.matcher(rawText);
-            if (nameTokenMatcher.find()) {
-                nameContains = nameTokenMatcher.group(1).trim();
-            }
-        }
-        if (!StringUtils.hasText(color)) {
-            color = normalizeColorType(resolveCheerColorFilter(rawText));
-        }
-        return new SearchCriteria(cardType, levelType, tag, nameContains, color, rested, minRemainHp, maxRemainHp, allOf, anyOf);
-    }
-
-    /**
-     * 解析 criteria 子條件陣列（allOf/anyOf）。
-     */
-    private List<SearchCriteria> resolveCriteriaList(JsonNode criteriaArrayNode, String rawText) {
-        if (criteriaArrayNode == null || !criteriaArrayNode.isArray() || criteriaArrayNode.isEmpty()) {
-            return List.of();
-        }
-        List<SearchCriteria> criteriaList = new ArrayList<>();
-        for (JsonNode child : criteriaArrayNode) {
-            if (child == null || child.isNull()) {
-                continue;
-            }
-            criteriaList.add(resolveSearchCriteriaNode(child, rawText, false));
-        }
-        return criteriaList;
-    }
-
-    /**
-     * 以資料庫已知 tag 清單從原文推斷最可能的 tag。
-     */
-    private String resolveTagFromKnownTags(String rawText) {
-        if (!StringUtils.hasText(rawText) || !rawText.contains("#")) {
-            return null;
-        }
-        return jdbcTemplate.query(
-            """
-            SELECT t.tag
-            FROM (
-                SELECT DISTINCT jsonb_array_elements_text(COALESCE(tags_json, '[]'::jsonb)) AS tag
-                FROM cards
-                WHERE tags_json IS NOT NULL
-            ) t
-            WHERE ? LIKE '%' || t.tag || '%'
-            ORDER BY POSITION(t.tag IN ?), LENGTH(t.tag) DESC
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getString("tag") : null,
-            rawText,
-            rawText
-        );
     }
 
     /**
@@ -6735,7 +8527,7 @@ public class MatchEffectService {
         if (!StringUtils.hasText(tagsJson) || !StringUtils.hasText(targetTag)) {
             return false;
         }
-        JsonNode tagsNode = parseEffectJson(tagsJson);
+        JsonNode tagsNode = effectTextParser.parseEffectJson(tagsJson);
         if (tagsNode == null || !tagsNode.isArray()) {
             return false;
         }
@@ -6913,32 +8705,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 讀取可為 null 的整數欄位。
-     */
-    private Integer extractNullableInt(JsonNode node, String... fieldNames) {
-        if (node == null || fieldNames == null) {
-            return null;
-        }
-        for (String fieldName : fieldNames) {
-            JsonNode valueNode = node.get(fieldName);
-            if (valueNode == null || valueNode.isNull()) {
-                continue;
-            }
-            if (valueNode.isInt() || valueNode.isLong()) {
-                return valueNode.asInt();
-            }
-            if (valueNode.isTextual()) {
-                try {
-                    return Integer.parseInt(normalizeDigits(valueNode.asText()).trim());
-                } catch (NumberFormatException ignored) {
-                    // ignore invalid string value
-                }
-            }
-        }
-        return null;
-    }
-
-    /**
      * 將 SearchCriteria 轉成可回傳前端的摘要結構。
      */
     private Map<String, Object> buildCriteriaSummary(SearchCriteria criteria) {
@@ -7105,7 +8871,7 @@ public class MatchEffectService {
         String normalizedAction = normalize(actionKey);
         String normalizedZone = normalize(zone);
         for (String payloadText : payloadRows) {
-            JsonNode payload = parseEffectJson(payloadText);
+            JsonNode payload = effectTextParser.parseEffectJson(payloadText);
             if (payload == null || payload.isNull()) {
                 continue;
             }
@@ -7234,16 +9000,16 @@ public class MatchEffectService {
      * 解析抽牌數量，支援欄位讀值與文案推斷。
      */
     private int resolveDrawCount(JsonNode effectNode) {
-        int fromFields = extractInt(effectNode, 0, "value", "cards", "amount");
+        int fromFields = effectTextParser.extractInt(effectNode, 0, "value", "cards", "amount");
         if (fromFields > 0) {
             return fromFields;
         }
-        String text = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
-        int exact = extractByPattern(text, DRAW_COUNT_PATTERN);
+        String text = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
+        int exact = effectTextParser.extractByPattern(text, DRAW_COUNT_PATTERN);
         if (exact > 0) {
             return exact;
         }
-        int fallback = extractByPattern(text, DRAW_COUNT_FALLBACK_PATTERN);
+        int fallback = effectTextParser.extractByPattern(text, DRAW_COUNT_FALLBACK_PATTERN);
         if (fallback > 0) {
             return fallback;
         }
@@ -7254,11 +9020,11 @@ public class MatchEffectService {
      * 解析 BUFF/DEBUFF 修正值並依效果類型修正正負號。
      */
     private int resolveBuffDebuffModifier(JsonNode effectNode, String effectType) {
-        int fromFields = extractInt(effectNode, 0, "modifier", "damageModifier", "amount", "value");
+        int fromFields = effectTextParser.extractInt(effectNode, 0, "modifier", "damageModifier", "amount", "value");
         if (fromFields != 0) {
             return normalizeModifierSign(fromFields, effectType);
         }
-        String text = normalizeDigits(extractText(effectNode, "rawText", "rawEffect"));
+        String text = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         Matcher matcher = ARTS_MODIFIER_PATTERN.matcher(text);
         if (matcher.find()) {
             String token = matcher.group(1).replace("＋", "+").replace("−", "-").replaceAll("\\s+", "");
@@ -7380,6 +9146,513 @@ public class MatchEffectService {
     }
 
     /**
+     * 載入「常駐藝能加成的受益者」資訊。
+     *
+     * <p>目前只需要最基本的 3 類條件：
+     *
+     * <p>1. 站位：例如 `コラボポジション`
+     * <p>2. 等級：例如 `Debutホロメン`
+     * <p>3. tag：例如 `#4期生`
+     *
+     * <p>因此這裡只抓規則判斷需要的最小欄位，避免把整個 Holomem 狀態物件搬進來。
+     */
+    private StaticArtBonusTargetContext loadStaticArtBonusTargetContext(Long matchId, Long userId, Long holomemId) {
+        return jdbcTemplate.query(
+            """
+            SELECT h.id,
+                   h.zone,
+                   h.current_level,
+                   COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new StaticArtBonusTargetContext(
+                    rs.getLong("id"),
+                    effectTextParser.normalizeEffectType(rs.getString("zone")),
+                    effectTextParser.normalizeEffectType(rs.getString("current_level")),
+                    parseTagsJson(rs.getString("tags_json_text"))
+                );
+            },
+            matchId,
+            userId,
+            holomemId
+        );
+    }
+
+    /**
+     * 載入常駐 Gift HP 加成受益者所需資訊。
+     *
+     * <p>這和藝能加成不同，因為 `HSD13-007` 的條件直接依賴「這張 Holomem 身上有幾張 Cheer」。
+     * 因此這裡除了基本站位/等級/tag，還要把附著 Cheer 數量一起帶出來。
+     */
+    private PassiveGiftHpTargetContext loadPassiveGiftHpTargetContext(Long matchId, Long userId, Long holomemId) {
+        return jdbcTemplate.query(
+            """
+            SELECT h.id,
+                   h.zone,
+                   h.current_level,
+                   mp.current_life,
+                   COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text,
+                   (
+                       SELECT COUNT(*)
+                       FROM match_holomem_cheers hc
+                       WHERE hc.match_holomem_id = h.id
+                   ) AS attached_cheer_count
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            JOIN match_players mp
+              ON mp.match_id = h.match_id
+             AND mp.user_id = h.owner_user_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new PassiveGiftHpTargetContext(
+                    rs.getLong("id"),
+                    effectTextParser.normalizeEffectType(rs.getString("zone")),
+                    effectTextParser.normalizeEffectType(rs.getString("current_level")),
+                    parseTagsJson(rs.getString("tags_json_text")),
+                    rs.getInt("attached_cheer_count")
+                );
+            },
+            matchId,
+            userId,
+            holomemId
+        );
+    }
+
+    /**
+     * 載入受傷減免判斷所需的最小 target 狀態。
+     *
+     * <p>目前先只需要知道這張被打的 Holomem 自己是誰，以及它實際站在哪個 stage zone。
+     * 例如：
+     *
+     * <p>- `HSD07-009` 需要知道受擊者是不是 holder 自己
+     * <p>- `HBP06-009` 需要知道受擊者是不是 `COLLAB`
+     *
+     * <p>若未來出現更多「依等級 / tag / 名稱決定誰能被保護」的常駐減傷文案，再往這個 target context
+     * 補欄位即可，不需要回頭重寫 `attackArt(...)` 主流程。
+     */
+    private PassiveGiftIncomingDamageReductionTargetContext loadPassiveGiftIncomingDamageReductionTargetContext(
+        Long matchId,
+        Long userId,
+        Long holomemId
+    ) {
+        return jdbcTemplate.query(
+            """
+            SELECT h.id,
+                   h.zone
+            FROM match_holomems h
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new PassiveGiftIncomingDamageReductionTargetContext(
+                    rs.getLong("id"),
+                    effectTextParser.normalizeEffectType(rs.getString("zone"))
+                );
+            },
+            matchId,
+            userId,
+            holomemId
+        );
+    }
+
+    /**
+     * 載入藝能自體加成所需的 Holomem 狀態。
+     *
+     * <p>目前先沿用和 `PassiveGiftHpTargetContext` 類似的資料結構，因為 `HSD13-007` 這類文案
+     * 的核心條件同樣是「這張 Holomem 現在身上究竟有幾張 Cheer」。
+     */
+    private ArtSelfBonusTargetContext loadArtSelfBonusTargetContext(Long matchId, Long userId, Long holomemId) {
+        return jdbcTemplate.query(
+            """
+            SELECT h.id,
+                   h.zone,
+                   h.current_level,
+                   mp.current_life,
+                   COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text,
+                   (
+                       SELECT COUNT(*)
+                       FROM match_holomem_cheers hc
+                       WHERE hc.match_holomem_id = h.id
+                   ) AS attached_cheer_count
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            JOIN match_players mp
+              ON mp.match_id = h.match_id
+             AND mp.user_id = h.owner_user_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new ArtSelfBonusTargetContext(
+                    rs.getLong("id"),
+                    effectTextParser.normalizeEffectType(rs.getString("zone")),
+                    effectTextParser.normalizeEffectType(rs.getString("current_level")),
+                    parseTagsJson(rs.getString("tags_json_text")),
+                    rs.getInt("attached_cheer_count"),
+                    rs.getInt("current_life")
+                );
+            },
+            matchId,
+            userId,
+            holomemId
+        );
+    }
+
+    /**
+     * 載入指定 Holomem 自己的 passive gift 文案。
+     *
+     * <p>常駐 HP Gift 和 `HSD08-004` 這種中心位 aura 不同，效果來源就是這張卡自己，
+     * 因此不應沿用「只抓我方 CENTER holder」的 loader。
+     */
+    private PassiveGiftHolderContext loadPassiveGiftHolderContext(Long matchId, Long userId, Long holomemId) {
+        return jdbcTemplate.query(
+            """
+            SELECT h.id,
+                   h.zone,
+                   mc.passive_effect_json::text AS passive_effect_json_text
+            FROM match_holomems h
+            JOIN member_cards mc ON mc.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.id = ?
+              AND mc.passive_effect_json IS NOT NULL
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new PassiveGiftHolderContext(
+                    rs.getLong("id"),
+                    effectTextParser.normalizeEffectType(rs.getString("zone")),
+                    rs.getString("passive_effect_json_text")
+                );
+            },
+            matchId,
+            userId,
+            holomemId
+        );
+    }
+
+    /**
+     * 載入我方中心位上所有帶被動文案的 holder。
+     *
+     * <p>只抓中心位，是因為像 `HSD08-004` 這種卡文已經明確要求 `[センターポジション限定]`。
+     * 若未來要支援其他站位 aura，再把這個入口擴成更通用的 holder loader 即可。
+     */
+    private List<PassiveGiftHolderContext> loadPassiveGiftHolderContexts(Long matchId, Long userId) {
+        return jdbcTemplate.query(
+            """
+            SELECT h.id,
+                   h.zone,
+                   mc.passive_effect_json::text AS passive_effect_json_text
+            FROM match_holomems h
+            JOIN member_cards mc ON mc.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone = 'CENTER'
+              AND mc.passive_effect_json IS NOT NULL
+            ORDER BY h.id
+            """,
+            (rs, rowNum) -> new PassiveGiftHolderContext(
+                rs.getLong("id"),
+                effectTextParser.normalizeEffectType(rs.getString("zone")),
+                rs.getString("passive_effect_json_text")
+            ),
+            matchId,
+            userId
+        );
+    }
+
+    /**
+     * 以單一 holder 的常駐文案判斷是否給攻擊者加成。
+     *
+     * <p>這裡故意保持保守：
+     *
+     * <p>- 文案沒有 `アーツ+N` 就不算
+     * <p>- 文案要求的站位 / 等級 / tag 任一不符合就不算
+     *
+     * <p>如此可避免把其他非攻擊加成文案誤判為 `+damage`。
+     */
+    private int resolvePassiveGiftArtBonusFromHolder(
+        PassiveGiftHolderContext holderContext,
+        StaticArtBonusTargetContext attackerContext
+    ) {
+        String rawText = extractPassiveGiftRawText(holderContext.passiveEffectJsonText());
+        if (!StringUtils.hasText(rawText)) {
+            return 0;
+        }
+        int artBonus = extractArtsModifierTotal(rawText);
+        if (artBonus == 0) {
+            return 0;
+        }
+        if (rawText.contains("コラボポジション") && !"COLLAB".equals(attackerContext.stageZone())) {
+            return 0;
+        }
+
+        SearchCriteria criteria = resolveMemberCriteriaFromRawText(rawText);
+        if (StringUtils.hasText(criteria.levelType()) && !criteria.levelType().equals(attackerContext.levelType())) {
+            return 0;
+        }
+        if (StringUtils.hasText(criteria.tag()) && !attackerContext.tags().contains(criteria.tag())) {
+            return 0;
+        }
+        return artBonus;
+    }
+
+    /**
+     * 以單一 holder 的常駐文案判斷是否給自己 HP 加成。
+     *
+     * <p>目前先保守支援 `HSD13-007` 這類「這張 Holomem 每有 1 張 Cheer 就 HP+N」。
+     * 這裡故意不把所有 `HP+N` 文案都吃掉，而是要求：
+     *
+     * <p>- 文案明確寫 `このホロメン`
+     * <p>- 文案明確依 `エール1枚につき`
+     * <p>- 加成目標必須就是 holder 自己
+     *
+     * <p>如此可以避免把其他條件更複雜、尚未建模完成的 HP 文案誤判成已支援。
+     */
+    private int resolvePassiveGiftHpBonusFromHolder(
+        PassiveGiftHolderContext holderContext,
+        PassiveGiftHpTargetContext targetContext
+    ) {
+        String rawText = extractPassiveGiftRawText(holderContext.passiveEffectJsonText());
+        if (!StringUtils.hasText(rawText)) {
+            return 0;
+        }
+        if (!rawText.contains("このホロメン") || !rawText.contains("エール1枚につき")) {
+            return 0;
+        }
+        if (!Objects.equals(holderContext.holomemId(), targetContext.holomemId())) {
+            return 0;
+        }
+
+        Matcher matcher = PASSIVE_GIFT_HP_PATTERN.matcher(rawText);
+        if (!matcher.find()) {
+            return 0;
+        }
+        int hpBonusPerCheer = parseSignedNumber(matcher.group(1));
+        if (hpBonusPerCheer == 0 || targetContext.attachedCheerCount() <= 0) {
+            return 0;
+        }
+        return hpBonusPerCheer * targetContext.attachedCheerCount();
+    }
+
+    /**
+     * 依藝能 raw text 判斷是否存在「附著 Cheer 數量決定的自體加傷」。
+     *
+     * <p>這裡刻意保持保守，只先吃明確且已驗證的模板：
+     *
+     * <p>- `このホロメンのエール1枚につき`
+     * <p>- `このアーツ+N`
+     *
+     * <p>如此可以先讓 `HSD13-007` 正確落地，同時避免把其他尚未完整建模的 BUFF 藝能誤算成
+     * 「每張 Cheer 都會放大傷害」。
+     */
+    private int resolveArtTextDamageBonusFromRawText(String rawText, ArtSelfBonusTargetContext attackerContext) {
+        if (!StringUtils.hasText(rawText) || attackerContext == null) {
+            return 0;
+        }
+        int total = 0;
+
+        // `HSD13-007` 的每張 Cheer 加傷和 `HSD07-009` 的低 LIFE 加傷都會寫成 `このアーツ+N`。
+        // 這裡先把 raw text 切成單一句子，再各自套條件，避免把同一張卡不同句子的 +N 混在一起重複計算。
+        String cheerClause = extractSentenceFromMarker(rawText, "このホロメンのエール1枚につき");
+        if (StringUtils.hasText(cheerClause) && cheerClause.contains("このアーツ")) {
+            int artBonusPerCheer = extractArtsModifierTotal(cheerClause);
+            if (artBonusPerCheer != 0 && attackerContext.attachedCheerCount() > 0) {
+                total += artBonusPerCheer * attackerContext.attachedCheerCount();
+            }
+        }
+
+        String lowLifeClause = extractSentenceFromMarker(rawText, "自分のライフが3以下の時");
+        if (StringUtils.hasText(lowLifeClause) && lowLifeClause.contains("このアーツ") && attackerContext.currentLife() <= 3) {
+            total += extractArtsModifierTotal(lowLifeClause);
+        }
+
+        return total;
+    }
+
+    /**
+     * 以單一 holder 的常駐文案判斷是否給指定受擊目標減傷。
+     *
+     * <p>這裡刻意只接受少數已驗證的固定寫法：
+     *
+     * <p>- `このホロメンが受けるダメージ-10`
+     * <p>- `自分のコラボホロメンが受けるダメージ-10`
+     * <p>- `このホロメンと自分のコラボホロメンが受けるダメージ-10`
+     *
+     * <p>原因是常駐防禦文案之後很可能還會出現：
+     *
+     * <p>- 附著支援限定
+     * <p>- 指定名稱 / tag / 顏色
+     * <p>- 對手回合限定
+     *
+     * <p>若現在直接把所有 `受けるダメージ-N` 都視為同一種 aura，很容易在沒有完整規則模型時誤支援。
+     * 因此這裡維持「先辨識受保護對象，再抓減傷數值」的保守順序。
+     */
+    private int resolvePassiveGiftIncomingDamageReductionFromHolder(
+        PassiveGiftHolderContext holderContext,
+        PassiveGiftIncomingDamageReductionTargetContext targetContext
+    ) {
+        String rawText = extractPassiveGiftRawText(holderContext.passiveEffectJsonText());
+        if (!StringUtils.hasText(rawText) || targetContext == null) {
+            return 0;
+        }
+        if (rawText.contains("センターポジション限定") && !"CENTER".equals(holderContext.stageZone())) {
+            return 0;
+        }
+        boolean protectsSelf = rawText.contains("このホロメンが受けるダメージ")
+            && Objects.equals(holderContext.holomemId(), targetContext.holomemId());
+        boolean protectsOwnCollab = rawText.contains("自分のコラボホロメンが受けるダメージ")
+            && "COLLAB".equals(targetContext.stageZone());
+        if (!protectsSelf && !protectsOwnCollab) {
+            return 0;
+        }
+        Matcher matcher = PASSIVE_GIFT_DAMAGE_REDUCTION_VALUE_PATTERN.matcher(rawText);
+        if (!matcher.find()) {
+            return 0;
+        }
+        return Math.max(parseSignedNumber("-" + matcher.group(1)) * -1, 0);
+    }
+
+    /**
+     * 在藝能擊倒對手後，解析並執行該藝能自己的 follow-up 效果。
+     *
+     * <p>這裡處理的不是 Gift，也不是支援卡，而是「藝能文案本身」在 down 事件成立後才解鎖的後段效果。
+     * 例如 `HSD13-007`：
+     *
+     * <p>- 前段：依 Cheer 數量提升本次藝能傷害
+     * <p>- 後段：只有這次藝能真的把對手打倒時，才從 Cheer Deck 再貼 1 張
+     *
+     * <p>之所以獨立做成入口，而不是塞進 Gift trigger，是因為這類效果的來源是「本次藝能本身」，
+     * 不應與 stage 上其他被動 Gift 共用同一個觸發模型。
+     */
+    public Map<String, Object> applyArtDownTriggeredEffects(
+        Long matchId,
+        Long userId,
+        Long attackerCardInstanceId,
+        String artEffectJsonText
+    ) {
+        String rawText = extractAttachedSupportRawText(artEffectJsonText);
+        String followupText = extractArtDownTriggeredClause(rawText);
+        if (!StringUtils.hasText(followupText)) {
+            return buildNoTriggeredArtEffectSummary(rawText, "藝能沒有擊倒後效果");
+        }
+
+        List<String> effectTypes = inferBloomEffectTypes(followupText);
+        if (effectTypes.isEmpty()) {
+            return buildNoTriggeredArtEffectSummary(followupText, "無法解析藝能擊倒後效果類型");
+        }
+
+        ObjectNode effectNode = objectMapper.createObjectNode();
+        effectNode.put("type", effectTypes.get(0));
+        effectNode.set("effects", objectMapper.valueToTree(effectTypes));
+        effectNode.put("rawText", followupText);
+
+        Map<String, Object> summary = applySupportEffect(
+            matchId,
+            userId,
+            effectTypes.get(0),
+            effectTextParser.toJsonString(effectNode),
+            inferBloomTargetType(effectTypes.get(0)),
+            null,
+            attackerCardInstanceId
+        );
+        Map<String, Object> wrapped = new LinkedHashMap<>();
+        wrapped.put("triggerType", "ART_DOWNED_OPPONENT");
+        wrapped.put("rawText", followupText);
+        wrapped.putAll(summary);
+        return wrapped;
+    }
+
+    /**
+     * 從藝能全文中截出「擊倒後才發動」的後半段。
+     *
+     * <p>目前先支援官方常見句型 `このアーツで相手のホロメンをダウンさせた時、...`。
+     * 若將來出現更多變體，再把這個 helper 擴成 pattern list 即可。
+     */
+    private String extractArtDownTriggeredClause(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return null;
+        }
+        String marker = "このアーツで相手のホロメンをダウンさせた時";
+        int markerIndex = rawText.indexOf(marker);
+        if (markerIndex < 0) {
+            return null;
+        }
+        String clause = rawText.substring(markerIndex + marker.length()).trim();
+        while (clause.startsWith("、") || clause.startsWith("。") || clause.startsWith("：") || clause.startsWith(":")) {
+            clause = clause.substring(1).trim();
+        }
+        return StringUtils.hasText(clause) ? clause : null;
+    }
+
+    /**
+     * 從指定 marker 開始，擷取到同一句結束為止。
+     *
+     * <p>用途是把官方 raw text 拆成較小的條件片段，讓像 `HSD13-007`、`HSD07-009` 這種
+     * 同時含有多段藝能條件的卡，只解析自己那一句對應的 `アーツ+N`。
+     */
+    private String extractSentenceFromMarker(String rawText, String marker) {
+        if (!StringUtils.hasText(rawText) || !StringUtils.hasText(marker)) {
+            return null;
+        }
+        int markerIndex = rawText.indexOf(marker);
+        if (markerIndex < 0) {
+            return null;
+        }
+        String clause = rawText.substring(markerIndex).trim();
+        int sentenceEnd = clause.indexOf('。');
+        if (sentenceEnd >= 0) {
+            clause = clause.substring(0, sentenceEnd);
+        }
+        return clause.trim();
+    }
+
+    /**
+     * 建立「本次藝能沒有 down 後 follow-up」的統一摘要。
+     */
+    private Map<String, Object> buildNoTriggeredArtEffectSummary(String rawText, String reason) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("triggerType", "ART_DOWNED_OPPONENT");
+        summary.put("rawText", rawText);
+        summary.put("requestedEffects", List.of());
+        summary.put("executedEffects", List.of());
+        summary.put("unsupportedEffects", List.of());
+        summary.put("skippedEffects", List.of());
+        summary.put("applied", false);
+        summary.put("reason", reason);
+        return summary;
+    }
+
+    /**
      * 由支援卡效果文案擷取對應加成值（可累加多段）。
      */
     private int extractAttachedSupportStatBonus(String effectJsonText, Pattern pattern) {
@@ -7406,9 +9679,181 @@ public class MatchEffectService {
     private String extractAttachedSupportRawText(String effectJsonText) {
         try {
             JsonNode node = objectMapper.readTree(effectJsonText);
-            return normalizeDigits(extractText(node, "rawText", "rawEffect", "rawHeader"));
+            return effectTextParser.normalizeDigits(effectTextParser.extractText(node, "rawText", "rawEffect", "rawHeader"));
         } catch (Exception ignored) {
-            return normalizeDigits(effectJsonText);
+            return effectTextParser.normalizeDigits(effectJsonText);
+        }
+    }
+
+    /**
+     * 解析 member passive gift JSON 並抽出可判讀的 raw text。
+     *
+     * <p>官方 passive 效果目前常見欄位是 `キーワード`，但測試資料與部分結構化效果仍可能寫在
+     * `rawText / rawEffect / rawHeader`。這裡統一做欄位合併，避免每個靜態判斷點各自猜欄位。
+     */
+    private String extractPassiveGiftRawText(String passiveEffectJsonText) {
+        try {
+            JsonNode node = objectMapper.readTree(passiveEffectJsonText);
+            return effectTextParser.normalizeDigits(
+                effectTextParser.extractText(node, "キーワード", "rawText", "rawEffect", "rawHeader")
+            );
+        } catch (Exception ignored) {
+            return effectTextParser.normalizeDigits(passiveEffectJsonText);
+        }
+    }
+
+    /**
+     * 從靜態文案中擷取藝能加成值。
+     *
+     * <p>這裡採可累加寫法，而不是只抓第一個 `アーツ+N`，是為了保留未來處理複數敘述的空間。
+     */
+    private int extractArtsModifierTotal(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return 0;
+        }
+        Matcher matcher = ARTS_MODIFIER_PATTERN.matcher(rawText);
+        int total = 0;
+        while (matcher.find()) {
+            total += parseSignedNumber(matcher.group(1));
+        }
+        return total;
+    }
+
+    /**
+     * 從完整文案中抽出冒號前的成本段。
+     *
+     * <p>Gift / Bloom / Collab 常見寫法是 `成本：效果`。像 `HSD11-006` 這類卡必須用成本段決定
+     * 「可以丟哪張手牌」，不能把冒號後的目標條件也一起拿去限制手牌。
+     */
+    private String extractCostClause(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return "";
+        }
+        int splitIndex = findClauseSeparator(rawText);
+        return splitIndex < 0 ? rawText : rawText.substring(0, splitIndex).trim();
+    }
+
+    /**
+     * 從完整文案中抽出冒號後的主要效果段。
+     *
+     * <p>這主要用在像 `送 Cheer` 這種「來源條件在前、目標條件在後」的效果。
+     * 若直接用整句文案解析，前段的成本/來源 tag 會污染後段的目標推斷。
+     */
+    private String extractResolvedEffectClause(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return "";
+        }
+        int splitIndex = findClauseSeparator(rawText);
+        return splitIndex < 0 || splitIndex + 1 >= rawText.length() ? rawText : rawText.substring(splitIndex + 1).trim();
+    }
+
+    /**
+     * 從送 Cheer 效果段中擷取來源描述。
+     *
+     * <p>例如：
+     * - `自分のアーカイブの黄エール1枚を自分の〈虎金妃笑虎〉に送る`
+     * 這裡真正決定來源的是前半句 `自分のアーカイブの黄エール1枚`。
+     */
+    private String extractAddCheerSourceClause(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return "";
+        }
+        int splitIndex = rawText.indexOf('を');
+        return splitIndex < 0 ? rawText : rawText.substring(0, splitIndex).trim();
+    }
+
+    /**
+     * 從送 Cheer 效果段中擷取目標描述。
+     *
+     * <p>例如：
+     * - `自分のアーカイブの黄エール1枚を自分の〈虎金妃笑虎〉に送る`
+     * 這裡真正決定貼到誰的是中段 `自分の〈虎金妃笑虎〉`。
+     */
+    private String extractAddCheerTargetClause(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return "";
+        }
+        Matcher matcher = Pattern.compile("を(.+?)に送る").matcher(rawText);
+        if (matcher.find()) {
+            return matcher.group(1).trim();
+        }
+        return rawText;
+    }
+
+    /**
+     * 直接把一小段 raw text 轉成 SearchCriteria。
+     *
+     * <p>這個 helper 的重點是降低 execution 層建立暫時 JSON probe 的重覆樣板，
+     * 讓後續要在其他效果重用相同 parser 時不必再手工包一層 ObjectNode。
+     */
+    private SearchCriteria resolveSearchCriteriaFromRawText(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return SearchCriteria.empty();
+        }
+        ObjectNode probe = objectMapper.createObjectNode();
+        probe.put("rawText", rawText);
+        return searchCriteriaParser.resolveSearchCriteria(probe);
+    }
+
+    /**
+     * 從目標子句推斷名稱限制。
+     *
+     * <p>這裡只看 `送 Cheer` 的目標段，避免把來源描述裡的卡名誤當成目標名稱。
+     */
+    private String resolveTargetNameContains(String targetClause) {
+        return resolveSearchCriteriaFromRawText(targetClause).nameContains();
+    }
+
+    private int findClauseSeparator(String rawText) {
+        int fullWidthIndex = rawText.indexOf('：');
+        int halfWidthIndex = rawText.indexOf(':');
+        if (fullWidthIndex < 0) {
+            return halfWidthIndex;
+        }
+        if (halfWidthIndex < 0) {
+            return fullWidthIndex;
+        }
+        return Math.min(fullWidthIndex, halfWidthIndex);
+    }
+
+    /**
+     * 把靜態常駐文案轉成可重用的條件模型。
+     *
+     * <p>雖然這裡不是 search 效果，但條件語彙本質上仍是同一組：
+     *
+     * <p>- `#4期生`
+     * <p>- `Debut`
+     * <p>- `2nd`
+     *
+     * <p>沿用 `SearchCriteriaParser` 可以避免同一套 tag / level 解析規則分叉。
+     */
+    private SearchCriteria resolveMemberCriteriaFromRawText(String rawText) {
+        ObjectNode probe = objectMapper.createObjectNode();
+        probe.put("rawText", rawText);
+        return searchCriteriaParser.resolveSearchCriteria(probe);
+    }
+
+    /**
+     * 安全把 tags JSON 轉成字串集合。
+     */
+    private Set<String> parseTagsJson(String tagsJsonText) {
+        if (!StringUtils.hasText(tagsJsonText)) {
+            return Set.of();
+        }
+        try {
+            JsonNode node = objectMapper.readTree(tagsJsonText);
+            if (node == null || !node.isArray()) {
+                return Set.of();
+            }
+            Set<String> tags = new LinkedHashSet<>();
+            for (JsonNode child : node) {
+                if (child != null && child.isTextual() && StringUtils.hasText(child.asText())) {
+                    tags.add(child.asText().trim());
+                }
+            }
+            return tags;
+        } catch (Exception ignored) {
+            return Set.of();
         }
     }
 
@@ -7446,11 +9891,11 @@ public class MatchEffectService {
      * 解析 cheer 張數，若無法判讀則回傳預設值。
      */
     private int resolveCheerCount(JsonNode effectNode, int defaultValue) {
-        int fromFields = extractInt(effectNode, 0, "value", "cards", "amount");
+        int fromFields = effectTextParser.extractInt(effectNode, 0, "value", "cards", "amount");
         if (fromFields > 0) {
             return fromFields;
         }
-        int byText = extractByPattern(normalizeDigits(extractText(effectNode, "rawText", "rawEffect")), CHEER_COUNT_PATTERN);
+        int byText = effectTextParser.extractByPattern(effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect")), CHEER_COUNT_PATTERN);
         if (byText > 0) {
             return byText;
         }
@@ -7461,22 +9906,22 @@ public class MatchEffectService {
      * 解析回復值，支援 heal 欄位與 HP 文案。
      */
     private int resolveHealValue(JsonNode effectNode) {
-        int fromFields = extractInt(effectNode, 0, "value", "amount", "heal");
+        int fromFields = effectTextParser.extractInt(effectNode, 0, "value", "amount", "heal");
         if (fromFields > 0) {
             return fromFields;
         }
-        return extractByPattern(normalizeDigits(extractText(effectNode, "rawText", "rawEffect")), HEAL_PATTERN);
+        return effectTextParser.extractByPattern(effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect")), HEAL_PATTERN);
     }
 
     /**
      * 解析移動目的區（CENTER/COLLAB/BACK），預設 BACK。
      */
     private String resolveMoveDestinationZone(JsonNode effectNode) {
-        String explicit = normalizeEffectType(extractText(effectNode, "toZone", "targetZone"));
+        String explicit = effectTextParser.normalizeEffectType(effectTextParser.extractText(effectNode, "toZone", "targetZone"));
         if (StringUtils.hasText(explicit)) {
             return explicit;
         }
-        String text = extractText(effectNode, "rawText", "rawEffect");
+        String text = effectTextParser.extractText(effectNode, "rawText", "rawEffect");
         if (text.contains("コラボ")) {
             return "COLLAB";
         }
@@ -7493,7 +9938,7 @@ public class MatchEffectService {
      * 判斷移動後是否需改為休息狀態。
      */
     private boolean shouldRestAfterMove(JsonNode effectNode) {
-        String text = extractText(effectNode, "rawText", "rawEffect");
+        String text = effectTextParser.extractText(effectNode, "rawText", "rawEffect");
         return text.contains("お休み");
     }
 
@@ -7547,22 +9992,30 @@ public class MatchEffectService {
         if (matchHolomemId == null || ownerUserId == null) {
             return List.of();
         }
-        List<String> cheerCardIds = jdbcTemplate.query(
+        List<Map<String, Object>> cheerRows = jdbcTemplate.query(
             """
-            SELECT cheer_card_id
+            SELECT cheer_card_id, match_card_id
             FROM match_holomem_cheers
             WHERE match_holomem_id = ?
             ORDER BY id
             """,
-            (rs, rowNum) -> rs.getString("cheer_card_id"),
+            (rs, rowNum) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("cheer_card_id", rs.getString("cheer_card_id"));
+                long matchCardId = rs.getLong("match_card_id");
+                row.put("match_card_id", rs.wasNull() ? null : matchCardId);
+                return row;
+            },
             matchHolomemId
         );
-        if (cheerCardIds.isEmpty()) {
+        if (cheerRows.isEmpty()) {
             return List.of();
         }
         List<Long> archived = new ArrayList<>();
-        for (String cheerCardId : cheerCardIds) {
-            Long archivedCardInstanceId = moveCheerCardInstanceToArchive(matchId, ownerUserId, cheerCardId);
+        for (Map<String, Object> row : cheerRows) {
+            String cheerCardId = asText(row.get("cheer_card_id"));
+            Long matchCardId = asLong(row.get("match_card_id"));
+            Long archivedCardInstanceId = moveCheerCardInstanceToArchive(matchId, ownerUserId, matchCardId, cheerCardId);
             if (archivedCardInstanceId != null) {
                 archived.add(archivedCardInstanceId);
             }
@@ -7683,26 +10136,38 @@ public class MatchEffectService {
      * 將指定 cheer card_id 的場上實例移入 ARCHIVE，回傳該 instance id。
      */
     private Long moveCheerCardInstanceToArchive(Long matchId, Long ownerUserId, String cheerCardId) {
-        if (!StringUtils.hasText(cheerCardId)) {
+        return moveCheerCardInstanceToArchive(matchId, ownerUserId, null, cheerCardId);
+    }
+
+    private Long moveCheerCardInstanceToArchive(
+        Long matchId,
+        Long ownerUserId,
+        Long cheerCardInstanceId,
+        String cheerCardId
+    ) {
+        if ((cheerCardInstanceId == null || cheerCardInstanceId <= 0) && !StringUtils.hasText(cheerCardId)) {
             return null;
         }
-        Long cheerCardInstanceId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'STAGE'
-              AND card_id = ?
-            ORDER BY id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            ownerUserId,
-            cheerCardId
-        );
-        if (cheerCardInstanceId == null) {
+        Long resolvedCardInstanceId = cheerCardInstanceId;
+        if (resolvedCardInstanceId == null || resolvedCardInstanceId <= 0) {
+            resolvedCardInstanceId = jdbcTemplate.query(
+                """
+                SELECT id
+                FROM match_cards
+                WHERE match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'STAGE'
+                  AND card_id = ?
+                ORDER BY id
+                LIMIT 1
+                """,
+                rs -> rs.next() ? rs.getLong("id") : null,
+                matchId,
+                ownerUserId,
+                cheerCardId
+            );
+        }
+        if (resolvedCardInstanceId == null) {
             return null;
         }
         int archiveOrder = nextZoneOrder(matchId, ownerUserId, "ARCHIVE");
@@ -7719,11 +10184,11 @@ public class MatchEffectService {
               AND zone = 'STAGE'
             """,
             archiveOrder,
-            cheerCardInstanceId,
+            resolvedCardInstanceId,
             matchId,
             ownerUserId
         );
-        return updated == 1 ? cheerCardInstanceId : null;
+        return updated == 1 ? resolvedCardInstanceId : null;
     }
 
     /**
@@ -7880,35 +10345,30 @@ public class MatchEffectService {
      * 從指定區域挑選一張 cheer 卡候選。
      */
     private Map<String, Object> findCheerCardFromZone(Long matchId, Long userId, String zone) {
+        return findCheerCardFromZone(matchId, userId, zone, SearchCriteria.empty());
+    }
+
+    /**
+     * 從指定區域挑選一張符合條件的 Cheer。
+     *
+     * <p>這裡保留舊的 zone-only 版本，同時新增可帶 SearchCriteria 的 overload，
+     * 讓 `黄エール`、`赤エール` 這類官方文案能沿用同一套過濾能力，而不是另外寫成特例 SQL。
+     */
+    private Map<String, Object> findCheerCardFromZone(Long matchId, Long userId, String zone, SearchCriteria criteria) {
         String normalizedZone = normalize(zone);
         if (!"CHEER_DECK".equals(normalizedZone) && !"ARCHIVE".equals(normalizedZone) && !"STAGE".equals(normalizedZone)) {
             return null;
         }
-        return jdbcTemplate.query(
-            """
-            SELECT mc.id, mc.card_id, mc.zone
-            FROM match_cards mc
-            JOIN cheer_cards cc ON cc.card_id = mc.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.zone = ?
-            ORDER BY mc.order_index NULLS LAST, mc.id
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", rs.getLong("id"));
-                row.put("card_id", rs.getString("card_id"));
-                row.put("zone", rs.getString("zone"));
-                return row;
-            },
-            matchId,
-            userId,
-            normalizedZone
-        );
+        List<Map<String, Object>> candidates = loadCandidatesFromZone(matchId, userId, normalizedZone, criteria, false);
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        Map<String, Object> candidate = candidates.get(0);
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("id", candidate.get("id"));
+        row.put("card_id", candidate.get("card_id"));
+        row.put("zone", normalizedZone);
+        return row;
     }
 
     /**
@@ -8100,7 +10560,7 @@ public class MatchEffectService {
             summary.put("reason", "NO_EXTRA_EFFECT");
             return summary;
         }
-        String normalizedExtraText = normalizeDigits(extraText);
+        String normalizedExtraText = effectTextParser.normalizeDigits(extraText);
         if (!normalizedExtraText.contains("ダウンした時")) {
             summary.put("reason", "EXTRA_NOT_DOWN_TRIGGER");
             return summary;
@@ -8153,7 +10613,7 @@ public class MatchEffectService {
         if (!StringUtils.hasText(passiveText)) {
             return null;
         }
-        JsonNode passiveNode = parseEffectJson(passiveText);
+        JsonNode passiveNode = effectTextParser.parseEffectJson(passiveText);
         if (passiveNode != null && passiveNode.isObject()) {
             JsonNode extraNode = passiveNode.get("エクストラ");
             if (extraNode != null && extraNode.isTextual() && StringUtils.hasText(extraNode.asText())) {
@@ -8217,7 +10677,7 @@ public class MatchEffectService {
         if (effectNode != null && effectNode.has("downDoesNotReduceLife")) {
             return effectNode.path("downDoesNotReduceLife").asBoolean(false);
         }
-        String merged = extractText(effectNode, "rawText", "rawEffect");
+        String merged = effectTextParser.extractText(effectNode, "rawText", "rawEffect");
         return StringUtils.hasText(merged) && merged.contains("ダウンしても相手のライフは減らない");
     }
 
@@ -8225,16 +10685,16 @@ public class MatchEffectService {
      * 解析 Down 額外生命扣減值（支援結構化欄位與日文文案）。
      */
     private int resolveDownExtraLifeCount(JsonNode effectNode) {
-        int fromField = extractInt(effectNode, 0, "extraLifeLoss", "lifeLoss", "value", "amount");
+        int fromField = effectTextParser.extractInt(effectNode, 0, "extraLifeLoss", "lifeLoss", "value", "amount");
         if (fromField > 0) {
             return fromField;
         }
-        String merged = normalizeDigits(extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
-        int byPattern = extractByPattern(merged, DOWN_EXTRA_LIFE_PATTERN);
+        String merged = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
+        int byPattern = effectTextParser.extractByPattern(merged, DOWN_EXTRA_LIFE_PATTERN);
         if (byPattern > 0) {
             return byPattern;
         }
-        int minusPattern = extractByPattern(merged, DOWN_EXTRA_LIFE_MINUS_PATTERN);
+        int minusPattern = effectTextParser.extractByPattern(merged, DOWN_EXTRA_LIFE_MINUS_PATTERN);
         if (minusPattern > 0) {
             return minusPattern;
         }
@@ -8248,157 +10708,20 @@ public class MatchEffectService {
      * 解析傷害數值，支援 value/amount 欄位與「ダメージ」文案。
      */
     private int resolveDamageValue(JsonNode effectNode) {
-        int fromFields = extractInt(effectNode, 0, "value", "amount", "damage");
+        int fromFields = effectTextParser.extractInt(effectNode, 0, "value", "amount", "damage");
         if (fromFields > 0) {
             return fromFields;
         }
-        String merged = normalizeDigits(extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
-        int special = extractByPattern(merged, SPECIAL_DAMAGE_PATTERN);
+        String merged = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
+        int special = effectTextParser.extractByPattern(merged, SPECIAL_DAMAGE_PATTERN);
         if (special > 0) {
             return special;
         }
-        int normal = extractByPattern(merged, DAMAGE_PATTERN);
+        int normal = effectTextParser.extractByPattern(merged, DAMAGE_PATTERN);
         if (normal > 0) {
             return normal;
         }
         return 0;
-    }
-
-    /**
-     * 使用正則擷取第一個整數群組，失敗回傳 0。
-     */
-    private int extractByPattern(String value, Pattern pattern) {
-        if (!StringUtils.hasText(value)) {
-            return 0;
-        }
-        Matcher matcher = pattern.matcher(value);
-        if (!matcher.find()) {
-            return 0;
-        }
-        try {
-            return Integer.parseInt(matcher.group(1));
-        } catch (NumberFormatException ignored) {
-            return 0;
-        }
-    }
-
-    /**
-     * 合併多個文字欄位並以換行串接，供文案規則解析使用。
-     */
-    private String extractText(JsonNode node, String... fieldNames) {
-        if (node == null || fieldNames == null) {
-            return "";
-        }
-        StringBuilder merged = new StringBuilder();
-        for (String fieldName : fieldNames) {
-            JsonNode textNode = node.get(fieldName);
-            if (textNode != null && textNode.isTextual() && StringUtils.hasText(textNode.asText())) {
-                if (!merged.isEmpty()) {
-                    merged.append('\n');
-                }
-                merged.append(textNode.asText());
-            }
-        }
-        return merged.toString();
-    }
-
-    /**
-     * 為 DAMAGE 類效果補上 deferDownEvent 旗標，讓 down event 可延後至互動確認後再套用。
-     */
-    private JsonNode withDeferDownEventFlag(JsonNode effectNode, boolean deferDownEvent) {
-        if (!deferDownEvent) {
-            return effectNode;
-        }
-        ObjectNode node;
-        if (effectNode instanceof ObjectNode objectNode) {
-            node = objectNode.deepCopy();
-        } else {
-            node = objectMapper.createObjectNode();
-            if (effectNode != null && !effectNode.isNull()) {
-                node.set("sourceEffect", effectNode);
-            }
-        }
-        node.put("deferDownEvent", true);
-        return node;
-    }
-
-    /**
-     * 安全解析 effectJson，格式錯誤時回傳 null 讓上層走保守路徑。
-     */
-    private JsonNode parseEffectJson(String effectJson) {
-        if (!StringUtils.hasText(effectJson)) {
-            return null;
-        }
-        try {
-            return objectMapper.readTree(effectJson);
-        } catch (Exception ex) {
-            return null;
-        }
-    }
-
-    /**
-     * 安全序列化 JSON 字串，失敗時回傳空物件字串。
-     */
-    private String toJsonString(Object value) {
-        try {
-            return objectMapper.writeValueAsString(value);
-        } catch (Exception ex) {
-            return "{}";
-        }
-    }
-
-    /**
-     * 依欄位順序讀取整數，支援數字與字串格式，讀不到時回傳預設值。
-     */
-    private int extractInt(JsonNode node, int defaultValue, String... fieldNames) {
-        if (node == null || fieldNames == null) {
-            return defaultValue;
-        }
-        for (String fieldName : fieldNames) {
-            JsonNode valueNode = node.get(fieldName);
-            if (valueNode == null || valueNode.isNull()) {
-                continue;
-            }
-            if (valueNode.isInt() || valueNode.isLong()) {
-                return valueNode.asInt();
-            }
-            if (valueNode.isTextual()) {
-                try {
-                    return Integer.parseInt(normalizeDigits(valueNode.asText()).trim());
-                } catch (NumberFormatException ignored) {
-                    // 略過非法字串，改讀其他欄位
-                }
-            }
-        }
-        return defaultValue;
-    }
-
-    /**
-     * 將全形數字轉半形，便於正則與整數解析。
-     */
-    private String normalizeDigits(String value) {
-        if (!StringUtils.hasText(value)) {
-            return "";
-        }
-        StringBuilder builder = new StringBuilder(value.length());
-        for (char c : value.toCharArray()) {
-            if (c >= '０' && c <= '９') {
-                builder.append((char) ('0' + (c - '０')));
-            } else {
-                builder.append(c);
-            }
-        }
-        return builder.toString();
-    }
-
-    /**
-     * 正規化 effect type 字串（trim + upper + 空白轉底線）。
-     */
-    private String normalizeEffectType(String value) {
-        if (!StringUtils.hasText(value)) {
-            return "";
-        }
-        return value.trim().toUpperCase(Locale.ROOT);
     }
 
     /**
@@ -8476,72 +10799,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 檢索條件模型，支援單條件與 allOf 組合條件。
-     */
-    private record SearchCriteria(
-        String cardType,
-        String levelType,
-        String tag,
-        String nameContains,
-        String color,
-        Boolean rested,
-        Integer minRemainHp,
-        Integer maxRemainHp,
-        List<SearchCriteria> allOf,
-        List<SearchCriteria> anyOf
-    ) {
-        /**
-         * 建立 SearchCriteria 並正規化欄位與子條件集合。
-         */
-        private SearchCriteria {
-            cardType = normalizeToken(cardType);
-            levelType = normalizeToken(levelType);
-            tag = normalizeToken(tag);
-            nameContains = normalizeToken(nameContains);
-            color = normalizeToken(color);
-            allOf = allOf == null ? List.of() : List.copyOf(allOf);
-            anyOf = anyOf == null ? List.of() : List.copyOf(anyOf);
-        }
-
-        /**
-         * 建立簡化版 SearchCriteria（僅常用四欄位）。
-         */
-        private SearchCriteria(String cardType, String levelType, String tag, String nameContains) {
-            this(cardType, levelType, tag, nameContains, "", null, null, null, List.of(), List.of());
-        }
-
-        /**
-         * 回傳空條件物件。
-         */
-        private static SearchCriteria empty() {
-            return new SearchCriteria("", "", "", "", "", null, null, null, List.of(), List.of());
-        }
-
-        /**
-         * 正規化條件字串 token。
-         */
-        private static String normalizeToken(String value) {
-            return value == null ? "" : value.trim();
-        }
-
-        /**
-         * 判斷是否為完全空條件。
-         */
-        private boolean isEmpty() {
-            return cardType.isEmpty()
-                && levelType.isEmpty()
-                && tag.isEmpty()
-                && nameContains.isEmpty()
-                && color.isEmpty()
-                && rested == null
-                && minRemainHp == null
-                && maxRemainHp == null
-                && allOf.isEmpty()
-                && anyOf.isEmpty();
-        }
-    }
-
-    /**
      * 前端決策候選卡資料模型。
      */
     public record TriggeredEffectPreview(
@@ -8575,9 +10832,18 @@ public class MatchEffectService {
         String centerHolomemName,
         String oshiCardName,
         Long firstBackHolomemCardInstanceId,
+        int ownHandCount,
         int opponentHandCount,
         boolean opponentHandHasSupport,
         int ownedStageCheerCount
+    ) {}
+
+    /**
+     * Bloom 效果場況上下文（目前僅補來源等級與通用場況）。
+     */
+    private record BloomRuntimeContext(
+        String sourceLevelType,
+        CollabRuntimeContext common
     ) {}
 
     /**
