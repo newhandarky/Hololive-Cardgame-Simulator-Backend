@@ -37,6 +37,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -73,6 +74,7 @@ public class MatchActionService {
     private static final String SUPPORT_TYPE_OTHER = "OTHER";
     private static final Pattern NUMBER_PATTERN = Pattern.compile("(\\d+)");
     private static final Pattern ART_CRITICAL_PATTERN = Pattern.compile("([赤青黄緑紫白])\\s*[+＋]\\s*(\\d+)");
+    private static final Pattern CENTER_TAG_REQUIREMENT_PATTERN = Pattern.compile("#([^\\sを]+)を持つセンターホロメンがいる間");
     private static final int OPENING_HAND_SIZE = 7;
 
     private final MatchRepository matchRepository;
@@ -384,11 +386,22 @@ public class MatchActionService {
         if (!StringUtils.hasText(target.topCardName()) || !target.topCardName().equals(bloomCardName)) {
             throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "BLOOM 需要與目標 Holomem 同名");
         }
+        boolean bloomLevelOverrideApplied = false;
         if (!isBloomLevelNextStep(target.topLevelType(), bloomLevel)) {
-            throw new GameRuleException(
-                GameErrorCode.BLOOM_INVALID_TARGET,
-                "BLOOM 只能依序遞進：DEBUT→FIRST、FIRST→SECOND、SECOND→BUZZ"
+            boolean canIgnoreBloomLevel = canIgnoreBloomLevelByPassiveGift(
+                matchId,
+                userId,
+                target,
+                bloomLevel,
+                bloomCardName
             );
+            if (!canIgnoreBloomLevel) {
+                throw new GameRuleException(
+                    GameErrorCode.BLOOM_INVALID_TARGET,
+                    "BLOOM 只能依序遞進：DEBUT→FIRST、FIRST→SECOND、SECOND→BUZZ"
+                );
+            }
+            bloomLevelOverrideApplied = true;
         }
         if (bloomHp < target.damageTaken()) {
             throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "BLOOM 卡 HP 不足以承受目標目前傷害");
@@ -499,6 +512,7 @@ public class MatchActionService {
         payload.put("toLevel", bloomLevel);
         payload.put("damageCarried", target.damageTaken());
         payload.put("stackDepth", stackDepth);
+        payload.put("bloomLevelOverrideApplied", bloomLevelOverrideApplied);
         payload.put("passiveGiftSummary", passiveGiftSummary);
         payload.put("bloomEffect", bloomEffectSummary);
         payload.put("triggerSummary", triggerSummary);
@@ -619,7 +633,7 @@ public class MatchActionService {
             if (targetHolomemId == null) {
                 throw new IllegalArgumentException("附加 SUPPORT 需要指定場上的我方 Holomem");
             }
-            validateAttachableSupportLimit(targetHolomemId, supportType);
+            validateAttachableSupportLimit(targetHolomemId, supportType, cardId);
 
             int updated = jdbcTemplate.update(
                 """
@@ -943,10 +957,8 @@ public class MatchActionService {
         }
         if (INTERACTION_TYPE_DRAW_REVEAL.equals(decisionType)) {
             markDecisionResolved(pending.decisionId());
-
-            context.match.setCurrentPhase(
-                canPerformTurnCheerAction(matchId, userId) ? MatchPhase.CHEER.name() : MatchPhase.MAIN.name()
-            );
+            boolean requiresTurnCheer = canPerformTurnCheerAction(matchId, userId);
+            context.match.setCurrentPhase(requiresTurnCheer ? MatchPhase.CHEER.name() : MatchPhase.MAIN.name());
             touchUpdatedAt(context.match);
             matchRepository.saveAndFlush(context.match);
 
@@ -956,6 +968,26 @@ public class MatchActionService {
             payload.put("sourceActionType", "DRAW_TURN");
             payload.put("drawnCardInstanceId", pending.sourceCardInstanceId());
             payload.put("drawnCardId", pending.sourceCardId());
+            if (!requiresTurnCheer) {
+                List<Map<String, Object>> mainStepGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOwnMainStep(
+                    matchId,
+                    userId,
+                    context.turnNumber
+                );
+                payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
+                if (!mainStepGiftEffects.isEmpty()) {
+                    FollowupInteractionDecision mainStepGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                        matchId,
+                        userId,
+                        null,
+                        null,
+                        buildGiftTriggerInteractionCards(matchId, userId, null, null, mainStepGiftEffects),
+                        mainStepGiftEffects,
+                        context.turnNumber
+                    );
+                    putFollowupDecisionPayload(payload, mainStepGiftDecision);
+                }
+            }
             appendAction(
                 context.match,
                 userId,
@@ -979,11 +1011,25 @@ public class MatchActionService {
             payload.put("confirmed", confirmed);
 
             if (confirmed) {
+                List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
+                    request == null ? null : request.getSelectedCardInstanceIds()
+                );
+                if (pending.maxSelect() > 0) {
+                    if (selectedCardInstanceIds.size() < pending.minSelect()) {
+                        throw new IllegalArgumentException("選擇卡片數量不足，至少需要 " + pending.minSelect() + " 張");
+                    }
+                    if (selectedCardInstanceIds.size() > pending.maxSelect()) {
+                        throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
+                    }
+                    validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
+                    payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
+                }
                 Map<String, Object> effectSummary = applyTriggeredEffectAfterConfirm(
                     matchId,
                     userId,
                     pending,
-                    context.turnNumber
+                    context.turnNumber,
+                    selectedCardInstanceIds
                 );
                 appendGiftTriggerActionsIfPresent(context.match, userId, context.turnNumber, effectSummary);
                 payload.put("effect", effectSummary);
@@ -1097,6 +1143,26 @@ public class MatchActionService {
             payload.put("sourceCardInstanceId", sourceCardInstanceId);
             payload.put("sourceCardId", cheerCardId);
             payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
+            if (ACTION_TYPE_TURN_CHEER.equals(pending.sourceActionType())) {
+                List<Map<String, Object>> mainStepGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOwnMainStep(
+                    matchId,
+                    userId,
+                    context.turnNumber
+                );
+                payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
+                if (!mainStepGiftEffects.isEmpty()) {
+                    FollowupInteractionDecision mainStepGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                        matchId,
+                        userId,
+                        null,
+                        null,
+                        buildGiftTriggerInteractionCards(matchId, userId, null, null, mainStepGiftEffects),
+                        mainStepGiftEffects,
+                        context.turnNumber
+                    );
+                    putFollowupDecisionPayload(payload, mainStepGiftDecision);
+                }
+            }
             appendAction(
                 context.match,
                 userId,
@@ -2429,7 +2495,7 @@ public class MatchActionService {
 
         Map<String, Object> attacker = jdbcTemplate.query(
             """
-            SELECT h.id, h.zone, h.is_rested, h.card_id
+            SELECT h.id, h.zone, h.is_rested, h.card_id, h.current_level
             FROM match_holomems h
             WHERE h.match_id = ?
               AND h.owner_user_id = ?
@@ -2444,6 +2510,7 @@ public class MatchActionService {
                 row.put("zone", rs.getString("zone"));
                 row.put("is_rested", rs.getObject("is_rested"));
                 row.put("card_id", rs.getString("card_id"));
+                row.put("current_level", rs.getString("current_level"));
                 return row;
             },
             matchId,
@@ -2478,14 +2545,42 @@ public class MatchActionService {
         int artTextDamageBonus = matchEffectService.resolveArtTextDamageBonus(
             matchId,
             userId,
+            context.turnNumber,
             asLong(attacker.get("id")),
             asString(art.get("effect_json_text"))
         );
-        // 常駐 Gift 的藝能加成在攻擊時計算，避免把這類「無互動、無暫存」效果硬塞進 pending 流程。
-        int passiveGiftArtBonus = matchEffectService.resolvePassiveGiftArtBonus(
+        HoloxSlotRevealSummary holoxSlotRevealSummary = resolveHoloxSlotRevealSummary(
             matchId,
             userId,
-            asLong(attacker.get("id"))
+            asString(art.get("name")),
+            asString(art.get("effect_json_text"))
+        );
+        Map<String, Object> hbp02039SupportRecovery = applyHbp02039HoloxSupportRecovery(
+            matchId,
+            userId,
+            attackerCardId,
+            asString(art.get("name")),
+            holoxSlotRevealSummary
+        );
+        Map<String, Object> hbp02040LifeLoss = applyHbp02040HoloxLifeLoss(
+            matchId,
+            userId,
+            context.opponentUserId,
+            context.turnNumber,
+            asLong(attacker.get("id")),
+            attackerCardId,
+            asString(art.get("name")),
+            holoxSlotRevealSummary
+        );
+        int holoxRevealArtBonus = holoxSlotRevealSummary.artBonus();
+        // 常駐 Gift 的藝能加成可能依目標站位變化，先預設 0，待目標確定後再計算。
+        int passiveGiftArtBonus = 0;
+        Map<String, Integer> baseRequiredCheerCost = resolveArtCheerCost(asString(art.get("cost_cheer_json_text")));
+        Map<String, Integer> passiveGiftArtCostReduction = matchEffectService.resolvePassiveGiftArtCheerCostReduction(
+            matchId,
+            userId,
+            asLong(attacker.get("id")),
+            asString(art.get("name"))
         );
         int turnArtDamageModifier = resolveTurnArtDamageModifier(
             matchId,
@@ -2493,7 +2588,10 @@ public class MatchActionService {
             context.turnNumber,
             asLong(attacker.get("id"))
         );
-        Map<String, Integer> requiredCheerCost = resolveArtCheerCost(asString(art.get("cost_cheer_json_text")));
+        Map<String, Integer> requiredCheerCost = applyArtCheerCostReduction(
+            baseRequiredCheerCost,
+            passiveGiftArtCostReduction
+        );
         Map<String, Object> costSummary = payArtCost(
             matchId,
             userId,
@@ -2514,10 +2612,26 @@ public class MatchActionService {
         boolean hasOpponentHolomem = opponentHolomemCount != null && opponentHolomemCount > 0;
         TargetHolomem targetHolomem = null;
         Map<String, Object> defenderSelfDownedHolderSnapshot = null;
+        boolean passiveGiftTargetRestrictionToCollab = false;
+        boolean passiveGiftTargetRestrictionApplied = false;
         if (hasOpponentHolomem) {
             targetHolomem = resolveOpponentTargetHolomem(matchId, context.opponentUserId, targetCardInstanceId);
             if (targetHolomem == null) {
                 throw new IllegalStateException("DAMAGE 找不到可攻擊的對手 Holomen");
+            }
+            passiveGiftTargetRestrictionToCollab = hasPassiveGiftTargetRestrictionToCollab(matchId, context.opponentUserId);
+            if (passiveGiftTargetRestrictionToCollab) {
+                if (!"COLLAB".equals(targetHolomem.zone())) {
+                    if (targetCardInstanceId != null && targetCardInstanceId > 0) {
+                        throw new IllegalStateException("對手有用心棒效果，藝能只能以對手 COLLAB Holomen 為目標");
+                    }
+                    TargetHolomem collabTarget = loadOpponentCollabTargetHolomem(matchId, context.opponentUserId);
+                    if (collabTarget == null) {
+                        throw new IllegalStateException("對手有用心棒效果，目前沒有可被指定的 COLLAB Holomen");
+                    }
+                    targetHolomem = collabTarget;
+                }
+                passiveGiftTargetRestrictionApplied = true;
             }
             defenderSelfDownedHolderSnapshot = matchEffectService.loadGiftHolderSnapshot(
                 matchId,
@@ -2554,23 +2668,66 @@ public class MatchActionService {
             ? matchEffectService.resolvePassiveGiftIncomingDamageReduction(
                 matchId,
                 context.opponentUserId,
-                targetHolomem.holomemId()
+                targetHolomem.holomemId(),
+                normalizeLevel(asString(attacker.get("current_level")))
             )
             : 0;
+        if (targetHolomem != null) {
+            passiveGiftArtBonus = matchEffectService.resolvePassiveGiftArtBonus(
+                matchId,
+                userId,
+                asLong(attacker.get("id")),
+                targetHolomem.zone()
+            );
+        }
         int incomingDamageReduction = turnIncomingDamageReduction + passiveGiftIncomingDamageReduction;
         int totalDamage = Math.max(
-            baseDamage + attachedSupportArtBonus + artTextDamageBonus + passiveGiftArtBonus
+            baseDamage + attachedSupportArtBonus + artTextDamageBonus + holoxRevealArtBonus + passiveGiftArtBonus
                 + turnArtDamageModifier + criticalBonus - incomingDamageReduction,
             0
         );
         if (totalDamage <= 0) {
             throw new IllegalStateException("此藝能目前未解析出可造成的傷害");
         }
+        Map<String, Object> defenderDamageReceivedGiftSummary = null;
+        if (hasOpponentHolomem && targetHolomem != null) {
+            defenderDamageReceivedGiftSummary = matchEffectService.resolveTriggeredGiftDamagePrevention(
+                matchId,
+                context.opponentUserId,
+                userId,
+                attackerCardInstanceId,
+                effectiveTargetCardInstanceId,
+                context.turnNumber,
+                totalDamage
+            );
+            if (defenderDamageReceivedGiftSummary != null && !defenderDamageReceivedGiftSummary.isEmpty()) {
+                appendAction(
+                    context.match,
+                    context.opponentUserId,
+                    "GIFT_TRIGGER",
+                    toJson(defenderDamageReceivedGiftSummary),
+                    context.turnNumber
+                );
+                Integer damageAfterGift = asInt(defenderDamageReceivedGiftSummary.get("damageAfter"));
+                if (damageAfterGift != null) {
+                    totalDamage = Math.max(damageAfterGift, 0);
+                }
+            }
+        }
         Map<String, Object> artSummary;
         Long lostLifeCardInstanceId = null;
         if (hasOpponentHolomem) {
-            artSummary = matchEffectService.applyArtDamage(matchId, userId, totalDamage, effectiveTargetCardInstanceId, true);
-            lostLifeCardInstanceId = asLong(artSummary.get("lostLifeCardInstanceId"));
+            if (totalDamage > 0) {
+                artSummary = matchEffectService.applyArtDamage(matchId, userId, totalDamage, effectiveTargetCardInstanceId, true);
+                lostLifeCardInstanceId = asLong(artSummary.get("lostLifeCardInstanceId"));
+            } else {
+                artSummary = new LinkedHashMap<>();
+                artSummary.put("effectType", "ART_DAMAGE_PREVENTED");
+                artSummary.put("damageRequested", 0);
+                artSummary.put("damageApplied", 0);
+                artSummary.put("reason", "傷害已由受傷 Gift 抵銷");
+                artSummary.put("lifeReduced", false);
+            }
         } else {
             lostLifeCardInstanceId = loseLifeOnce(matchId, context.opponentUserId);
             if (lostLifeCardInstanceId == null) {
@@ -2591,7 +2748,8 @@ public class MatchActionService {
                 userId,
                 attackerCardInstanceId,
                 effectiveTargetCardInstanceId,
-                context.turnNumber
+                context.turnNumber,
+                asString(art.get("name"))
             )
         );
         if (hasOpponentHolomem && hasHolomemDowned(artSummary)) {
@@ -2718,16 +2876,30 @@ public class MatchActionService {
         payload.put("attackerCardId", attackerCardId);
         payload.put("attackerZone", attackerZone);
         payload.put("targetCardInstanceId", effectiveTargetCardInstanceId);
+        payload.put("passiveGiftTargetRestrictionToCollab", passiveGiftTargetRestrictionToCollab);
+        payload.put("passiveGiftTargetRestrictionApplied", passiveGiftTargetRestrictionApplied);
         payload.put("damageRedirectApplied", hasOpponentHolomem && targetCardInstanceId != null
             && !targetCardInstanceId.equals(effectiveTargetCardInstanceId));
         payload.put("targetMainColor", targetHolomem == null ? null : targetHolomem.mainColor());
         payload.put("artName", asString(art.get("name")));
         payload.put("artOrderIndex", art.get("order_index"));
+        payload.put("artBaseCost", baseRequiredCheerCost);
         payload.put("artCost", requiredCheerCost);
+        payload.put("passiveGiftArtCostReduction", passiveGiftArtCostReduction);
         payload.put("costPayment", costSummary);
         payload.put("artBaseDamage", baseDamage);
         payload.put("attachedSupportArtBonus", attachedSupportArtBonus);
         payload.put("artTextDamageBonus", artTextDamageBonus);
+        payload.put("holoxRevealArtBonus", holoxRevealArtBonus);
+        if (holoxSlotRevealSummary.revealApplied()) {
+            payload.put("holoxReveal", holoxSlotRevealSummary.toPayload());
+        }
+        if (!hbp02039SupportRecovery.isEmpty()) {
+            payload.put("hbp02039SupportRecovery", hbp02039SupportRecovery);
+        }
+        if (!hbp02040LifeLoss.isEmpty()) {
+            payload.put("hbp02040LifeLoss", hbp02040LifeLoss);
+        }
         payload.put("passiveGiftArtBonus", passiveGiftArtBonus);
         payload.put("turnArtDamageModifier", turnArtDamageModifier);
         payload.put("criticalColor", artCritical == null ? null : artCritical.color());
@@ -2736,6 +2908,7 @@ public class MatchActionService {
         payload.put("turnIncomingDamageReduction", turnIncomingDamageReduction);
         payload.put("passiveGiftIncomingDamageReduction", passiveGiftIncomingDamageReduction);
         payload.put("incomingDamageReduction", incomingDamageReduction);
+        payload.put("defenderDamageReceivedGift", defenderDamageReceivedGiftSummary);
         payload.put("artTotalDamage", totalDamage);
         payload.put("effect", artSummary);
         payload.put("artDownTriggeredEffects", artDownTriggeredEffectSummary);
@@ -2756,9 +2929,14 @@ public class MatchActionService {
             toJson(payload),
             context.turnNumber
         );
+        List<Map<String, Object>> additionalEffectSummaries = new ArrayList<>();
+        additionalEffectSummaries.add(artDownTriggeredEffectSummary);
+        if (!hbp02040LifeLoss.isEmpty()) {
+            additionalEffectSummaries.add(hbp02040LifeLoss);
+        }
         Map<String, Object> effectSummaryForChecks = mergeEffectSummaryForChecks(
             artSummary,
-            List.of(artDownTriggeredEffectSummary)
+            additionalEffectSummaries
         );
         if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, effectSummaryForChecks)) {
             touchUpdatedAt(context.match);
@@ -2773,6 +2951,298 @@ public class MatchActionService {
             matchRepository.saveAndFlush(context.match);
         }
         enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummaryForChecks, context.turnNumber);
+    }
+
+    /**
+     * 解析並執行 `ホロックスロット` 的公開流程。
+     *
+     * <p>官方文案是「公開したホロメン1枚につき、このアーツ+20。そして公開したカードをアーカイブする」。
+     * 這裡採最小可行實作：固定公開牌庫頂 3 張、逐張送 archive，並回傳本次可用於後續 Gift 的公開結果。
+     */
+    private HoloxSlotRevealSummary resolveHoloxSlotRevealSummary(
+        Long matchId,
+        Long userId,
+        String artName,
+        String artEffectJsonText
+    ) {
+        if (matchId == null || userId == null || !StringUtils.hasText(artName)) {
+            return HoloxSlotRevealSummary.empty();
+        }
+        if (!artName.contains("ホロックスロット")) {
+            return HoloxSlotRevealSummary.empty();
+        }
+        String normalizedEffect = normalizeZone(artEffectJsonText);
+        if (!normalizedEffect.contains("デッキの上から3枚を公開") || !normalizedEffect.contains("公開したカードをアーカイブ")) {
+            return HoloxSlotRevealSummary.empty();
+        }
+
+        List<Map<String, Object>> revealRows = jdbcTemplate.queryForList(
+            """
+            SELECT mc.id,
+                   mc.card_id,
+                   c.card_type,
+                   m.bloom_level
+            FROM match_cards mc
+            JOIN cards c ON c.card_id = mc.card_id
+            LEFT JOIN member_cards m ON m.card_id = mc.card_id
+            WHERE mc.match_id = ?
+              AND mc.owner_user_id = ?
+              AND mc.zone = 'DECK'
+            ORDER BY mc.order_index NULLS LAST, mc.id
+            LIMIT 3
+            """,
+            matchId,
+            userId
+        );
+        if (revealRows.isEmpty()) {
+            return HoloxSlotRevealSummary.empty();
+        }
+
+        int nextArchiveOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(MAX(order_index), 0) + 1
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'ARCHIVE'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+
+        List<Long> revealedCardInstanceIds = new ArrayList<>();
+        List<String> revealedCardIds = new ArrayList<>();
+        List<Long> archivedCardInstanceIds = new ArrayList<>();
+        List<String> archivedCardIds = new ArrayList<>();
+        List<Long> archivedSupportCardInstanceIds = new ArrayList<>();
+        List<String> archivedSupportCardIds = new ArrayList<>();
+        int revealedHolomemCount = 0;
+        List<Integer> revealedHolomemBloomLevels = new ArrayList<>();
+
+        for (Map<String, Object> row : revealRows) {
+            Long cardInstanceId = asLong(row.get("id"));
+            String cardId = asString(row.get("card_id"));
+            String cardType = normalizeZone(row.get("card_type"));
+            Integer bloomLevel = asInt(row.get("bloom_level"));
+            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
+                continue;
+            }
+            revealedCardInstanceIds.add(cardInstanceId);
+            revealedCardIds.add(cardId);
+            if ("MEMBER".equals(cardType)) {
+                revealedHolomemCount++;
+                if (bloomLevel != null) {
+                    revealedHolomemBloomLevels.add(bloomLevel);
+                }
+            }
+            int updated = jdbcTemplate.update(
+                """
+                UPDATE match_cards
+                SET zone = 'ARCHIVE',
+                    order_index = ?,
+                    is_face_down = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'DECK'
+                """,
+                nextArchiveOrder++,
+                cardInstanceId,
+                matchId,
+                userId
+            );
+            if (updated != 1) {
+                continue;
+            }
+            archivedCardInstanceIds.add(cardInstanceId);
+            archivedCardIds.add(cardId);
+            if ("SUPPORT".equals(cardType)) {
+                archivedSupportCardInstanceIds.add(cardInstanceId);
+                archivedSupportCardIds.add(cardId);
+            }
+        }
+
+        int artBonus = revealedHolomemCount * 20;
+        boolean revealedAllMembersSameBloomLevel = revealedCardInstanceIds.size() == 3
+            && revealedHolomemCount == 3
+            && revealedHolomemBloomLevels.size() == 3
+            && revealedHolomemBloomLevels.stream().distinct().count() == 1;
+        Integer sharedBloomLevel = revealedAllMembersSameBloomLevel ? revealedHolomemBloomLevels.get(0) : null;
+        return new HoloxSlotRevealSummary(
+            !archivedCardInstanceIds.isEmpty(),
+            revealedCardInstanceIds,
+            revealedCardIds,
+            revealedHolomemCount,
+            artBonus,
+            archivedCardInstanceIds,
+            archivedCardIds,
+            archivedSupportCardInstanceIds,
+            archivedSupportCardIds,
+            revealedAllMembersSameBloomLevel,
+            sharedBloomLevel
+        );
+    }
+
+    private Map<String, Object> applyHbp02039HoloxSupportRecovery(
+        Long matchId,
+        Long userId,
+        String attackerCardId,
+        String artName,
+        HoloxSlotRevealSummary holoxSlotRevealSummary
+    ) {
+        if (matchId == null || userId == null || !StringUtils.hasText(attackerCardId) || !StringUtils.hasText(artName)) {
+            return Map.of();
+        }
+        if (!"HBP02-039".equals(attackerCardId) || !artName.contains("ホロックスロット") || holoxSlotRevealSummary == null) {
+            return Map.of();
+        }
+        List<Long> candidates = holoxSlotRevealSummary.archivedSupportCardInstanceIds();
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", "HBP02039_SUPPORT_RECOVERY");
+        summary.put("candidateCardInstanceIds", candidates);
+        if (candidates == null || candidates.isEmpty()) {
+            summary.put("applied", false);
+            summary.put("reason", "本次公開沒有支援卡可回手");
+            return summary;
+        }
+        int nextHandOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(MAX(order_index), 0) + 1
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        for (Long cardInstanceId : candidates) {
+            if (cardInstanceId == null || cardInstanceId <= 0) {
+                continue;
+            }
+            int updated = jdbcTemplate.update(
+                """
+                UPDATE match_cards
+                SET zone = 'HAND',
+                    order_index = ?,
+                    is_face_down = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'ARCHIVE'
+                """,
+                nextHandOrder++,
+                cardInstanceId,
+                matchId,
+                userId
+            );
+            if (updated != 1) {
+                continue;
+            }
+            summary.put("applied", true);
+            summary.put("movedCardInstanceId", cardInstanceId);
+            summary.put(
+                "movedCardId",
+                jdbcTemplate.query("SELECT card_id FROM match_cards WHERE id = ?", rs -> rs.next() ? rs.getString("card_id") : null, cardInstanceId)
+            );
+            return summary;
+        }
+        summary.put("applied", false);
+        summary.put("reason", "找不到可從 Archive 回手的支援卡");
+        return summary;
+    }
+
+    private Map<String, Object> applyHbp02040HoloxLifeLoss(
+        Long matchId,
+        Long userId,
+        Long opponentUserId,
+        int turnNumber,
+        Long attackerHolomemId,
+        String attackerCardId,
+        String artName,
+        HoloxSlotRevealSummary holoxSlotRevealSummary
+    ) {
+        if (matchId == null
+            || userId == null
+            || opponentUserId == null
+            || turnNumber <= 0
+            || attackerHolomemId == null
+            || attackerHolomemId <= 0
+            || !StringUtils.hasText(attackerCardId)
+            || !StringUtils.hasText(artName)) {
+            return Map.of();
+        }
+        if (!"HBP02-040".equals(attackerCardId) || !artName.contains("ホロックスロット")) {
+            return Map.of();
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", "HBP02040_LIFE_LOSS");
+        summary.put("holderHolomemId", attackerHolomemId);
+        summary.put("turnNumber", turnNumber);
+        summary.put("turnOnce", true);
+        if (isHbp02040LifeLossAlreadyUsedThisTurn(matchId, userId, turnNumber, attackerHolomemId)) {
+            summary.put("applied", false);
+            summary.put("reason", "TURN_ONCE_ALREADY_USED");
+            return summary;
+        }
+        if (holoxSlotRevealSummary == null || !holoxSlotRevealSummary.revealApplied()) {
+            summary.put("applied", false);
+            summary.put("reason", "NO_HOLOX_REVEAL");
+            return summary;
+        }
+        if (!holoxSlotRevealSummary.revealedAllMembersSameBloomLevel()) {
+            summary.put("applied", false);
+            summary.put("reason", "REVEALED_CARDS_NOT_SAME_BLOOM_LEVEL_HOLOMEM");
+            return summary;
+        }
+
+        Long lostLifeCardInstanceId = loseLifeOnce(matchId, opponentUserId);
+        if (lostLifeCardInstanceId == null) {
+            summary.put("applied", false);
+            summary.put("reason", "NO_OPPONENT_LIFE_AVAILABLE");
+            return summary;
+        }
+        summary.put("applied", true);
+        summary.put("lifeReduced", true);
+        summary.put("lostLifeCardInstanceId", lostLifeCardInstanceId);
+        summary.put("lostLifeCardInstanceIds", List.of(lostLifeCardInstanceId));
+        summary.put("requestedLifeLoss", 1);
+        summary.put("appliedLifeLoss", 1);
+        return summary;
+    }
+
+    private boolean isHbp02040LifeLossAlreadyUsedThisTurn(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        Long holderHolomemId
+    ) {
+        if (matchId == null || userId == null || turnNumber <= 0 || holderHolomemId == null || holderHolomemId <= 0) {
+            return false;
+        }
+        Integer usedCount = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'ATTACK_ART'
+              AND payload -> 'hbp02040LifeLoss' ->> 'holderHolomemId' = ?
+              AND payload -> 'hbp02040LifeLoss' ->> 'applied' = 'true'
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            userId,
+            turnNumber,
+            holderHolomemId.toString()
+        );
+        return usedCount != null && usedCount > 0;
     }
 
     /**
@@ -3892,6 +4362,20 @@ public class MatchActionService {
         if (matchId == null || userId == null) {
             return;
         }
+        List<Map<String, Object>> collabRows = jdbcTemplate.queryForList(
+            """
+            SELECT id, card_id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'COLLAB'
+            """,
+            matchId,
+            userId
+        );
+        if (collabRows.isEmpty()) {
+            return;
+        }
         jdbcTemplate.update(
             """
             UPDATE match_holomems
@@ -3905,6 +4389,56 @@ public class MatchActionService {
             matchId,
             userId
         );
+        boolean shouldKeepHbp03039Unrested = isOwnCenterHolomemNameContains(matchId, userId, "フワワ・アビスガード");
+        if (!shouldKeepHbp03039Unrested) {
+            return;
+        }
+        List<Long> movedCollabIds = collabRows.stream()
+            .map(row -> asLong(row.get("id")))
+            .filter(Objects::nonNull)
+            .toList();
+        if (movedCollabIds.isEmpty()) {
+            return;
+        }
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET is_rested = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'BACK'
+              AND card_id = 'HBP03-039'
+              AND id = ANY (?::bigint[])
+            """,
+            ps -> {
+                ps.setLong(1, matchId);
+                ps.setLong(2, userId);
+                ps.setArray(3, ps.getConnection().createArrayOf("bigint", movedCollabIds.toArray()));
+            }
+        );
+    }
+
+    private boolean isOwnCenterHolomemNameContains(Long matchId, Long userId, String requiredNamePart) {
+        if (matchId == null || userId == null || !StringUtils.hasText(requiredNamePart)) {
+            return false;
+        }
+        String centerName = jdbcTemplate.query(
+            """
+            SELECT c.name
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone = 'CENTER'
+            ORDER BY h.id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("name") : null,
+            matchId,
+            userId
+        );
+        return StringUtils.hasText(centerName) && centerName.contains(requiredNamePart);
     }
 
     /**
@@ -4643,6 +5177,74 @@ public class MatchActionService {
     }
 
     /**
+     * 檢查目標 Holomem 的被動 Gift 是否允許本次忽略 Bloom 等級限制。
+     *
+     * <p>目前先支援官方 HBP01-045：
+     * `自分のライフが3以下の間、このホロメンは、自分の手札の2nd〈AZKi〉に、Bloomレベルを無視してBloomできる。`
+     */
+    private boolean canIgnoreBloomLevelByPassiveGift(
+        Long matchId,
+        Long userId,
+        BloomTarget target,
+        String bloomLevel,
+        String bloomCardName
+    ) {
+        if (matchId == null || userId == null || target == null) {
+            return false;
+        }
+        String passiveText = jdbcTemplate.query(
+            """
+            SELECT passive_effect_json::text
+            FROM member_cards
+            WHERE card_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString(1) : null,
+            target.topCardId()
+        );
+        if (!StringUtils.hasText(passiveText) || !passiveText.contains("Bloomレベルを無視してBloomできる")) {
+            return false;
+        }
+
+        String normalizedText = normalizeDigits(passiveText).toUpperCase(Locale.ROOT);
+        if (!normalizedText.contains("自分のライフが3以下")) {
+            return false;
+        }
+        if (!normalizedText.contains("このホロメン")) {
+            return false;
+        }
+
+        Integer currentLife = jdbcTemplate.query(
+            """
+            SELECT current_life
+            FROM match_players
+            WHERE match_id = ?
+              AND user_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt(1) : null,
+            matchId,
+            userId
+        );
+        if (currentLife == null || currentLife > 3) {
+            return false;
+        }
+
+        if (normalizedText.contains("手札の2ND") && !"SECOND".equals(normalizeLevel(bloomLevel))) {
+            return false;
+        }
+
+        Matcher nameMatcher = Pattern.compile("〈([^〉]+)〉").matcher(normalizedText);
+        if (nameMatcher.find()) {
+            String requiredName = nameMatcher.group(1);
+            if (!StringUtils.hasText(bloomCardName) || !bloomCardName.toUpperCase(Locale.ROOT).contains(requiredName)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * 將等級文字映射成可比較序位。
      */
     private int resolveBloomLevelRank(String levelType) {
@@ -5256,7 +5858,8 @@ public class MatchActionService {
         Long matchId,
         Long userId,
         PendingDecision pending,
-        int turnNumber
+        int turnNumber,
+        List<Long> selectedCardInstanceIds
     ) {
         String normalizedSourceActionType = normalizeZone(pending.sourceActionType());
         if ("BLOOM".equals(normalizedSourceActionType)) {
@@ -5269,16 +5872,22 @@ public class MatchActionService {
             );
         }
         if ("COLLAB".equals(normalizedSourceActionType)) {
-            return applyCollabPostTriggeredEffectsAfterConfirm(matchId, userId, pending, turnNumber);
+            return applyCollabPostTriggeredEffectsAfterConfirm(matchId, userId, pending, turnNumber, selectedCardInstanceIds);
         }
         if ("ATTACK_ART_POST_TRIGGER".equals(normalizedSourceActionType)) {
-            return applyAttackArtPostTriggeredEffectsAfterConfirm(matchId, userId, pending, turnNumber);
+            return applyAttackArtPostTriggeredEffectsAfterConfirm(
+                matchId,
+                userId,
+                pending,
+                turnNumber,
+                selectedCardInstanceIds
+            );
         }
         if (ACTION_TYPE_EFFECT_POST_TRIGGER.equals(normalizedSourceActionType)) {
             return applyEffectPostTriggeredEffectsAfterConfirm(matchId, userId, pending, turnNumber);
         }
         if ("GIFT".equals(normalizedSourceActionType)) {
-            return applyGiftTriggeredEffectsAfterConfirm(matchId, userId, pending, turnNumber);
+            return applyGiftTriggeredEffectsAfterConfirm(matchId, userId, pending, turnNumber, selectedCardInstanceIds);
         }
         Map<String, Object> skipped = new LinkedHashMap<>();
         skipped.put("applied", false);
@@ -5330,6 +5939,12 @@ public class MatchActionService {
         if (hasBlockingPendingDecision(matchId, userId)) {
             throw new IllegalStateException("你有待處理的互動，請先完成確認");
         }
+        int minSelect = 0;
+        int maxSelect = 0;
+        if (additionalContext != null && !additionalContext.isEmpty()) {
+            minSelect = Math.max(asInt(additionalContext.get("minSelect")), 0);
+            maxSelect = Math.max(asInt(additionalContext.get("maxSelect")), minSelect);
+        }
         Map<String, Object> context = new LinkedHashMap<>();
         context.put("interactionType", INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
         context.put("sourceActionType", normalizeZone(sourceActionType));
@@ -5366,8 +5981,8 @@ public class MatchActionService {
             sourceCardInstanceId,
             sourceCardId,
             effectType,
-            0,
-            0,
+            minSelect,
+            maxSelect,
             PENDING_STATUS,
             toJson(context)
         );
@@ -5384,7 +5999,8 @@ public class MatchActionService {
         Long matchId,
         Long userId,
         PendingDecision pending,
-        int turnNumber
+        int turnNumber,
+        List<Long> selectedCardInstanceIds
     ) {
         List<Map<String, Object>> giftTriggers = extractGiftTriggerContexts(pending.contextNode());
         if (giftTriggers.isEmpty()) {
@@ -5400,7 +6016,9 @@ public class MatchActionService {
             pending.sourceCardInstanceId(),
             turnNumber,
             giftTriggers,
-            "GIFT"
+            "GIFT",
+            selectedCardInstanceIds,
+            extractJsonLong(pending.contextNode(), "selectionGiftHolderCardInstanceId")
         );
     }
 
@@ -5411,7 +6029,8 @@ public class MatchActionService {
         Long matchId,
         Long userId,
         PendingDecision pending,
-        int turnNumber
+        int turnNumber,
+        List<Long> selectedCardInstanceIds
     ) {
         boolean hasCollabEffect = pending.contextNode() != null && pending.contextNode().path("hasCollabEffect").asBoolean(false);
         Map<String, Object> collabSummary = null;
@@ -5433,7 +6052,9 @@ public class MatchActionService {
                 pending.sourceCardInstanceId(),
                 turnNumber,
                 giftTriggers,
-                "GIFT"
+                "GIFT",
+                selectedCardInstanceIds,
+                extractJsonLong(pending.contextNode(), "selectionGiftHolderCardInstanceId")
             );
         }
 
@@ -5465,7 +6086,8 @@ public class MatchActionService {
         Long matchId,
         Long userId,
         PendingDecision pending,
-        int turnNumber
+        int turnNumber,
+        List<Long> selectedCardInstanceIds
     ) {
         List<Map<String, Object>> executedEffects = new ArrayList<>();
         List<Map<String, Object>> skippedEffects = new ArrayList<>();
@@ -5477,13 +6099,15 @@ public class MatchActionService {
         if (downEventContext != null) {
             Long downedOwnerUserId = asLong(downEventContext.get("downedOwnerUserId"));
             String downedCardId = asString(downEventContext.get("downedCardId"));
+            String downedStageZone = asString(downEventContext.get("downedStageZone"));
             Integer downEventTurn = asInt(downEventContext.get("turnNumber"));
             downEventResult = matchEffectService.applyDownEventEffect(
                 matchId,
                 userId,
                 downedOwnerUserId,
                 downedCardId,
-                downEventTurn == null || downEventTurn <= 0 ? turnNumber : downEventTurn
+                downEventTurn == null || downEventTurn <= 0 ? turnNumber : downEventTurn,
+                downedStageZone
             );
             if (downEventResult != null && !downEventResult.isEmpty()) {
                 executedEffects.add(downEventResult);
@@ -5499,7 +6123,9 @@ public class MatchActionService {
                 pending.sourceCardInstanceId(),
                 turnNumber,
                 giftTriggers,
-                "ATTACK_ART_POST_TRIGGER"
+                "ATTACK_ART_POST_TRIGGER",
+                selectedCardInstanceIds,
+                extractJsonLong(pending.contextNode(), "selectionGiftHolderCardInstanceId")
             );
             Object giftExecutedEffects = giftSummary.get("executedEffects");
             if (giftExecutedEffects instanceof List<?> effects) {
@@ -5576,13 +6202,15 @@ public class MatchActionService {
 
         Long downedOwnerUserId = asLong(downEventContext.get("downedOwnerUserId"));
         String downedCardId = asString(downEventContext.get("downedCardId"));
+        String downedStageZone = asString(downEventContext.get("downedStageZone"));
         Integer downEventTurn = asInt(downEventContext.get("turnNumber"));
         Map<String, Object> downEventResult = matchEffectService.applyDownEventEffect(
             matchId,
             userId,
             downedOwnerUserId,
             downedCardId,
-            downEventTurn == null || downEventTurn <= 0 ? turnNumber : downEventTurn
+            downEventTurn == null || downEventTurn <= 0 ? turnNumber : downEventTurn,
+            downedStageZone
         );
 
         result.put("downEvent", downEventResult);
@@ -5603,8 +6231,11 @@ public class MatchActionService {
         Long defaultSourceCardInstanceId,
         int turnNumber,
         List<Map<String, Object>> giftTriggers,
-        String sourceActionType
+        String sourceActionType,
+        List<Long> selectedCardInstanceIds,
+        Long selectionGiftHolderCardInstanceId
     ) {
+        List<Long> effectiveSelectedCardInstanceIds = selectedCardInstanceIds == null ? List.of() : selectedCardInstanceIds;
         List<Map<String, Object>> triggeredGifts = new ArrayList<>();
         List<Map<String, Object>> aggregatedExecutedEffects = new ArrayList<>();
         List<Map<String, Object>> aggregatedSkippedEffects = new ArrayList<>();
@@ -5615,26 +6246,37 @@ public class MatchActionService {
             Long sourceCardInstanceId = asLong(trigger.get("sourceCardInstanceId"));
             Long triggerTargetCardInstanceId = asLong(trigger.get("triggerTargetCardInstanceId"));
             Long giftHolderHolomemId = asLong(trigger.get("giftHolderHolomemId"));
+            boolean selectionMatched = !effectiveSelectedCardInstanceIds.isEmpty()
+                && toBoolean(trigger.get("selectionRequired"))
+                && Objects.equals(selectionGiftHolderCardInstanceId, asLong(trigger.get("giftHolderCardInstanceId")));
+            Map<String, Object> effectiveTrigger = trigger;
+            if (selectionMatched) {
+                effectiveTrigger = new LinkedHashMap<>(trigger);
+                effectiveTrigger.put("selectedCardInstanceIds", effectiveSelectedCardInstanceIds);
+            }
             if (sourceCardInstanceId == null || sourceCardInstanceId <= 0) {
                 sourceCardInstanceId = defaultSourceCardInstanceId;
             }
-            Map<String, Object> summary = matchEffectService.applySingleGiftTriggeredEffect(
-                matchId,
-                userId,
-                triggerType,
-                sourceCardInstanceId,
-                triggerTargetCardInstanceId,
-                turnNumber,
-                giftHolderHolomemId
-            );
-            if ((summary == null || summary.isEmpty()) && asLong(trigger.get("giftHolderCardInstanceId")) != null) {
+            Map<String, Object> summary = null;
+            if (!selectionMatched) {
+                summary = matchEffectService.applySingleGiftTriggeredEffect(
+                    matchId,
+                    userId,
+                    triggerType,
+                    sourceCardInstanceId,
+                    triggerTargetCardInstanceId,
+                    turnNumber,
+                    giftHolderHolomemId
+                );
+            }
+            if ((summary == null || summary.isEmpty()) && asLong(effectiveTrigger.get("giftHolderCardInstanceId")) != null) {
                 summary = matchEffectService.applyStoredGiftTriggeredEffect(
                     matchId,
                     userId,
                     triggerType,
                     sourceCardInstanceId,
                     triggerTargetCardInstanceId,
-                    trigger
+                    effectiveTrigger
                 );
             }
             if (summary == null || summary.isEmpty()) {
@@ -5789,6 +6431,30 @@ public class MatchActionService {
             trigger.put("giftHolderCardInstanceId", extractJsonLong(node, "giftHolderCardInstanceId"));
             trigger.put("giftHolderCardId", extractJsonText(node, "giftHolderCardId"));
             trigger.put("giftHolderZone", extractJsonText(node, "giftHolderZone"));
+            trigger.put(
+                "giftHolderAttachedCheerCardInstanceIds",
+                extractJsonLongList(node, "giftHolderAttachedCheerCardInstanceIds")
+            );
+            trigger.put(
+                "giftHolderAttachedCheerCardIds",
+                extractJsonTextList(node, "giftHolderAttachedCheerCardIds")
+            );
+            trigger.put(
+                "giftHolderStackCardInstanceIds",
+                extractJsonLongList(node, "giftHolderStackCardInstanceIds")
+            );
+            trigger.put(
+                "giftHolderStackCardIds",
+                extractJsonTextList(node, "giftHolderStackCardIds")
+            );
+            trigger.put("selectionRequired", extractJsonBoolean(node, "selectionRequired"));
+            trigger.put("selectionEffectType", extractJsonText(node, "selectionEffectType"));
+            trigger.put("selectionMinSelect", extractJsonLong(node, "selectionMinSelect"));
+            trigger.put("selectionMaxSelect", extractJsonLong(node, "selectionMaxSelect"));
+            trigger.put(
+                "selectionCandidateCardInstanceIds",
+                extractJsonLongList(node, "selectionCandidateCardInstanceIds")
+            );
             trigger.put("rawText", extractJsonText(node, "rawText"));
             triggers.add(trigger);
         }
@@ -5809,6 +6475,7 @@ public class MatchActionService {
         Map<String, Object> downEvent = new LinkedHashMap<>();
         downEvent.put("downedOwnerUserId", extractJsonLong(downEventNode, "downedOwnerUserId"));
         downEvent.put("downedCardId", extractJsonText(downEventNode, "downedCardId"));
+        downEvent.put("downedStageZone", extractJsonText(downEventNode, "downedStageZone"));
         downEvent.put("turnNumber", asInt(extractJsonLong(downEventNode, "turnNumber")));
         downEvent.put("rawText", extractJsonText(downEventNode, "rawText"));
         downEvent.put("requestedLifeLoss", asInt(extractJsonLong(downEventNode, "requestedLifeLoss")));
@@ -5950,30 +6617,17 @@ public class MatchActionService {
         Map<String, Object> downEventPreview,
         int turnNumber
     ) {
-        List<Map<String, Object>> giftTriggers = new ArrayList<>();
-        for (Map<String, Object> trigger : giftTriggeredEffects) {
-            if (trigger == null || trigger.isEmpty()) {
-                continue;
-            }
-            Map<String, Object> triggerPayload = new LinkedHashMap<>();
-            triggerPayload.put("triggerType", normalizeZone(trigger.get("triggerType")));
-            triggerPayload.put("sourceCardInstanceId", asLong(trigger.get("sourceCardInstanceId")));
-            triggerPayload.put("triggerTargetCardInstanceId", asLong(trigger.get("triggerTargetCardInstanceId")));
-            triggerPayload.put("giftHolderHolomemId", asLong(trigger.get("giftHolderHolomemId")));
-            triggerPayload.put("giftHolderCardInstanceId", asLong(trigger.get("giftHolderCardInstanceId")));
-            triggerPayload.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
-            triggerPayload.put("giftHolderZone", asString(trigger.get("giftHolderZone")));
-            triggerPayload.put("rawText", asString(trigger.get("rawText")));
-            giftTriggers.add(triggerPayload);
-        }
+        List<Map<String, Object>> giftTriggers = buildGiftTriggerPayloads(giftTriggeredEffects);
 
         Map<String, Object> additionalContext = new LinkedHashMap<>();
         additionalContext.put("giftTriggers", giftTriggers);
         additionalContext.put("giftCount", giftTriggers.size());
+        appendGiftSelectionPendingContext(additionalContext, giftTriggeredEffects);
         if (downEventPreview != null && !downEventPreview.isEmpty()) {
             Map<String, Object> downEvent = new LinkedHashMap<>();
             downEvent.put("downedOwnerUserId", asLong(downEventPreview.get("downedOwnerUserId")));
             downEvent.put("downedCardId", asString(downEventPreview.get("downedCardId")));
+            downEvent.put("downedStageZone", asString(downEventPreview.get("downedStageZone")));
             downEvent.put("turnNumber", asInt(downEventPreview.get("turnNumber")));
             downEvent.put("rawText", asString(downEventPreview.get("rawText")));
             downEvent.put("requestedLifeLoss", asInt(downEventPreview.get("requestedLifeLoss")));
@@ -6100,19 +6754,11 @@ public class MatchActionService {
         return summary;
     }
 
-    /**
-     * 建立 Gift 觸發確認互動。
-     */
-    private FollowupInteractionDecision createGiftTriggeredEffectConfirmPendingInteraction(
-        Long matchId,
-        Long userId,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        List<Map<String, Object>> cards,
-        List<Map<String, Object>> giftTriggeredEffects,
-        int turnNumber
-    ) {
+    private List<Map<String, Object>> buildGiftTriggerPayloads(List<Map<String, Object>> giftTriggeredEffects) {
         List<Map<String, Object>> giftTriggers = new ArrayList<>();
+        if (giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
+            return giftTriggers;
+        }
         for (Map<String, Object> trigger : giftTriggeredEffects) {
             if (trigger == null || trigger.isEmpty()) {
                 continue;
@@ -6125,12 +6771,75 @@ public class MatchActionService {
             triggerPayload.put("giftHolderCardInstanceId", asLong(trigger.get("giftHolderCardInstanceId")));
             triggerPayload.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
             triggerPayload.put("giftHolderZone", asString(trigger.get("giftHolderZone")));
+            triggerPayload.put(
+                "giftHolderAttachedCheerCardInstanceIds",
+                toLongList(trigger.get("giftHolderAttachedCheerCardInstanceIds"))
+            );
+            triggerPayload.put("giftHolderAttachedCheerCardIds", toStringList(trigger.get("giftHolderAttachedCheerCardIds")));
+            triggerPayload.put("giftHolderStackCardInstanceIds", toLongList(trigger.get("giftHolderStackCardInstanceIds")));
+            triggerPayload.put("giftHolderStackCardIds", toStringList(trigger.get("giftHolderStackCardIds")));
+            triggerPayload.put("selectionRequired", toBoolean(trigger.get("selectionRequired")));
+            triggerPayload.put("selectionEffectType", asString(trigger.get("selectionEffectType")));
+            triggerPayload.put("selectionMinSelect", asInt(trigger.get("selectionMinSelect")));
+            triggerPayload.put("selectionMaxSelect", asInt(trigger.get("selectionMaxSelect")));
+            triggerPayload.put(
+                "selectionCandidateCardInstanceIds",
+                toLongList(trigger.get("selectionCandidateCardInstanceIds"))
+            );
             triggerPayload.put("rawText", asString(trigger.get("rawText")));
             giftTriggers.add(triggerPayload);
         }
+        return giftTriggers;
+    }
+
+    private void appendGiftSelectionPendingContext(
+        Map<String, Object> additionalContext,
+        List<Map<String, Object>> giftTriggeredEffects
+    ) {
+        if (additionalContext == null || giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
+            return;
+        }
+        List<Map<String, Object>> selectableTriggers = giftTriggeredEffects.stream()
+            .filter(Objects::nonNull)
+            .filter(trigger -> toBoolean(trigger.get("selectionRequired")))
+            .toList();
+        if (selectableTriggers.size() != 1) {
+            return;
+        }
+        Map<String, Object> selectionTrigger = selectableTriggers.get(0);
+        List<Long> candidateCardInstanceIds = toLongList(selectionTrigger.get("selectionCandidateCardInstanceIds"));
+        if (candidateCardInstanceIds.isEmpty()) {
+            return;
+        }
+        additionalContext.put("candidateCardInstanceIds", candidateCardInstanceIds);
+        additionalContext.put("selectionGiftHolderCardInstanceId", asLong(selectionTrigger.get("giftHolderCardInstanceId")));
+        additionalContext.put("minSelect", Math.max(asInt(selectionTrigger.get("selectionMinSelect")), 1));
+        additionalContext.put(
+            "maxSelect",
+            Math.max(
+                asInt(selectionTrigger.get("selectionMaxSelect")),
+                Math.max(asInt(selectionTrigger.get("selectionMinSelect")), 1)
+            )
+        );
+    }
+
+    /**
+     * 建立 Gift 觸發確認互動。
+     */
+    private FollowupInteractionDecision createGiftTriggeredEffectConfirmPendingInteraction(
+        Long matchId,
+        Long userId,
+        Long sourceCardInstanceId,
+        String sourceCardId,
+        List<Map<String, Object>> cards,
+        List<Map<String, Object>> giftTriggeredEffects,
+        int turnNumber
+    ) {
+        List<Map<String, Object>> giftTriggers = buildGiftTriggerPayloads(giftTriggeredEffects);
         Map<String, Object> additionalContext = new LinkedHashMap<>();
         additionalContext.put("giftTriggers", giftTriggers);
         additionalContext.put("giftCount", giftTriggers.size());
+        appendGiftSelectionPendingContext(additionalContext, giftTriggeredEffects);
 
         return createTriggeredEffectConfirmPendingInteraction(
             matchId,
@@ -6170,20 +6879,10 @@ public class MatchActionService {
         Map<String, Object> additionalContext = new LinkedHashMap<>();
         additionalContext.put("hasCollabEffect", collabPreview != null && collabPreview.hasEffect());
 
-        List<Map<String, Object>> giftTriggers = new ArrayList<>();
-        for (Map<String, Object> trigger : giftTriggeredEffects) {
-            if (trigger == null || trigger.isEmpty()) {
-                continue;
-            }
-            Map<String, Object> triggerPayload = new LinkedHashMap<>();
-            triggerPayload.put("triggerType", normalizeZone(trigger.get("triggerType")));
-            triggerPayload.put("sourceCardInstanceId", asLong(trigger.get("sourceCardInstanceId")));
-            triggerPayload.put("triggerTargetCardInstanceId", asLong(trigger.get("triggerTargetCardInstanceId")));
-            triggerPayload.put("giftHolderHolomemId", asLong(trigger.get("giftHolderHolomemId")));
-            giftTriggers.add(triggerPayload);
-        }
+        List<Map<String, Object>> giftTriggers = buildGiftTriggerPayloads(giftTriggeredEffects);
         additionalContext.put("giftTriggers", giftTriggers);
         additionalContext.put("giftCount", giftTriggers.size());
+        appendGiftSelectionPendingContext(additionalContext, giftTriggeredEffects);
         additionalContext.put("triggerSections", buildCollabTriggerSections(collabPreview, giftTriggeredEffects));
 
         return createTriggeredEffectConfirmPendingInteraction(
@@ -6372,6 +7071,7 @@ public class MatchActionService {
         Map<String, Object> downEventContext = new LinkedHashMap<>();
         downEventContext.put("downedOwnerUserId", asLong(downEventPreview.get("downedOwnerUserId")));
         downEventContext.put("downedCardId", asString(downEventPreview.get("downedCardId")));
+        downEventContext.put("downedStageZone", asString(downEventPreview.get("downedStageZone")));
         downEventContext.put("turnNumber", asInt(downEventPreview.get("turnNumber")));
         downEventContext.put("rawText", asString(downEventPreview.get("rawText")));
         downEventContext.put("requestedLifeLoss", asInt(downEventPreview.get("requestedLifeLoss")));
@@ -6967,6 +7667,43 @@ public class MatchActionService {
         return result;
     }
 
+    private List<Long> toLongList(Object value) {
+        if (!(value instanceof List<?> list) || list.isEmpty()) {
+            return List.of();
+        }
+        List<Long> result = new ArrayList<>();
+        for (Object item : list) {
+            Long id = asLong(item);
+            if (id == null || id <= 0 || result.contains(id)) {
+                continue;
+            }
+            result.add(id);
+        }
+        return result;
+    }
+
+    private List<String> extractJsonTextList(JsonNode node, String fieldName) {
+        if (node == null || node.isNull() || !StringUtils.hasText(fieldName)) {
+            return List.of();
+        }
+        JsonNode value = node.get(fieldName);
+        if (value == null || value.isNull() || !value.isArray()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (JsonNode item : value) {
+            if (item == null || item.isNull()) {
+                continue;
+            }
+            String text = normalizeZone(item.asText());
+            if (!StringUtils.hasText(text) || result.contains(text)) {
+                continue;
+            }
+            result.add(text);
+        }
+        return result;
+    }
+
     /**
      * 將 Map<?,?> 安全轉成 Map<String,Object>。
      */
@@ -7071,26 +7808,79 @@ public class MatchActionService {
     /**
      * 驗證同一 Holomem 的可附加支援上限。
      */
-    private void validateAttachableSupportLimit(Long matchHolomemId, String supportType) {
+    private void validateAttachableSupportLimit(Long matchHolomemId, String supportType, String supportCardId) {
         String normalized = normalizeZone(supportType);
         if (!SUPPORT_TYPE_MASCOT.equals(normalized) && !SUPPORT_TYPE_TOOL.equals(normalized)) {
             return;
         }
-        Integer alreadyAttached = jdbcTemplate.queryForObject(
+        List<String> attachedSupportNames = jdbcTemplate.query(
             """
-            SELECT COUNT(*)
-            FROM match_holomem_supports
-            WHERE match_holomem_id = ?
-              AND support_type = ?
+            SELECT c.name
+            FROM match_holomem_supports hs
+            JOIN cards c ON c.card_id = hs.support_card_id
+            WHERE hs.match_holomem_id = ?
+              AND hs.support_type = ?
+            ORDER BY hs.id
             """,
-            Integer.class,
+            (rs, rowNum) -> rs.getString("name"),
             matchHolomemId,
             normalized
         );
-        if (alreadyAttached != null && alreadyAttached > 0) {
+        if (attachedSupportNames == null) {
+            attachedSupportNames = List.of();
+        }
+
+        if (SUPPORT_TYPE_MASCOT.equals(normalized) && "HBP02-013".equals(loadHolomemTopCardId(matchHolomemId))) {
+            if (attachedSupportNames.size() >= 2) {
+                throw new IllegalStateException("HBP02-013 最多只能附加 2 張マスコット");
+            }
+            String newSupportName = loadCardName(supportCardId);
+            if (StringUtils.hasText(newSupportName)) {
+                for (String attachedSupportName : attachedSupportNames) {
+                    if (StringUtils.hasText(attachedSupportName) && attachedSupportName.equals(newSupportName)) {
+                        throw new IllegalStateException("HBP02-013 的 2 張マスコット必須是不同卡名");
+                    }
+                }
+            }
+            return;
+        }
+
+        if (!attachedSupportNames.isEmpty()) {
             String supportLabel = SUPPORT_TYPE_MASCOT.equals(normalized) ? "マスコット" : "ツール";
             throw new IllegalStateException("同一 Holomem 只能附加 1 張" + supportLabel);
         }
+    }
+
+    private String loadHolomemTopCardId(Long matchHolomemId) {
+        if (matchHolomemId == null) {
+            return "";
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT card_id
+            FROM match_holomems
+            WHERE id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? asString(rs.getString("card_id")) : "",
+            matchHolomemId
+        );
+    }
+
+    private String loadCardName(String cardId) {
+        if (!StringUtils.hasText(cardId)) {
+            return "";
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT name
+            FROM cards
+            WHERE card_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? asString(rs.getString("name")) : "",
+            cardId
+        );
     }
 
     /**
@@ -7282,6 +8072,32 @@ public class MatchActionService {
             // 解析失敗時視為無費用，避免對戰流程中斷
         }
         return cost;
+    }
+
+    /**
+     * 套用常駐減費後的藝能 Cheer 成本。
+     */
+    private Map<String, Integer> applyArtCheerCostReduction(
+        Map<String, Integer> baseCost,
+        Map<String, Integer> reduction
+    ) {
+        Map<String, Integer> effectiveCost = new LinkedHashMap<>();
+        if (baseCost == null || baseCost.isEmpty()) {
+            return effectiveCost;
+        }
+        for (Map.Entry<String, Integer> entry : baseCost.entrySet()) {
+            String color = normalizeZone(entry.getKey());
+            int required = entry.getValue() == null ? 0 : entry.getValue();
+            if (!StringUtils.hasText(color) || required <= 0) {
+                continue;
+            }
+            int reducedBy = reduction == null ? 0 : Math.max(0, reduction.getOrDefault(color, 0));
+            int effectiveRequired = Math.max(required - reducedBy, 0);
+            if (effectiveRequired > 0) {
+                effectiveCost.put(color, effectiveRequired);
+            }
+        }
+        return effectiveCost;
     }
 
     /**
@@ -7763,6 +8579,106 @@ public class MatchActionService {
         );
     }
 
+    private TargetHolomem loadOpponentCollabTargetHolomem(Long matchId, Long opponentUserId) {
+        if (opponentUserId == null) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT h.id, h.match_card_id, h.card_id, h.zone, m.main_color
+            FROM match_holomems h
+            JOIN member_cards m ON m.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone = 'COLLAB'
+            ORDER BY h.id
+            LIMIT 1
+            """,
+            rs -> rs.next()
+                ? new TargetHolomem(
+                    rs.getLong("id"),
+                    rs.getLong("match_card_id"),
+                    rs.getString("card_id"),
+                    normalizeZone(rs.getString("zone")),
+                    normalizeZone(rs.getString("main_color"))
+                )
+                : null,
+            matchId,
+            opponentUserId
+        );
+    }
+
+    private boolean hasPassiveGiftTargetRestrictionToCollab(Long matchId, Long ownerUserId) {
+        if (matchId == null || ownerUserId == null) {
+            return false;
+        }
+        List<String> passiveTexts = jdbcTemplate.query(
+            """
+            SELECT mc.passive_effect_json::text AS passive_text
+            FROM match_holomems h
+            JOIN member_cards mc ON mc.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone = 'COLLAB'
+              AND mc.passive_effect_json IS NOT NULL
+              AND mc.passive_effect_json::text LIKE '%相手のホロメンのアーツは%'
+              AND mc.passive_effect_json::text LIKE '%自分のコラボホロメンしか対象にできない%'
+            """,
+            (rs, rowNum) -> rs.getString("passive_text"),
+            matchId,
+            ownerUserId
+        );
+        for (String passiveText : passiveTexts) {
+            if (!StringUtils.hasText(passiveText)) {
+                continue;
+            }
+            String requiredCenterTag = extractRequiredCenterTagForPassiveTargetRestriction(passiveText);
+            if (StringUtils.hasText(requiredCenterTag)
+                && !hasCenterHolomemWithTag(matchId, ownerUserId, requiredCenterTag)) {
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private String extractRequiredCenterTagForPassiveTargetRestriction(String passiveText) {
+        if (!StringUtils.hasText(passiveText)) {
+            return "";
+        }
+        Matcher matcher = CENTER_TAG_REQUIREMENT_PATTERN.matcher(passiveText);
+        if (!matcher.find()) {
+            return "";
+        }
+        String tagToken = matcher.group(1);
+        if (!StringUtils.hasText(tagToken)) {
+            return "";
+        }
+        return "#" + tagToken.trim();
+    }
+
+    private boolean hasCenterHolomemWithTag(Long matchId, Long ownerUserId, String requiredTag) {
+        if (matchId == null || ownerUserId == null || !StringUtils.hasText(requiredTag)) {
+            return false;
+        }
+        Integer count = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone = 'CENTER'
+              AND jsonb_exists(COALESCE(c.tags_json, '[]'::jsonb), ?)
+            """,
+            Integer.class,
+            matchId,
+            ownerUserId,
+            requiredTag
+        );
+        return count != null && count > 0;
+    }
+
     /**
      * 將日文顏色 token 轉為系統色碼。
      */
@@ -7794,6 +8710,23 @@ public class MatchActionService {
         } catch (NumberFormatException ignored) {
             return 0;
         }
+    }
+
+    private String normalizeDigits(String text) {
+        if (!StringUtils.hasText(text)) {
+            return "";
+        }
+        return text
+            .replace('０', '0')
+            .replace('１', '1')
+            .replace('２', '2')
+            .replace('３', '3')
+            .replace('４', '4')
+            .replace('５', '5')
+            .replace('６', '6')
+            .replace('７', '7')
+            .replace('８', '8')
+            .replace('９', '9');
     }
 
     /**
@@ -7945,6 +8878,52 @@ public class MatchActionService {
     }
 
     private record ArtCritical(String color, int bonus) {
+    }
+
+    private record HoloxSlotRevealSummary(
+        boolean revealApplied,
+        List<Long> revealedCardInstanceIds,
+        List<String> revealedCardIds,
+        int revealedHolomemCount,
+        int artBonus,
+        List<Long> archivedCardInstanceIds,
+        List<String> archivedCardIds,
+        List<Long> archivedSupportCardInstanceIds,
+        List<String> archivedSupportCardIds,
+        boolean revealedAllMembersSameBloomLevel,
+        Integer sharedBloomLevel
+    ) {
+        private static HoloxSlotRevealSummary empty() {
+            return new HoloxSlotRevealSummary(
+                false,
+                List.of(),
+                List.of(),
+                0,
+                0,
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                false,
+                null
+            );
+        }
+
+        private Map<String, Object> toPayload() {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("revealApplied", revealApplied);
+            payload.put("revealedCardInstanceIds", revealedCardInstanceIds);
+            payload.put("revealedCardIds", revealedCardIds);
+            payload.put("revealedHolomemCount", revealedHolomemCount);
+            payload.put("artBonus", artBonus);
+            payload.put("archivedCardInstanceIds", archivedCardInstanceIds);
+            payload.put("archivedCardIds", archivedCardIds);
+            payload.put("archivedSupportCardInstanceIds", archivedSupportCardInstanceIds);
+            payload.put("archivedSupportCardIds", archivedSupportCardIds);
+            payload.put("revealedAllMembersSameBloomLevel", revealedAllMembersSameBloomLevel);
+            payload.put("sharedBloomLevel", sharedBloomLevel);
+            return payload;
+        }
     }
 
     private record FollowupInteractionDecision(

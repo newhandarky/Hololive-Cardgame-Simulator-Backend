@@ -499,6 +499,7 @@ public class MatchGameStateService {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
             """
             SELECT h.match_card_id AS card_instance_id,
+                   h.owner_user_id,
                    h.id AS holomem_id,
                    h.damage_taken,
                    m.hp AS base_max_hp,
@@ -554,10 +555,11 @@ public class MatchGameStateService {
                 continue;
             }
             Long holomemId = toLong(stats.get("holomem_id"));
+            Long ownerUserId = toLong(stats.get("owner_user_id"));
             Integer damageTaken = toNullableInt(stats.get("damage_taken"));
             Integer baseMaxHp = toNullableInt(stats.get("base_max_hp"));
             int hpBonus = matchEffectService.resolveAttachedSupportHpBonus(matchId, holomemId)
-                + matchEffectService.resolvePassiveGiftHpBonus(matchId, candidate.getOwnerUserId(), holomemId);
+                + matchEffectService.resolvePassiveGiftHpBonus(matchId, ownerUserId, holomemId);
             int adjustedMaxHp = Math.max((baseMaxHp == null ? 0 : baseMaxHp) + hpBonus, 0);
             int adjustedCurrentHp = Math.max(adjustedMaxHp - (damageTaken == null ? 0 : damageTaken), 0);
             candidate.setCurrentHp(adjustedCurrentHp);

@@ -39,7 +39,10 @@ public class GiftTriggerMatcher {
             return false;
         }
         return switch (triggerType) {
-            case "ART_USED" -> giftText.contains("アーツ") && giftText.contains("使った時");
+            case "ART_USED" -> (giftText.contains("アーツ")
+                && (giftText.contains("使った時") || giftText.contains("公開した時")))
+                || (giftText.contains("特殊ダメージ") && giftText.contains("与えた時"));
+            case "DAMAGE_RECEIVED" -> giftText.contains("ダメージを受ける時");
             case "OPPONENT_DOWNED" -> giftText.contains("ダウン") && giftText.contains("時") && !giftText.contains("このホロメンがダウンした時");
             case "SELF_DOWNED" -> giftText.contains("このホロメンがダウンした時")
                 || (giftText.contains("ダウンした時")
@@ -52,6 +55,7 @@ public class GiftTriggerMatcher {
             case "COLLAB" -> giftText.contains("コラボした時");
             case "BATON_TOUCH_BACK" -> giftText.contains("バトンタッチ") && giftText.contains("バックポジションに移動した時");
             case "PERFORMANCE_START_SELF" -> giftText.contains("自分のパフォーマンスステップが開始する時");
+            case "MAIN_STEP_SELF" -> giftText.contains("自分のメインステップ");
             case "PERFORMANCE_START_OPPONENT" -> giftText.contains("相手のパフォーマンスステップが開始する時");
             case "PERFORMANCE_END_SELF" -> giftText.contains("自分のパフォーマンスステップが終了する時");
             case "PERFORMANCE_END_OPPONENT" -> giftText.contains("相手のパフォーマンスステップが終了する時");
@@ -75,14 +79,11 @@ public class GiftTriggerMatcher {
         }
         boolean centerLimited = giftText.contains("センターポジション限定");
         boolean collabLimited = giftText.contains("コラボポジション限定");
-        if (centerLimited && collabLimited) {
-            return "CENTER".equals(holderZone) || "COLLAB".equals(holderZone);
-        }
-        if (centerLimited) {
-            return "CENTER".equals(holderZone);
-        }
-        if (collabLimited) {
-            return "COLLAB".equals(holderZone);
+        boolean backLimited = giftText.contains("バックポジション限定");
+        if (centerLimited || collabLimited || backLimited) {
+            return (centerLimited && "CENTER".equals(holderZone))
+                || (collabLimited && "COLLAB".equals(holderZone))
+                || (backLimited && "BACK".equals(holderZone));
         }
         return true;
     }

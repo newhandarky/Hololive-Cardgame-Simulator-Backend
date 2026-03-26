@@ -3,6 +3,8 @@ package com.hololive.cardgame.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
 import com.hololive.cardgame.dto.AttachCheerActionRequest;
 import com.hololive.cardgame.dto.AttackArtActionRequest;
@@ -32,6 +34,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.annotation.Transactional;
 
 @SpringBootTest
@@ -2906,6 +2909,153 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
     }
 
     @Test
+    void bloomShouldAllowOfficialGiftHbp01045IgnoreBloomLevelWhenLifeAtMostThree() {
+        StartedMatchContext context = createStartedMatch("bloom-hbp01045-host", "bloom-hbp01045-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP01-045',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            hostCenterCardInstanceId,
+            matchId,
+            hostId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP01-045',
+                current_level = 'DEBUT',
+                entered_turn_number = 0,
+                last_bloom_turn = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET current_life = 3,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            matchId,
+            hostId
+        );
+
+        Long secondBloomInHand = insertCardIntoHand(matchId, hostId, "HBP01-047");
+        BloomActionRequest bloom = new BloomActionRequest();
+        bloom.setBloomCardInstanceId(secondBloomInHand);
+        bloom.setTargetHolomemCardInstanceId(hostCenterCardInstanceId);
+        matchActionService.bloom(matchId, hostId, bloom);
+
+        Map<String, Object> centerAfter = jdbcTemplate.queryForMap(
+            """
+            SELECT card_id, current_level, match_card_id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'CENTER'
+            LIMIT 1
+            """,
+            matchId,
+            hostId
+        );
+        assertThat(centerAfter.get("card_id")).isEqualTo("HBP01-047");
+        assertThat(centerAfter.get("current_level")).isEqualTo("SECOND");
+        assertThat(((Number) centerAfter.get("match_card_id")).longValue()).isEqualTo(secondBloomInHand);
+
+        String payload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'BLOOM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+        assertThat(payload).containsPattern("\"bloomLevelOverrideApplied\"\\s*:\\s*true");
+        assertThat(payload).contains("HBP01-045");
+        assertThat(payload).contains("HBP01-047");
+    }
+
+    @Test
+    void bloomShouldNotAllowOfficialGiftHbp01045IgnoreBloomLevelWhenLifeAboveThree() {
+        StartedMatchContext context = createStartedMatch("bloom-hbp01045-fail-host", "bloom-hbp01045-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP01-045',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            hostCenterCardInstanceId,
+            matchId,
+            hostId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP01-045',
+                current_level = 'DEBUT',
+                entered_turn_number = 0,
+                last_bloom_turn = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET current_life = 4,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            matchId,
+            hostId
+        );
+
+        Long secondBloomInHand = insertCardIntoHand(matchId, hostId, "HBP01-047");
+        BloomActionRequest bloom = new BloomActionRequest();
+        bloom.setBloomCardInstanceId(secondBloomInHand);
+        bloom.setTargetHolomemCardInstanceId(hostCenterCardInstanceId);
+
+        assertThatThrownBy(() -> matchActionService.bloom(matchId, hostId, bloom))
+            .isInstanceOf(GameRuleException.class)
+            .hasMessageContaining("BLOOM 只能依序遞進");
+    }
+
+    @Test
     void bloomShouldAllowOfficialGiftHsd10004ToGrantSecondBloomWhenConditionsSatisfied() {
         StartedMatchContext context = createStartedMatch("bloom-hsd10004-host", "bloom-hsd10004-guest");
         Long matchId = context.matchId();
@@ -3488,7 +3638,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             """
             UPDATE matches
             SET turn_number = 2,
-                current_phase = 'MAIN',
+                current_phase = 'PERFORMANCE',
                 current_turn_player_id = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
@@ -3496,9 +3646,28 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             hostId,
             matchId
         );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_pending_decisions
+            SET status = 'RESOLVED',
+                resolved_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND status = 'PENDING'
+            """,
+            matchId
+        );
         entityManager.clear();
-
-        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
 
         AttackArtActionRequest attack = new AttackArtActionRequest();
         attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
@@ -3548,6 +3717,242 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         assertThat(payloadText).containsPattern("\"downEvent\"\\s*:\\s*\\{");
         assertThat(payloadText).containsPattern("\"deferred\"\\s*:\\s*true");
         assertThat(payloadText).containsPattern("\"appliedLifeLoss\"\\s*:\\s*0");
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialExtraLifeLossForHbp02041WhenSelfDowned() {
+        StartedMatchContext context = createStartedMatch("hbp02041-down-host", "hbp02041-down-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id IN (?, ?)
+            """,
+            matchId,
+            hostId,
+            guestId
+        );
+
+        Long hostCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            200,
+            "RED",
+            240,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":240,\"rawHeader\":\"測試藝能 240\"}",
+            0,
+            "RED",
+            "hbp02041-down-host-center"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP02-041",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        int lifeBefore = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeBefore).isGreaterThanOrEqualTo(3);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_phase = 'PERFORMANCE',
+                current_turn_player_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_pending_decisions
+            SET status = 'RESOLVED',
+                resolved_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND status = 'PENDING'
+            """,
+            matchId
+        );
+        entityManager.clear();
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        int lifeAfterAttack = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterAttack).isEqualTo(lifeBefore - 1);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("HBP02-041");
+        assertThat(pendingContextText).containsPattern("\"sectionType\"\\s*:\\s*\"DOWN_EVENT\"");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int lifeAfterConfirm = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterConfirm).isEqualTo(lifeBefore - 3);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialExtraLifeLossForHbp03022WhenSelfDowned() {
+        StartedMatchContext context = createStartedMatch("hbp03022-down-host", "hbp03022-down-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id IN (?, ?)
+            """,
+            matchId,
+            hostId,
+            guestId
+        );
+
+        Long hostCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            200,
+            "RED",
+            260,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":260,\"rawHeader\":\"測試藝能 260\"}",
+            0,
+            "RED",
+            "hbp03022-down-host-center"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-022",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        int lifeBefore = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeBefore).isGreaterThanOrEqualTo(3);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_phase = 'PERFORMANCE',
+                current_turn_player_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_pending_decisions
+            SET status = 'RESOLVED',
+                resolved_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND status = 'PENDING'
+            """,
+            matchId
+        );
+        entityManager.clear();
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        int lifeAfterAttack = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterAttack).isEqualTo(lifeBefore - 1);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("HBP03-022");
+        assertThat(pendingContextText).containsPattern("\"sectionType\"\\s*:\\s*\"DOWN_EVENT\"");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int lifeAfterConfirm = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterConfirm).isEqualTo(lifeBefore - 3);
     }
 
     @Test
@@ -6541,6 +6946,22 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             hostId,
             cheerCardId
         );
+        Long attachedCheerInstanceId = jdbcTemplate.queryForObject(
+            """
+            SELECT id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND card_id = ?
+              AND zone = 'STAGE'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            Long.class,
+            matchId,
+            hostId,
+            cheerCardId
+        );
 
         Long centerHolomemId = jdbcTemplate.queryForObject(
             """
@@ -6572,10 +6993,11 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         );
         jdbcTemplate.update(
             """
-            INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down)
-            VALUES (?, ?, FALSE)
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
             """,
             centerHolomemId,
+            attachedCheerInstanceId,
             cheerCardId
         );
 
@@ -6583,6 +7005,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         request.setBloomCardInstanceId(bloomCardInstanceId);
         request.setTargetHolomemCardInstanceId(targetBackCardInstanceId);
         matchActionService.bloom(matchId, hostId, request);
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
 
         Integer centerCheerAfter = jdbcTemplate.queryForObject(
             "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
@@ -6594,9 +7017,6 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             Integer.class,
             backHolomemId
         );
-        assertThat(centerCheerAfter).isZero();
-        assertThat(backCheerAfter).isGreaterThanOrEqualTo(1);
-
         String payload = jdbcTemplate.queryForObject(
             """
             SELECT payload::text
@@ -6611,7 +7031,24 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             matchId,
             hostId
         );
+        String executedTriggerPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+        assertThat(backCheerAfter).isGreaterThanOrEqualTo(1);
         assertThat(payload).contains("REATTACH");
+        assertThat(executedTriggerPayload).contains("\"effectType\": \"REATTACH\"");
+        assertThat(executedTriggerPayload).contains("\"moveApplied\": 1");
     }
 
     @Test
@@ -9617,6 +10054,156 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             backCardInstanceId
         );
         assertThat(backZone.getCards().get(0).getMaxHp()).isEqualTo((baseHp == null ? 0 : baseHp) + 20);
+    }
+
+    @Test
+    void playSupportShouldAllowTwoDifferentMascotsForOfficialGiftHbp02013() {
+        StartedMatchContext context = createStartedMatch("support-hbp02013-two-mascots-host", "support-hbp02013-two-mascots-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP02-013',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP02-013',
+                current_level = 'SECOND',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+
+        Long mascotA = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "THBP02013_MASCOT_A_" + System.nanoTime(),
+            "HBP02-013 測試マスコット A",
+            false,
+            "BUFF",
+            "{\"type\":\"BUFF\",\"rawText\":\"カードタイプ\\nサポート・マスコット\\n測試 A。\"}",
+            "SELF"
+        );
+        Long mascotB = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "THBP02013_MASCOT_B_" + System.nanoTime(),
+            "HBP02-013 測試マスコット B",
+            false,
+            "BUFF",
+            "{\"type\":\"BUFF\",\"rawText\":\"カードタイプ\\nサポート・マスコット\\n測試 B。\"}",
+            "SELF"
+        );
+
+        PlaySupportActionRequest first = new PlaySupportActionRequest();
+        first.setCardInstanceId(mascotA);
+        first.setTargetHolomemCardInstanceId(hostCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, first);
+
+        PlaySupportActionRequest second = new PlaySupportActionRequest();
+        second.setCardInstanceId(mascotB);
+        second.setTargetHolomemCardInstanceId(hostCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, second);
+
+        Integer mascotCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomem_supports
+            WHERE match_holomem_id = ?
+              AND support_type = 'MASCOT'
+            """,
+            Integer.class,
+            hostCenterHolomemId
+        );
+        assertThat(mascotCount).isEqualTo(2);
+    }
+
+    @Test
+    void playSupportShouldRejectSameNameSecondMascotForOfficialGiftHbp02013() {
+        StartedMatchContext context = createStartedMatch("support-hbp02013-same-name-host", "support-hbp02013-same-name-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP02-013',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP02-013',
+                current_level = 'SECOND',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+
+        String sharedSupportName = "HBP02-013 同名マスコット";
+        Long mascotA = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "THBP02013_SAME_A_" + System.nanoTime(),
+            sharedSupportName,
+            false,
+            "BUFF",
+            "{\"type\":\"BUFF\",\"rawText\":\"カードタイプ\\nサポート・マスコット\\n同名 A。\"}",
+            "SELF"
+        );
+        Long mascotB = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "THBP02013_SAME_B_" + System.nanoTime(),
+            sharedSupportName,
+            false,
+            "BUFF",
+            "{\"type\":\"BUFF\",\"rawText\":\"カードタイプ\\nサポート・マスコット\\n同名 B。\"}",
+            "SELF"
+        );
+
+        PlaySupportActionRequest first = new PlaySupportActionRequest();
+        first.setCardInstanceId(mascotA);
+        first.setTargetHolomemCardInstanceId(hostCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, first);
+
+        PlaySupportActionRequest second = new PlaySupportActionRequest();
+        second.setCardInstanceId(mascotB);
+        second.setTargetHolomemCardInstanceId(hostCenterCardInstanceId);
+        assertThatThrownBy(() -> matchActionService.playSupport(matchId, hostId, second))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("必須是不同卡名");
     }
 
     @Test
@@ -12938,6 +13525,757 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
     }
 
     @Test
+    void attackArtShouldTriggerOfficialGiftHbp06027AndGrantExtraBloomAllowance() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06027-host", "gift-hbp06027-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            210,
+            "GREEN",
+            240,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":240}",
+            0,
+            "GREEN",
+            "THBP06027_ATTACKER"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            "HBP06-027",
+            matchId,
+            hostId,
+            attackerCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'SECOND',
+                last_bloom_turn = 2,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            "HBP06-027",
+            matchId,
+            hostId,
+            attackerCardInstanceId
+        );
+
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        attachPrimaryArtCostFromCheerDeck(matchId, hostId, attackerCardInstanceId);
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("HBP06-027");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"OPPONENT_DOWNED\"");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        Integer allowanceCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'ALLOW_EXTRA_BLOOM'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        String allowancePayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'ALLOW_EXTRA_BLOOM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+        assertThat(allowanceCount).isEqualTo(1);
+        assertThat(allowancePayloadText).containsPattern("\"targetCardId\"\\s*:\\s*\"HBP06-027\"");
+    }
+
+    @Test
+    void attackArtShouldNotTriggerOfficialGiftHbp06027WhenAnotherAllyDownsOpponent() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06027-no-self-host", "gift-hbp06027-no-self-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long giftHolderCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-027",
+            "BACK",
+            "SECOND",
+            0
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET last_bloom_turn = 2,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            giftHolderCardInstanceId
+        );
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "GREEN",
+            240,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":240}",
+            0,
+            "GREEN",
+            "THBP06027_OTHER_ATTACKER"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer pendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        Integer allowanceCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'ALLOW_EXTRA_BLOOM'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        assertThat(pendingCount).isZero();
+        assertThat(allowanceCount).isZero();
+    }
+
+    @Test
+    void attackArtShouldReattachLunaKnightForOfficialGiftHbp06030WhenCenterDownedOnOpponentTurn() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06030-host", "gift-hbp06030-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-030",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        Long hostBackLunaCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-029",
+            "BACK",
+            "FIRST",
+            0
+        );
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        Long hostBackLunaHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostBackLunaCardInstanceId);
+
+        String lunaknightCheerCardId = "THBP06030_LUNAKNIGHT_" + System.nanoTime();
+        jdbcTemplate.update(
+            """
+            INSERT INTO cards (card_id, name, card_type, created_at, updated_at)
+            VALUES (?, ?, 'CHEER', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            lunaknightCheerCardId,
+            "測試ルーナイト"
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO cheer_cards (card_id, color, created_at, updated_at)
+            VALUES (?, 'GREEN', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            lunaknightCheerCardId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
+            VALUES (?, ?, ?, 'STAGE', NULL, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            matchId,
+            hostId,
+            lunaknightCheerCardId
+        );
+        Long lunaknightCheerInstanceId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND card_id = ?
+              AND zone = 'STAGE'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId,
+            lunaknightCheerCardId
+        );
+        assertThat(lunaknightCheerInstanceId).isNotNull();
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
+            """,
+            hostCenterHolomemId,
+            lunaknightCheerInstanceId,
+            lunaknightCheerCardId
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            guestId,
+            "CENTER",
+            180,
+            "RED",
+            260,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":260}",
+            0,
+            "RED",
+            "THBP06030_ATTACKER"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            guestId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, guestId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(hostCenterCardInstanceId);
+        matchActionService.attackArt(matchId, guestId, attack);
+
+        String lunaknightCheerZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            lunaknightCheerInstanceId
+        );
+        Integer attachedToBackLunaCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomem_cheers
+            WHERE match_holomem_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            hostBackLunaHolomemId,
+            lunaknightCheerInstanceId
+        );
+        assertThat(lunaknightCheerZone).isEqualTo("STAGE");
+        assertThat(attachedToBackLunaCount).isEqualTo(1);
+    }
+
+    @Test
+    void attackArtShouldArchiveLunaKnightWhenOfficialGiftHbp06030IsNotInCollab() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06030-no-collab-host", "gift-hbp06030-no-collab-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-030",
+            "BACK",
+            "FIRST",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-029",
+            "BACK",
+            "FIRST",
+            0
+        );
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+
+        String lunaknightCheerCardId = "THBP06030_LUNAKNIGHT_NC_" + System.nanoTime();
+        jdbcTemplate.update(
+            """
+            INSERT INTO cards (card_id, name, card_type, created_at, updated_at)
+            VALUES (?, ?, 'CHEER', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            lunaknightCheerCardId,
+            "測試ルーナイト"
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO cheer_cards (card_id, color, created_at, updated_at)
+            VALUES (?, 'GREEN', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            lunaknightCheerCardId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
+            VALUES (?, ?, ?, 'STAGE', NULL, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            matchId,
+            hostId,
+            lunaknightCheerCardId
+        );
+        Long lunaknightCheerInstanceId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND card_id = ?
+              AND zone = 'STAGE'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId,
+            lunaknightCheerCardId
+        );
+        assertThat(lunaknightCheerInstanceId).isNotNull();
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
+            """,
+            hostCenterHolomemId,
+            lunaknightCheerInstanceId,
+            lunaknightCheerCardId
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            guestId,
+            "CENTER",
+            180,
+            "RED",
+            260,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":260}",
+            0,
+            "RED",
+            "THBP06030_ATTACKER_NC"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            guestId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, guestId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(hostCenterCardInstanceId);
+        matchActionService.attackArt(matchId, guestId, attack);
+
+        String lunaknightCheerZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            lunaknightCheerInstanceId
+        );
+        assertThat(lunaknightCheerZone).isEqualTo("ARCHIVE");
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHbp04013WhenSelfDownsOpponent() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04013-host", "gift-hbp04013-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            200,
+            "WHITE",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "WHITE",
+            "THBP04013_ATTACKER"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            "HBP04-013",
+            matchId,
+            hostId,
+            attackerCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'SECOND',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            "HBP04-013",
+            matchId,
+            hostId,
+            attackerCardInstanceId
+        );
+
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        attachPrimaryArtCostFromCheerDeck(matchId, hostId, attackerCardInstanceId);
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("HBP04-013");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"OPPONENT_DOWNED\"");
+
+        Long triggerConfirmDecisionId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId
+        );
+        assertThat(triggerConfirmDecisionId).isNotNull();
+        Long selectedCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT (context_json->'candidateCardInstanceIds'->>0)::bigint AS selected_card_instance_id
+            FROM match_pending_decisions
+            WHERE id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("selected_card_instance_id") : null,
+            triggerConfirmDecisionId
+        );
+        assertThat(selectedCardInstanceId).isNotNull();
+        ResolveDecisionRequest resolveTriggerConfirm = new ResolveDecisionRequest();
+        resolveTriggerConfirm.setDecisionId(triggerConfirmDecisionId);
+        resolveTriggerConfirm.setSelectedCardInstanceIds(List.of(selectedCardInstanceId));
+        matchActionService.resolveDecision(matchId, hostId, resolveTriggerConfirm);
+
+        Integer pendingAfterConfirm = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        assertThat(pendingAfterConfirm).isZero();
+    }
+
+    @Test
+    void attackArtShouldNotTriggerOfficialGiftHbp04013WhenAnotherAllyDownsOpponent() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04013-fail-host", "gift-hbp04013-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP04-013",
+            "BACK",
+            "SECOND",
+            0
+        );
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            200,
+            "WHITE",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "WHITE",
+            "THBP04013_OTHER_ATTACKER"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int hostDeckBefore = countZone(matchId, hostId, "DECK");
+        int hostHandBefore = countZone(matchId, hostId, "HAND");
+        int hostHolopowerBefore = countZone(matchId, hostId, "HOLOPOWER");
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer pendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        assertThat(pendingCount).isZero();
+        assertThat(countZone(matchId, hostId, "DECK")).isEqualTo(hostDeckBefore);
+        assertThat(countZone(matchId, hostId, "HAND")).isEqualTo(hostHandBefore);
+        assertThat(countZone(matchId, hostId, "HOLOPOWER")).isEqualTo(hostHolopowerBefore);
+    }
+
+    @Test
     void attackArtShouldTriggerOfficialGiftHbp05023UsingArchiveCheerAndTaggedTarget() {
         StartedMatchContext context = createStartedMatch("gift-hbp05023-host", "gift-hbp05023-guest");
         Long matchId = context.matchId();
@@ -13530,6 +14868,1036 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*0");
         assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*30");
         assertThat(guestDamageTaken).isEqualTo(30);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp05013WhenCenterHolderAttacksSelf() {
+        StartedMatchContext context = createStartedMatch("passive-hbp05013-center-host", "passive-hbp05013-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String holderCardId = createMemberCardDefinition(
+            "THBP05013_CENTER",
+            "HBP05-013 中心測試",
+            "DEBUT",
+            180,
+            "WHITE",
+            "{\"キーワード\":\"ギフトRay of Jewelry \\n[センターポジション・コラボポジション限定]自分のステージの#0期生を持つホロメン全員のアーツ+30。\"}"
+        );
+        insertPrimaryArtForMember(
+            holderCardId,
+            "測試藝能 30",
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":30,\"rawHeader\":\"測試藝能 30\"}"
+        );
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#0期生\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            holderCardId
+        );
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            holderCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            holderCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer guestDamageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*60");
+        assertThat(guestDamageTaken).isEqualTo(60);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp05013WhenCollabHolderBuffsCenterHolomem() {
+        StartedMatchContext context = createStartedMatch("passive-hbp05013-collab-host", "passive-hbp05013-collab-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String attackerCardId = createMemberCardDefinition("THBP05013_ATK", "HBP05-013 受益中心", "DEBUT", 160, "WHITE");
+        insertPrimaryArtForMember(
+            attackerCardId,
+            "測試藝能 30",
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":30,\"rawHeader\":\"測試藝能 30\"}"
+        );
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#0期生\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            attackerCardId
+        );
+        String holderCardId = createMemberCardDefinition(
+            "THBP05013_COLLAB",
+            "HBP05-013 Collab Holder",
+            "DEBUT",
+            170,
+            "WHITE",
+            "{\"キーワード\":\"ギフトRay of Jewelry \\n[センターポジション・コラボポジション限定]自分のステージの#0期生を持つホロメン全員のアーツ+30。\"}"
+        );
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        createStageHolomemWithSingleCard(matchId, hostId, holderCardId, "COLLAB", "DEBUT", 0);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer guestDamageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*60");
+        assertThat(guestDamageTaken).isEqualTo(60);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp05013WhenHolderIsInBack() {
+        StartedMatchContext context = createStartedMatch("passive-hbp05013-back-host", "passive-hbp05013-back-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String attackerCardId = createMemberCardDefinition("THBP05013_BACK_ATK", "HBP05-013 Back 受益中心", "DEBUT", 160, "WHITE");
+        insertPrimaryArtForMember(
+            attackerCardId,
+            "測試藝能 30",
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":30,\"rawHeader\":\"測試藝能 30\"}"
+        );
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#0期生\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            attackerCardId
+        );
+        String holderCardId = createMemberCardDefinition(
+            "THBP05013_BACK",
+            "HBP05-013 Back Holder",
+            "DEBUT",
+            170,
+            "WHITE",
+            "{\"キーワード\":\"ギフトRay of Jewelry \\n[センターポジション・コラボポジション限定]自分のステージの#0期生を持つホロメン全員のアーツ+30。\"}"
+        );
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        createStageHolomemWithSingleCard(matchId, hostId, holderCardId, "BACK", "DEBUT", 0);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer guestDamageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*30");
+        assertThat(guestDamageTaken).isEqualTo(30);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp02009ArtBonusWhenTargetHasMascotAttached() {
+        StartedMatchContext context = createStartedMatch("passive-hbp02009-success-host", "passive-hbp02009-success-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String attackerCardId = createMemberCardDefinition("THBP02009_ATK", "HBP02-009 受益攻擊者", "DEBUT", 180, "WHITE");
+        insertPrimaryArtForMember(
+            attackerCardId,
+            "測試藝能 30",
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":30,\"rawHeader\":\"測試藝能 30\"}"
+        );
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        createStageHolomemWithSingleCard(matchId, hostId, "HBP02-009", "COLLAB", "DEBUT", 0);
+        attachDirectTestSupport(
+            matchId,
+            hostId,
+            hostCenterHolomemId,
+            "THBP02009_MASCOT_" + System.nanoTime(),
+            "HBP02-009 測試マスコット",
+            "MASCOT"
+        );
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer guestDamageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*10");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*40");
+        assertThat(guestDamageTaken).isEqualTo(40);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp02009ArtBonusWithoutMascotAttached() {
+        StartedMatchContext context = createStartedMatch("passive-hbp02009-no-mascot-host", "passive-hbp02009-no-mascot-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String attackerCardId = createMemberCardDefinition("THBP02009_NO_MASCOT_ATK", "HBP02-009 無 mascot 攻擊者", "DEBUT", 180, "WHITE");
+        insertPrimaryArtForMember(
+            attackerCardId,
+            "測試藝能 30",
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":30,\"rawHeader\":\"測試藝能 30\"}"
+        );
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        createStageHolomemWithSingleCard(matchId, hostId, "HBP02-009", "COLLAB", "DEBUT", 0);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer guestDamageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*30");
+        assertThat(guestDamageTaken).isEqualTo(30);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp03013ArtBonusWhenCollabHolderAndCenterLunaHasFan() {
+        StartedMatchContext context = createStartedMatch("passive-hbp03013-success-host", "passive-hbp03013-success-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String attackerCardId = createMemberCardDefinition("THBP03013_ATK", "姫森ルーナ", "DEBUT", 170, "WHITE");
+        insertPrimaryArtForMember(
+            attackerCardId,
+            "測試藝能 30",
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":30,\"rawHeader\":\"測試藝能 30\"}"
+        );
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        createStageHolomemWithSingleCard(matchId, hostId, "HBP03-013", "COLLAB", "FIRST", 0);
+        attachDirectTestSupport(
+            matchId,
+            hostId,
+            hostCenterHolomemId,
+            "THBP03013_FAN_" + System.nanoTime(),
+            "HBP03-013 測試ファン",
+            "FAN"
+        );
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer guestDamageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*50");
+        assertThat(guestDamageTaken).isEqualTo(50);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp03013ArtBonusWhenHolderIsNotCollab() {
+        StartedMatchContext context = createStartedMatch("passive-hbp03013-holder-zone-host", "passive-hbp03013-holder-zone-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String attackerCardId = createMemberCardDefinition("THBP03013_ZONE_ATK", "姫森ルーナ", "DEBUT", 170, "WHITE");
+        insertPrimaryArtForMember(
+            attackerCardId,
+            "測試藝能 30",
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":30,\"rawHeader\":\"測試藝能 30\"}"
+        );
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            attackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+
+        Long holderCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, "HBP03-013", "CENTER", "FIRST", 0);
+        Long holderHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, holderCardInstanceId);
+        attachDirectTestSupport(
+            matchId,
+            hostId,
+            holderHolomemId,
+            "THBP03013_ZONE_FAN_" + System.nanoTime(),
+            "HBP03-013 HOLDER FAN",
+            "FAN"
+        );
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        attachDirectTestSupport(
+            matchId,
+            hostId,
+            hostCenterHolomemId,
+            "THBP03013_ZONE_ATK_FAN_" + System.nanoTime(),
+            "HBP03-013 攻擊者 FAN",
+            "FAN"
+        );
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer guestDamageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*30");
+        assertThat(guestDamageTaken).isEqualTo(30);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHbp02039WhenHoloxSlotRevealsSupport() {
+        StartedMatchContext context = createStartedMatch("gift-hbp02039-host", "gift-hbp02039-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP02-039',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            attackerCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP02-039',
+                current_level = 'FIRST',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            attackerCardInstanceId
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "BLUE", "hbp02039-blue");
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "COLORLESS", "hbp02039-colorless");
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        Long revealedSupportA = insertSupportCardIntoDeckTop(
+            matchId,
+            hostId,
+            "THBP02039_SUP_A_" + System.nanoTime(),
+            "HBP02-039 公開支援 A",
+            false,
+            "DRAW",
+            "{\"type\":\"DRAW\",\"value\":1}",
+            "SELF"
+        );
+        String revealedMemberCardId = createMemberCardDefinition(
+            "THBP02039_MEMBER_" + System.nanoTime(),
+            "HBP02-039 公開ホロメン",
+            "DEBUT",
+            80,
+            "BLUE"
+        );
+        Long revealedMember = insertCardIntoDeckTop(matchId, hostId, revealedMemberCardId);
+        Long revealedSupportB = insertSupportCardIntoDeckTop(
+            matchId,
+            hostId,
+            "THBP02039_SUP_B_" + System.nanoTime(),
+            "HBP02-039 公開支援 B",
+            false,
+            "DRAW",
+            "{\"type\":\"DRAW\",\"value\":1}",
+            "SELF"
+        );
+        assertThat(revealedSupportA).isNotNull();
+        assertThat(revealedMember).isNotNull();
+        assertThat(revealedSupportB).isNotNull();
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String attackPayload = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        assertThat(attackPayload).contains("ホロックスロット");
+        assertThat(attackPayload).contains("holoxReveal");
+        assertThat(attackPayload).containsPattern("\"holoxRevealArtBonus\"\\s*:\\s*[1-9]\\d*");
+
+        int supportInHand = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_cards
+            WHERE id IN (?, ?)
+              AND zone = 'HAND'
+            """,
+            Integer.class,
+            revealedSupportA,
+            revealedSupportB
+        );
+        int supportInArchive = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_cards
+            WHERE id IN (?, ?)
+              AND zone = 'ARCHIVE'
+            """,
+            Integer.class,
+            revealedSupportA,
+            revealedSupportB
+        );
+        assertThat(supportInHand).isEqualTo(1);
+        assertThat(supportInArchive).isEqualTo(1);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHbp02040WhenHoloxSlotRevealsSameBloomLevelMembers() {
+        StartedMatchContext context = createStartedMatch("gift-hbp02040-host", "gift-hbp02040-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP02-040',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            attackerCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP02-040',
+                current_level = 'SECOND',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            attackerCardInstanceId
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 2, "BLUE", "hbp02040-blue");
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "COLORLESS", "hbp02040-colorless");
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = NULL,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            guestCenterCardInstanceId,
+            matchId,
+            guestId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = NULL,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'DECK'
+            """,
+            matchId,
+            hostId
+        );
+
+        String revealMemberA = createMemberCardDefinition(
+            "THBP02040_MEMBER_A_" + System.nanoTime(),
+            "HBP02-040 公開 member A",
+            "DEBUT",
+            80,
+            "BLUE"
+        );
+        String revealMemberB = createMemberCardDefinition(
+            "THBP02040_MEMBER_B_" + System.nanoTime(),
+            "HBP02-040 公開 member B",
+            "DEBUT",
+            80,
+            "BLUE"
+        );
+        String revealMemberC = createMemberCardDefinition(
+            "THBP02040_MEMBER_C_" + System.nanoTime(),
+            "HBP02-040 公開 member C",
+            "DEBUT",
+            80,
+            "BLUE"
+        );
+        String revealMemberD = createMemberCardDefinition(
+            "THBP02040_MEMBER_D_" + System.nanoTime(),
+            "HBP02-040 公開 member D",
+            "DEBUT",
+            80,
+            "BLUE"
+        );
+        insertCardIntoDeckTop(matchId, hostId, revealMemberA);
+        insertCardIntoDeckTop(matchId, hostId, revealMemberB);
+        insertCardIntoDeckTop(matchId, hostId, revealMemberC);
+        insertCardIntoDeckTop(matchId, hostId, revealMemberD);
+
+        int lifeBefore = countZone(matchId, guestId, "LIFE");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        int lifeAfter = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfter).isEqualTo(lifeBefore - 2);
+
+        String attackPayload = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        assertThat(attackPayload).contains("\"hbp02040LifeLoss\"");
+        assertThat(attackPayload).contains("\"HBP02040_LIFE_LOSS\"");
+        assertThat(attackPayload).containsPattern("\"hbp02040LifeLoss\"\\s*:\\s*\\{[^\\{\\}]*\"applied\"\\s*:\\s*true");
+        assertThat(attackPayload).containsPattern("\"revealedAllMembersSameBloomLevel\"\\s*:\\s*true");
     }
 
     @Test
@@ -14385,6 +16753,1338 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
     }
 
     @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp05065DamageReductionFortyWhenDiceOdd() {
+        Mockito.when(diceService.rollD6()).thenReturn(1);
+
+        StartedMatchContext context = createStartedMatch("gift-hbp05065-odd-host", "gift-hbp05065-odd-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP05-065",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+
+        String durableTargetCardId = createMemberCardDefinition("THBP05065_ODD_TGT", "HBP05-065 奇數減傷目標", "DEBUT", 300, "YELLOW");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "T5065OD"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*40");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*40");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*60");
+        assertThat(damageTaken).isEqualTo(60);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp05065DamageReductionTwentyWhenDiceEven() {
+        Mockito.when(diceService.rollD6()).thenReturn(6);
+
+        StartedMatchContext context = createStartedMatch("gift-hbp05065-even-host", "gift-hbp05065-even-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP05-065",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+
+        String durableTargetCardId = createMemberCardDefinition("THBP05065_EVEN_TGT", "HBP05-065 偶數減傷目標", "DEBUT", 300, "YELLOW");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "T5065EV"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*80");
+        assertThat(damageTaken).isEqualTo(80);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHbp05069PreventDamageWhenHolderIsBack() {
+        StartedMatchContext context = createStartedMatch("gift-hbp05069-back-host", "gift-hbp05069-back-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestBackCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP05-069",
+            "BACK",
+            "FIRST",
+            0
+        );
+        Long guestBackHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestBackCardInstanceId);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "T5069B"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestBackCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestBackHolomemId
+        );
+        String triggerPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'DAMAGE_RECEIVED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+
+        assertThat(damageTaken).isZero();
+        assertThat(triggerPayloadText).contains("HBP05-069");
+        assertThat(triggerPayloadText).containsPattern("\"preventedDamage\"\\s*:\\s*true");
+    }
+
+    @Test
+    void attackArtShouldNotTriggerOfficialGiftHbp05069PreventDamageWhenHolderIsNotBack() {
+        StartedMatchContext context = createStartedMatch("gift-hbp05069-center-host", "gift-hbp05069-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP05-069',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP05-069',
+                current_level = 'FIRST',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "T5069C"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+        Integer triggerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'DAMAGE_RECEIVED'
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+
+        assertThat(damageTaken).isEqualTo(100);
+        assertThat(triggerCount).isZero();
+    }
+
+    @Test
+    void attackArtShouldPreventDamageByOfficialGiftHbp06039WhenOwnCollabExistsAndOpponentCollabMissing() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06039-ok-host", "gift-hbp06039-ok-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-039",
+            "CENTER",
+            "SECOND",
+            0
+        );
+        String hostCollabCardId = createMemberCardDefinition("THBP06039_OK_COLLAB", "HBP06-039 測試目標", "DEBUT", 260, "WHITE");
+        Long hostCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            hostCollabCardId,
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+        Long hostCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCollabCardInstanceId);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            guestId,
+            "CENTER",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "T6039OK"
+        );
+        assertThat(hostCenterCardInstanceId).isNotNull();
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            guestId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, guestId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(hostCollabCardInstanceId);
+        matchActionService.attackArt(matchId, guestId, attack);
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            hostCollabHolomemId
+        );
+        String triggerPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'DAMAGE_RECEIVED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+
+        assertThat(damageTaken).isZero();
+        assertThat(triggerPayloadText).contains("HBP06-039");
+        assertThat(triggerPayloadText).containsPattern("\"preventedDamage\"\\s*:\\s*true");
+    }
+
+    @Test
+    void attackArtShouldNotPreventDamageByOfficialGiftHbp06039WhenOpponentHasCollab() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06039-fail-host", "gift-hbp06039-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-039",
+            "CENTER",
+            "SECOND",
+            0
+        );
+        String hostCollabCardId = createMemberCardDefinition("THBP06039_FAIL_COLLAB", "HBP06-039 測試目標", "DEBUT", 260, "WHITE");
+        Long hostCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            hostCollabCardId,
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+        Long hostCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCollabCardInstanceId);
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            guestId,
+            "CENTER",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "T6039FAIL"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            guestId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, guestId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(hostCollabCardInstanceId);
+        matchActionService.attackArt(matchId, guestId, attack);
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            hostCollabHolomemId
+        );
+        Integer triggerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'DAMAGE_RECEIVED'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+
+        assertThat(damageTaken).isEqualTo(100);
+        assertThat(triggerCount).isZero();
+    }
+
+    @Test
+    void specialDamageShouldTriggerOfficialGiftHsd13012AndPreventBackDamageThisTurn() {
+        StartedMatchContext context = createStartedMatch("gift-hsd13012-host", "gift-hsd13012-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HSD13-012',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HSD13-012',
+                current_level = 'FIRST',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long holderHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        assertThat(holderHolomemId).isNotNull();
+
+        String stackedCardId = createMemberCardDefinition("THSD13012_STACK", "HSD13-012 成本疊卡", "DEBUT", 120, "YELLOW");
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
+            VALUES (?, ?, ?, 'STAGE', NULL, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            matchId,
+            guestId,
+            stackedCardId
+        );
+        Long stackedCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND card_id = ?
+              AND zone = 'STAGE'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            guestId,
+            stackedCardId
+        );
+        assertThat(stackedCardInstanceId).isNotNull();
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_stack_cards (match_holomem_id, match_card_id, stack_order)
+            VALUES (?, ?, 0)
+            """,
+            holderHolomemId,
+            stackedCardInstanceId
+        );
+
+        String guestBackCardIdA = createMemberCardDefinition("THSD13012_BACK_A", "HSD13-012 受擊 A", "DEBUT", 220, "WHITE");
+        Long guestBackCardInstanceIdA = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            guestBackCardIdA,
+            "BACK",
+            "DEBUT",
+            0
+        );
+        Long guestBackHolomemIdA = loadHolomemIdByCardInstanceId(matchId, guestId, guestBackCardInstanceIdA);
+        String guestBackCardIdB = createMemberCardDefinition("THSD13012_BACK_B", "HSD13-012 受擊 B", "DEBUT", 220, "WHITE");
+        Long guestBackCardInstanceIdB = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            guestBackCardIdB,
+            "BACK",
+            "DEBUT",
+            0
+        );
+        Long guestBackHolomemIdB = loadHolomemIdByCardInstanceId(matchId, guestId, guestBackCardInstanceIdB);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        ObjectNode specialDamageNode = new ObjectMapper().createObjectNode();
+        specialDamageNode.put("rawText", "相手のバックホロメンに特殊ダメージ100を与える。");
+        specialDamageNode.put("value", 100);
+
+        ReflectionTestUtils.invokeMethod(
+            matchEffectService,
+            "executeDamageEffect",
+            matchId,
+            hostId,
+            "DAMAGE",
+            specialDamageNode,
+            "ENEMY",
+            guestBackCardInstanceIdA
+        );
+        ReflectionTestUtils.invokeMethod(
+            matchEffectService,
+            "executeDamageEffect",
+            matchId,
+            hostId,
+            "DAMAGE",
+            specialDamageNode,
+            "ENEMY",
+            guestBackCardInstanceIdB
+        );
+
+        Integer damageTakenA = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestBackHolomemIdA
+        );
+        Integer damageTakenB = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestBackHolomemIdB
+        );
+        String stackedCardZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            stackedCardInstanceId
+        );
+        Integer immunityCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'ACTION_LOCK'
+              AND payload::text LIKE '%"SPECIAL_DAMAGE_IMMUNITY"%'
+              AND expires_turn >= 2
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+
+        assertThat(damageTakenA).isZero();
+        assertThat(damageTakenB).isZero();
+        assertThat(stackedCardZone).isEqualTo("ARCHIVE");
+        assertThat(immunityCount).isEqualTo(1);
+    }
+
+    @Test
+    void specialDamageShouldNotTriggerOfficialGiftHsd13012WithoutStackCost() {
+        StartedMatchContext context = createStartedMatch("gift-hsd13012-no-cost-host", "gift-hsd13012-no-cost-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HSD13-012',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HSD13-012',
+                current_level = 'FIRST',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        String guestBackCardId = createMemberCardDefinition("THSD13012_NC_BACK", "HSD13-012 無成本受擊", "DEBUT", 220, "WHITE");
+        Long guestBackCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            guestBackCardId,
+            "BACK",
+            "DEBUT",
+            0
+        );
+        Long guestBackHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestBackCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        ObjectNode specialDamageNode = new ObjectMapper().createObjectNode();
+        specialDamageNode.put("rawText", "相手のバックホロメンに特殊ダメージ100を与える。");
+        specialDamageNode.put("value", 100);
+
+        ReflectionTestUtils.invokeMethod(
+            matchEffectService,
+            "executeDamageEffect",
+            matchId,
+            hostId,
+            "DAMAGE",
+            specialDamageNode,
+            "ENEMY",
+            guestBackCardInstanceId
+        );
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestBackHolomemId
+        );
+        Integer immunityCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'ACTION_LOCK'
+              AND payload::text LIKE '%"SPECIAL_DAMAGE_IMMUNITY"%'
+              AND expires_turn >= 2
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+
+        assertThat(damageTaken).isEqualTo(100);
+        assertThat(immunityCount).isZero();
+    }
+
+    @Test
+    void mainStepGiftHsd13013ShouldArchiveStackCostAndAttachCheerFromDeckTop() {
+        StartedMatchContext context = createStartedMatch("gift-hsd13013-main-host", "gift-hsd13013-main-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HSD13-013',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HSD13-013',
+                current_level = 'SECOND',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        Long holderHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        assertThat(holderHolomemId).isNotNull();
+
+        String stackedCardId = createMemberCardDefinition("THSD13013_STACK", "HSD13-013 成本疊卡", "FIRST", 130, "YELLOW");
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
+            VALUES (?, ?, ?, 'STAGE', NULL, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            matchId,
+            hostId,
+            stackedCardId
+        );
+        Long stackedCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND card_id = ?
+              AND zone = 'STAGE'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            hostId,
+            stackedCardId
+        );
+        assertThat(stackedCardInstanceId).isNotNull();
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_stack_cards (match_holomem_id, match_card_id, stack_order)
+            VALUES (?, ?, 0)
+            """,
+            holderHolomemId,
+            stackedCardInstanceId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("HSD13-013");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"MAIN_STEP_SELF\"");
+
+        Integer attachedCheerCountBeforeResolve = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        );
+        Integer stackRowCountBeforeResolve = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_stack_cards WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        );
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        Integer attachedCheerCountAfterResolve = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        );
+        String stackedCardZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            stackedCardInstanceId
+        );
+        Integer stackedRowCount = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_stack_cards WHERE match_holomem_id = ? AND match_card_id = ?",
+            Integer.class,
+            holderHolomemId,
+            stackedCardInstanceId
+        );
+        String triggerPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'MAIN_STEP_SELF'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+
+        assertThat(attachedCheerCountAfterResolve).isEqualTo(attachedCheerCountBeforeResolve + 1);
+        assertThat(stackedCardZone).isEqualTo("ARCHIVE");
+        assertThat(stackedRowCount).isZero();
+        assertThat(triggerPayloadText).contains("HSD13-013");
+        assertThat(triggerPayloadText).containsPattern("\"archiveApplied\"\\s*:\\s*1");
+        assertThat(triggerPayloadText).containsPattern("\"attachApplied\"\\s*:\\s*1");
+    }
+
+    @Test
+    void mainStepGiftHsd13013ShouldNotAttachCheerWithoutStackCost() {
+        StartedMatchContext context = createStartedMatch("gift-hsd13013-no-cost-host", "gift-hsd13013-no-cost-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HSD13-013',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HSD13-013',
+                current_level = 'SECOND',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        Long holderHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        assertThat(holderHolomemId).isNotNull();
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("HSD13-013");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"MAIN_STEP_SELF\"");
+
+        Integer attachedCheerCountBeforeResolve = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        );
+        Integer stackRowCountBeforeResolve = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_stack_cards WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        );
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        Integer attachedCheerCountAfterResolve = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        );
+        Integer stackRowCount = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_stack_cards WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        );
+        String triggerPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'MAIN_STEP_SELF'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+
+        assertThat(attachedCheerCountAfterResolve).isEqualTo(attachedCheerCountBeforeResolve);
+        assertThat(stackRowCount).isEqualTo(stackRowCountBeforeResolve);
+        assertThat(triggerPayloadText).contains("HSD13-013");
+        assertThat(triggerPayloadText).containsPattern("\"archiveApplied\"\\s*:\\s*0");
+        assertThat(triggerPayloadText).contains("前置成本未支付");
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHsd09007WhenSelfDownedInCollabAndLifeIsLower() {
+        StartedMatchContext context = createStartedMatch("gift-hsd09007-low-life-host", "gift-hsd09007-low-life-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THSD09007_ATTACKER_LOW"
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HSD09-007",
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+
+        int guestLifeBefore = countZone(matchId, guestId, "LIFE");
+        int hostLifeBefore = countZone(matchId, hostId, "LIFE");
+        while (guestLifeBefore >= hostLifeBefore) {
+            forceTopLifeCardToCheer(matchId, guestId);
+            guestLifeBefore = countZone(matchId, guestId, "LIFE");
+            hostLifeBefore = countZone(matchId, hostId, "LIFE");
+        }
+        assertThat(guestLifeBefore).isLessThan(hostLifeBefore);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            guestId
+        );
+        assertThat(pendingContextText).contains("HSD09-007");
+        assertThat(pendingContextText).containsPattern("\"sectionType\"\\s*:\\s*\"DOWN_EVENT\"");
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
+
+        int guestLifeAfterConfirm = countZone(matchId, guestId, "LIFE");
+        assertThat(guestLifeAfterConfirm).isEqualTo(guestLifeBefore);
+
+        String triggerPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'SELF_DOWNED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+        assertThat(triggerPayloadText).contains("HSD09-007");
+        assertThat(triggerPayloadText).containsPattern("\"lifeLossModifier\"\\s*:\\s*-1");
+        assertThat(triggerPayloadText).containsPattern("\"resolvedLifeLoss\"\\s*:\\s*0");
+    }
+
+    @Test
+    void attackArtShouldNotReduceLifeLossForOfficialGiftHsd09007WhenLifeIsNotLower() {
+        StartedMatchContext context = createStartedMatch("gift-hsd09007-no-low-life-host", "gift-hsd09007-no-low-life-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THSD09007_ATTACKER_NOLOW"
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HSD09-007",
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+
+        int guestLifeBefore = countZone(matchId, guestId, "LIFE");
+        int hostLifeBefore = countZone(matchId, hostId, "LIFE");
+        assertThat(guestLifeBefore).isGreaterThanOrEqualTo(hostLifeBefore);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            guestId
+        );
+        assertThat(pendingContextText).contains("HSD09-007");
+        assertThat(pendingContextText).containsPattern("\"sectionType\"\\s*:\\s*\"DOWN_EVENT\"");
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
+
+        int guestLifeAfterConfirm = countZone(matchId, guestId, "LIFE");
+        assertThat(guestLifeAfterConfirm).isEqualTo(guestLifeBefore - 1);
+
+        String triggerPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'SELF_DOWNED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+        assertThat(triggerPayloadText).contains("HSD09-007");
+        assertThat(triggerPayloadText).containsPattern("\"lifeLossModifier\"\\s*:\\s*0");
+        assertThat(triggerPayloadText).containsPattern("\"resolvedLifeLoss\"\\s*:\\s*1");
+    }
+
+    @Test
     void attackArtShouldNotApplyOfficialPassiveGiftHsd07009DamageReductionOutsideCenter() {
         StartedMatchContext context = createStartedMatch("gift-hsd07009-reduce-fail-host", "gift-hsd07009-reduce-fail-guest");
         Long matchId = context.matchId();
@@ -14687,6 +18387,3102 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             "SELECT damage_taken FROM match_holomems WHERE id = ?",
             Integer.class,
             guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(damageTaken).isEqualTo(100);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp04074DamageReductionToCenterHolderItself() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04074-center-host", "gift-hbp04074-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP04-074',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP04-074',
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "T4074_CENTER_OK"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*10");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*10");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*90");
+        assertThat(damageTaken).isEqualTo(90);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp04068DamageReductionOnCenterAgainstOpponentFirst() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04068-center-host", "gift-hbp04068-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP04-068',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP04-068',
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        String attackerCardId = createMemberCardDefinition("THBP04068_FIRST_ATK", "HBP04-068 First Attacker", "FIRST", 180, "RED");
+        insertPrimaryArtForMember(
+            attackerCardId,
+            "測試藝能 100",
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}"
+        );
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, attackerCardId, "COLLAB", "FIRST", 0);
+        attachPrimaryArtCostFromCheerDeck(matchId, hostId, attackerCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*80");
+        assertThat(damageTaken).isEqualTo(80);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp04068DamageReductionOnCollabAgainstOpponentFirst() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04068-collab-host", "gift-hbp04068-collab-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-068",
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+        Long guestCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCollabCardInstanceId);
+
+        String attackerCardId = createMemberCardDefinition("THBP04068_FIRST_COL_ATK", "HBP04-068 First Collab Attacker", "FIRST", 180, "RED");
+        insertPrimaryArtForMember(
+            attackerCardId,
+            "測試藝能 100",
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}"
+        );
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, attackerCardId, "COLLAB", "FIRST", 0);
+        attachPrimaryArtCostFromCheerDeck(matchId, hostId, attackerCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCollabCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCollabHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*80");
+        assertThat(damageTaken).isEqualTo(80);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp04068DamageReductionWhenAttackerIsNotFirst() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04068-level-fail-host", "gift-hbp04068-level-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP04-068',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP04-068',
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP04068_DEBUT_FAIL"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer remainingHolomemCount = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+        String targetZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            guestCenterCardInstanceId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(remainingHolomemCount).isZero();
+        assertThat(targetZone).isEqualTo("ARCHIVE");
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp04068DamageReductionOutsideCenterOrCollab() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04068-zone-fail-host", "gift-hbp04068-zone-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestBackCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-068",
+            "BACK",
+            "DEBUT",
+            0
+        );
+        Long guestBackHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestBackCardInstanceId);
+
+        String attackerCardId = createMemberCardDefinition("THBP04068_FIRST_ZONE_FAIL", "HBP04-068 First Zone Fail", "FIRST", 180, "RED");
+        insertPrimaryArtForMember(
+            attackerCardId,
+            "測試藝能 100",
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}"
+        );
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, attackerCardId, "COLLAB", "FIRST", 0);
+        attachPrimaryArtCostFromCheerDeck(matchId, hostId, attackerCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestBackCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer remainingHolomemCount = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestBackHolomemId
+        );
+        String targetZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            guestBackCardInstanceId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(remainingHolomemCount).isZero();
+        assertThat(targetZone).isEqualTo("ARCHIVE");
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp06072DamageReductionToSelfAgainstOpponentFirstArt() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06072-center-host", "gift-hbp06072-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP06-072',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP06-072',
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        String attackerCardId = createMemberCardDefinition("THBP06072_FIRST_ATK", "HBP06-072 First Attacker", "FIRST", 180, "RED");
+        insertPrimaryArtForMember(
+            attackerCardId,
+            "測試藝能 100",
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}"
+        );
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, attackerCardId, "COLLAB", "FIRST", 0);
+        attachPrimaryArtCostFromCheerDeck(matchId, hostId, attackerCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*70");
+        assertThat(damageTaken).isEqualTo(70);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp06072DamageReductionWhenAttackerIsNotFirst() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06072-level-fail-host", "gift-hbp06072-level-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP06-072',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP06-072',
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP06072_DEBUT_FAIL"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer remainingHolomemCount = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+        String targetZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            guestCenterCardInstanceId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(remainingHolomemCount).isZero();
+        assertThat(targetZone).isEqualTo("ARCHIVE");
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp04062ArtBonusWhenNamedSupportAttachedOnCenterHolder() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04062-center-host", "gift-hbp04062-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP04-062',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP04-062',
+                current_level = 'FIRST',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 2, "PURPLE", "hbp04062-center");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        entityManager.clear();
+
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "THBP04062_SCYTHE_" + System.nanoTime(),
+            "森カリオペの鎌",
+            false,
+            "BUFF",
+            "{\"type\":\"BUFF\",\"rawText\":\"カードタイプ\\nサポート・ツール\\nテスト用。\"}",
+            "SELF"
+        );
+        PlaySupportActionRequest playSupport = new PlaySupportActionRequest();
+        playSupport.setCardInstanceId(supportCardInstanceId);
+        playSupport.setTargetHolomemCardInstanceId(hostCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, playSupport);
+
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*80");
+        assertThat(damageTaken).isEqualTo(80);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp04062ArtBonusWhenNamedSupportAttachedOnCollabHolder() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04062-collab-host", "gift-hbp04062-collab-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String centerAttackerCardId = createMemberCardDefinition("THBP04062_ATK", "HBP04-062 Myth Center", "DEBUT", 180, "PURPLE");
+        insertPrimaryArtForMember(
+            centerAttackerCardId,
+            "測試藝能 50",
+            "{\"PURPLE\":1,\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":50,\"rawHeader\":\"測試藝能 50\"}"
+        );
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#Myth\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            centerAttackerCardId
+        );
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            centerAttackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            centerAttackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 2, "PURPLE", "hbp04062-collab-atk");
+
+        Long holderCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, "HBP04-062", "COLLAB", "FIRST", 0);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        entityManager.clear();
+
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "THBP04062_DEATH_" + System.nanoTime(),
+            "Death-sensei",
+            false,
+            "BUFF",
+            "{\"type\":\"BUFF\",\"rawText\":\"カードタイプ\\nサポート・マスコット\\nテスト用。\"}",
+            "SELF"
+        );
+        PlaySupportActionRequest playSupport = new PlaySupportActionRequest();
+        playSupport.setCardInstanceId(supportCardInstanceId);
+        playSupport.setTargetHolomemCardInstanceId(holderCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, playSupport);
+
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*80");
+        assertThat(damageTaken).isEqualTo(80);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp04062ArtBonusWithWrongAttachedSupportName() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04062-wrong-support-host", "gift-hbp04062-wrong-support-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP04-062',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP04-062',
+                current_level = 'FIRST',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 2, "PURPLE", "hbp04062-wrong");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "THBP04062_WRONG_" + System.nanoTime(),
+            "別的支援卡",
+            false,
+            "BUFF",
+            "{\"type\":\"BUFF\",\"rawText\":\"カードタイプ\\nサポート・ツール\\nテスト用。\"}",
+            "SELF"
+        );
+        PlaySupportActionRequest playSupport = new PlaySupportActionRequest();
+        playSupport.setCardInstanceId(supportCardInstanceId);
+        playSupport.setTargetHolomemCardInstanceId(hostCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, playSupport);
+
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*50");
+        assertThat(damageTaken).isEqualTo(50);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp04087DamageReductionToOwnDebutCenter() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04087-center-host", "gift-hbp04087-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        String protectedCenterCardId = createMemberCardDefinition("THBP04087_CENTER", "HBP04-087 Protected Center", "DEBUT", 200, "WHITE");
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        createStageHolomemWithSingleCard(matchId, guestId, "HBP04-087", "COLLAB", "SPOT", 0);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP04087_OK"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*80");
+        assertThat(damageTaken).isEqualTo(80);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp04087DamageReductionWhenTargetIsNotDebut() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04087-level-fail-host", "gift-hbp04087-level-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        String protectedCenterCardId = createMemberCardDefinition("THBP04087_FIRST", "HBP04-087 First Center", "FIRST", 200, "WHITE");
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'FIRST',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        createStageHolomemWithSingleCard(matchId, guestId, "HBP04-087", "COLLAB", "SPOT", 0);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP04087_LV_FAIL"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(damageTaken).isEqualTo(100);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp04087DamageReductionOutsideCenter() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04087-zone-fail-host", "gift-hbp04087-zone-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long backTargetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            createMemberCardDefinition("THBP04087_BACK", "HBP04-087 Back Target", "DEBUT", 200, "WHITE"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+        Long backTargetHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, backTargetCardInstanceId);
+        createStageHolomemWithSingleCard(matchId, guestId, "HBP04-087", "COLLAB", "SPOT", 0);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP04087_ZONE_FAIL"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(backTargetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            backTargetHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(damageTaken).isEqualTo(100);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp05008DamageReductionToOwnTaggedDebutCenter() {
+        StartedMatchContext context = createStartedMatch("gift-hbp05008-center-host", "gift-hbp05008-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        String protectedCenterCardId = createMemberCardDefinition("THBP05008_CENTER", "HBP05-008 Protected Center", "DEBUT", 200, "WHITE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#3期生\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            protectedCenterCardId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        createStageHolomemWithSingleCard(matchId, guestId, "HBP05-008", "COLLAB", "DEBUT", 0);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP05008_OK"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*80");
+        assertThat(damageTaken).isEqualTo(80);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp05008DamageReductionWithoutMatchingTag() {
+        StartedMatchContext context = createStartedMatch("gift-hbp05008-tag-fail-host", "gift-hbp05008-tag-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        String protectedCenterCardId = createMemberCardDefinition("THBP05008_NO_TAG", "HBP05-008 No Tag Center", "DEBUT", 200, "WHITE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#EN\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            protectedCenterCardId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        createStageHolomemWithSingleCard(matchId, guestId, "HBP05-008", "COLLAB", "DEBUT", 0);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP05008_TAG_FAIL"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(damageTaken).isEqualTo(100);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp03015DamageReductionToOwnReglossCollab() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03015-success-host", "gift-hbp03015-success-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP03-015',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP03-015',
+                current_level = 'SECOND',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        String reglossTargetCardId = createMemberCardDefinition("THBP03015_REGLOSS_TARGET", "HBP03-015 ReGLOSS Target", "DEBUT", 200, "WHITE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#ReGLOSS\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            reglossTargetCardId
+        );
+        Long guestCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            reglossTargetCardId,
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+        Long guestCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCollabCardInstanceId);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP03015_ATK_OK"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCollabCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCollabHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*80");
+        assertThat(damageTaken).isEqualTo(80);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp03015DamageReductionWithoutReglossTag() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03015-tag-fail-host", "gift-hbp03015-tag-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP03-015',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP03-015',
+                current_level = 'SECOND',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        String nonReglossTargetCardId = createMemberCardDefinition("THBP03015_NON_REGLOSS_TARGET", "HBP03-015 Non-ReGLOSS Target", "DEBUT", 200, "WHITE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#EN\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            nonReglossTargetCardId
+        );
+        Long guestCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            nonReglossTargetCardId,
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+        Long guestCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCollabCardInstanceId);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP03015_ATK_TAG_FAIL"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCollabCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCollabHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(damageTaken).isEqualTo(100);
+    }
+
+    @Test
+    void mainStepGiftHbp03030ShouldTriggerAndBuffArtWhenAttached35PAndDiceIsThree() {
+        Mockito.when(diceService.rollD6()).thenReturn(3);
+
+        StartedMatchContext context = createStartedMatch("gift-hbp03030-main-host", "gift-hbp03030-main-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP03-030',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP03-030',
+                current_level = 'SECOND',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 3, "RED", "hbp03030-main");
+
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "THBP03030_35P_" + System.nanoTime(),
+            "35P",
+            false,
+            "BUFF",
+            "{\"type\":\"BUFF\",\"rawText\":\"カードタイプ\\nサポート・マスコット\\nテスト用。\"}",
+            "SELF"
+        );
+        PlaySupportActionRequest playSupport = new PlaySupportActionRequest();
+        playSupport.setCardInstanceId(supportCardInstanceId);
+        playSupport.setTargetHolomemCardInstanceId(hostCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, playSupport);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("HBP03-030");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"MAIN_STEP_SELF\"");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String attackPayloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        assertThat(attackPayloadText).containsPattern("\"turnArtDamageModifier\"\\s*:\\s*50");
+    }
+
+    @Test
+    void mainStepGiftHbp03030ShouldNotTriggerWithoutAttached35P() {
+        Mockito.when(diceService.rollD6()).thenReturn(3);
+
+        StartedMatchContext context = createStartedMatch("gift-hbp03030-no35p-host", "gift-hbp03030-no35p-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP03-030',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP03-030',
+                current_level = 'SECOND',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 3, "RED", "hbp03030-no35p");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).isEmpty();
+
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String attackPayloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        assertThat(attackPayloadText).containsPattern("\"turnArtDamageModifier\"\\s*:\\s*0");
+    }
+
+    @Test
+    void turnStartShouldKeepHbp03039UnrestedWhenOwnCenterIsFuwawa() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03039-reset-ok-host", "gift-hbp03039-reset-ok-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        String fuwawaCenterCardId = createMemberCardDefinition(
+            "THBP03039_FUWAWA_CENTER",
+            "フワワ・アビスガード",
+            "DEBUT",
+            150,
+            "BLUE"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            fuwawaCenterCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            fuwawaCenterCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+
+        Long hostCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP03-039",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        Long hostCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCollabCardInstanceId);
+        assertThat(hostCollabHolomemId).isNotNull();
+
+        advanceToEndPhase(matchId, hostId, hostCenterCardInstanceId);
+        matchActionService.endTurn(matchId, hostId);
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TURN_START");
+        executeRequiredTurnActions(matchId, guestId, loadFirstCenterCardInstanceId(matchId, guestId));
+        advanceToEndPhase(matchId, guestId, loadFirstCenterCardInstanceId(matchId, guestId));
+        matchActionService.endTurn(matchId, guestId);
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TURN_START");
+
+        Map<String, Object> movedHolomem = jdbcTemplate.queryForMap(
+            """
+            SELECT zone, is_rested
+            FROM match_holomems
+            WHERE id = ?
+            """,
+            hostCollabHolomemId
+        );
+        assertThat(movedHolomem.get("zone")).isEqualTo("BACK");
+        assertThat(movedHolomem.get("is_rested")).isEqualTo(Boolean.FALSE);
+    }
+
+    @Test
+    void turnStartShouldRestHbp03039WhenOwnCenterIsNotFuwawa() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03039-reset-fail-host", "gift-hbp03039-reset-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP03-039",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        Long hostCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCollabCardInstanceId);
+        assertThat(hostCollabHolomemId).isNotNull();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        advanceToEndPhase(matchId, hostId, hostCenterCardInstanceId);
+        matchActionService.endTurn(matchId, hostId);
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TURN_START");
+        executeRequiredTurnActions(matchId, guestId, loadFirstCenterCardInstanceId(matchId, guestId));
+        advanceToEndPhase(matchId, guestId, loadFirstCenterCardInstanceId(matchId, guestId));
+        matchActionService.endTurn(matchId, guestId);
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TURN_START");
+
+        Map<String, Object> movedHolomem = jdbcTemplate.queryForMap(
+            """
+            SELECT zone, is_rested
+            FROM match_holomems
+            WHERE id = ?
+            """,
+            hostCollabHolomemId
+        );
+        assertThat(movedHolomem.get("zone")).isEqualTo("BACK");
+        assertThat(movedHolomem.get("is_rested")).isEqualTo(Boolean.TRUE);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialExtraLifeLossForHbp03039WhenSelfDowned() {
+        StartedMatchContext context = createStartedMatch("hbp03039-down-host", "hbp03039-down-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id IN (?, ?)
+            """,
+            matchId,
+            hostId,
+            guestId
+        );
+
+        Long hostCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            200,
+            "RED",
+            260,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":260,\"rawHeader\":\"測試藝能 260\"}",
+            0,
+            "RED",
+            "hbp03039-down-host-center"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-039",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        int lifeBefore = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeBefore).isGreaterThanOrEqualTo(3);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_phase = 'PERFORMANCE',
+                current_turn_player_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_pending_decisions
+            SET status = 'RESOLVED',
+                resolved_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND status = 'PENDING'
+            """,
+            matchId
+        );
+        entityManager.clear();
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        int lifeAfterAttack = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterAttack).isEqualTo(lifeBefore - 1);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("HBP03-039");
+        assertThat(pendingContextText).containsPattern("\"sectionType\"\\s*:\\s*\"DOWN_EVENT\"");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int lifeAfterConfirm = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterConfirm).isEqualTo(lifeBefore - 3);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp04031ArtBonusWhenOpponentStageHasJpTag() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04031-jp-host", "gift-hbp04031-jp-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP04-031',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP04-031',
+                current_level = 'SECOND',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 2, "GREEN", "hbp04031-jp");
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        String jpTargetCardId = createMemberCardDefinition("THBP04031_JP_TARGET", "HBP04-031 JP Target", "DEBUT", 200, "BLUE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#JP\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            jpTargetCardId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            jpTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            jpTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*110");
+        assertThat(damageTaken).isEqualTo(110);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHsd03008ArtBonusToListedHolomem() {
+        StartedMatchContext context = createStartedMatch("gift-hsd03008-success-host", "gift-hsd03008-success-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HSD03-008',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HSD03-008',
+                current_level = 'FIRST',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+
+        String listedAttackerCardId = createMemberCardDefinition("THSD03008_RUI", "鷹嶺ルイ", "DEBUT", 180, "BLUE");
+        insertPrimaryArtForMember(
+            listedAttackerCardId,
+            "測試藝能 30",
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":30,\"rawHeader\":\"測試藝能 30\"}"
+        );
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, listedAttackerCardId, "COLLAB", "DEBUT", 0);
+        attachPrimaryArtCostFromCheerDeck(matchId, hostId, attackerCardInstanceId);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*50");
+        assertThat(damageTaken).isEqualTo(50);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHsd03008ArtBonusToNonListedHolomem() {
+        StartedMatchContext context = createStartedMatch("gift-hsd03008-fail-host", "gift-hsd03008-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HSD03-008',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HSD03-008',
+                current_level = 'FIRST',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+
+        String nonListedAttackerCardId = createMemberCardDefinition("THSD03008_FAIL", "夏色まつり", "DEBUT", 180, "BLUE");
+        insertPrimaryArtForMember(
+            nonListedAttackerCardId,
+            "測試藝能 30",
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":30,\"rawHeader\":\"測試藝能 30\"}"
+        );
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, nonListedAttackerCardId, "COLLAB", "DEBUT", 0);
+        attachPrimaryArtCostFromCheerDeck(matchId, hostId, attackerCardInstanceId);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*30");
+        assertThat(damageTaken).isEqualTo(30);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp06025ArtBonusToOtherHoloxOnStage() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06025-success-host", "gift-hbp06025-success-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP06-025',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP06-025',
+                current_level = 'FIRST',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+
+        String holoxAttackerCardId = createMemberCardDefinition("THBP06025_HOLOX", "HBP06-025 受益 holoX", "DEBUT", 180, "GREEN");
+        insertPrimaryArtForMember(
+            holoxAttackerCardId,
+            "測試藝能 30",
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":30,\"rawHeader\":\"測試藝能 30\"}"
+        );
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#秘密結社holoX\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            holoxAttackerCardId
+        );
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, holoxAttackerCardId, "COLLAB", "DEBUT", 0);
+        attachPrimaryArtCostFromCheerDeck(matchId, hostId, attackerCardInstanceId);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*50");
+        assertThat(damageTaken).isEqualTo(50);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp06025ArtBonusToHolderSelf() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06025-self-host", "gift-hbp06025-self-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP06-025',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP06-025',
+                current_level = 'FIRST',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachPrimaryArtCostFromCheerDeck(matchId, hostId, hostCenterCardInstanceId);
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*50");
+        assertThat(damageTaken).isEqualTo(50);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp04031ArtBonusWhenOpponentStageHasNoJpOrIdTag() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04031-no-tag-host", "gift-hbp04031-no-tag-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP04-031',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP04-031',
+                current_level = 'SECOND',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 2, "GREEN", "hbp04031-no-tag");
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        String enTargetCardId = createMemberCardDefinition("THBP04031_EN_TARGET", "HBP04-031 EN Target", "DEBUT", 200, "BLUE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#EN\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            enTargetCardId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            enTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            enTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*80");
+        assertThat(damageTaken).isEqualTo(80);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp04031ArtBonusToAnotherAttacker() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04031-other-attacker-host", "gift-hbp04031-other-attacker-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP04-031',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP04-031',
+                current_level = 'SECOND',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 2, "GREEN", "hbp31oa");
+
+        Long otherAttackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "GREEN",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "GREEN",
+            "THBP04031_OTHER_ATTACKER"
+        );
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        String jpTargetCardId = createMemberCardDefinition("THBP04031_OTHER_JP_TARGET", "HBP04-031 Other JP Target", "DEBUT", 200, "BLUE");
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#JP\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            jpTargetCardId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            jpTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            jpTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, otherAttackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(otherAttackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(damageTaken).isEqualTo(100);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp04074DamageReductionToOwnCollab() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04074-collab-host", "gift-hbp04074-collab-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP04-074',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP04-074',
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        Long guestCollabCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            guestId,
+            "COLLAB",
+            200,
+            "WHITE",
+            30,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":30,\"rawHeader\":\"測試藝能 30\"}",
+            0,
+            "WHITE",
+            "T4074_TGT"
+        );
+        Long guestCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCollabCardInstanceId);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "T4074_COLLAB_OK"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCollabCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCollabHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*10");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*10");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*90");
+        assertThat(damageTaken).isEqualTo(90);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp04074DamageReductionOutsideCenter() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04074-fail-host", "gift-hbp04074-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestGiftCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-074",
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+        Long guestGiftHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestGiftCardInstanceId);
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "T4074_FAIL"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestGiftCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestGiftHolomemId
         );
 
         assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*0");
@@ -15810,6 +22606,660 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
     }
 
     @Test
+    void attackArtShouldTriggerOfficialGiftHbp01027WhenDamageReceivedAndApplyTurnOncePrevention() {
+        Mockito.when(diceService.rollD6()).thenReturn(1);
+        StartedMatchContext context = createStartedMatch("gift-hbp01027-odd-host", "gift-hbp01027-odd-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long centerAttackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            120,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":120}",
+            0,
+            "RED",
+            "THBP01027_CENTER_ATTACKER"
+        );
+        Long collabAttackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "BLUE",
+            120,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":120}",
+            0,
+            "BLUE",
+            "THBP01027_COLLAB_ATTACKER"
+        );
+        String guestTargetCardId = createMemberCardDefinition(
+            "THBP01027_TARGET",
+            "HBP01-027 受擊目標",
+            "DEBUT",
+            250,
+            "WHITE"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            guestTargetCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP01-027",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        Long targetHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, targetCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, centerAttackerCardInstanceId);
+
+        AttackArtActionRequest firstAttack = new AttackArtActionRequest();
+        firstAttack.setAttackerCardInstanceId(centerAttackerCardInstanceId);
+        firstAttack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, firstAttack);
+
+        Integer damageAfterFirstAttack = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            targetHolomemId
+        );
+        assertThat(damageAfterFirstAttack).isZero();
+
+        AttackArtActionRequest secondAttack = new AttackArtActionRequest();
+        secondAttack.setAttackerCardInstanceId(collabAttackerCardInstanceId);
+        secondAttack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, secondAttack);
+
+        Integer damageAfterSecondAttack = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            targetHolomemId
+        );
+        assertThat(damageAfterSecondAttack).isEqualTo(120);
+
+        Integer triggerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'DAMAGE_RECEIVED'
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+        assertThat(triggerCount).isEqualTo(1);
+
+        String triggerPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'DAMAGE_RECEIVED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+        assertThat(triggerPayloadText).contains("HBP01-027");
+        assertThat(triggerPayloadText).containsPattern("\"diceRoll\"\\s*:\\s*1");
+        assertThat(triggerPayloadText).containsPattern("\"preventedDamage\"\\s*:\\s*true");
+    }
+
+    @Test
+    void attackArtShouldNotPreventDamageWithOfficialGiftHbp01027WhenDiceConditionFailed() {
+        Mockito.when(diceService.rollD6()).thenReturn(6);
+        StartedMatchContext context = createStartedMatch("gift-hbp01027-even-host", "gift-hbp01027-even-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            120,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":120}",
+            0,
+            "RED",
+            "THBP01027_ATTACKER"
+        );
+        String guestTargetCardId = createMemberCardDefinition(
+            "THBP01027_EVEN_TARGET",
+            "HBP01-027 受擊目標偶數",
+            "DEBUT",
+            250,
+            "WHITE"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            guestTargetCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP01-027",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        Long targetHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, targetCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer damageAfterAttack = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            targetHolomemId
+        );
+        assertThat(damageAfterAttack).isEqualTo(120);
+
+        String triggerPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'DAMAGE_RECEIVED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+        assertThat(triggerPayloadText).contains("HBP01-027");
+        assertThat(triggerPayloadText).containsPattern("\"diceRoll\"\\s*:\\s*6");
+        assertThat(triggerPayloadText).containsPattern("\"preventedDamage\"\\s*:\\s*false");
+    }
+
+    @Test
+    void attackArtShouldAutoTargetOpponentCollabWhenOfficialGiftHbp01050RestrictsArtTarget() {
+        StartedMatchContext context = createStartedMatch("gift-hbp01050-auto-target-host", "gift-hbp01050-auto-target-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            120,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":120}",
+            0,
+            "RED",
+            "THBP01050_ATTACKER"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long guestCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP01-050",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        Long guestCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCollabCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer centerDamage = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+        Integer collabDamage = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCollabHolomemId
+        );
+        assertThat(centerDamage).isZero();
+        assertThat(collabDamage).isEqualTo(120);
+
+        String attackPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            hostId
+        );
+        assertThat(attackPayloadText).containsPattern("\"passiveGiftTargetRestrictionToCollab\"\\s*:\\s*true");
+        assertThat(attackPayloadText).containsPattern("\"passiveGiftTargetRestrictionApplied\"\\s*:\\s*true");
+        assertThat(attackPayloadText).containsPattern("\"targetCardInstanceId\"\\s*:\\s*" + guestCollabCardInstanceId);
+    }
+
+    @Test
+    void attackArtShouldRejectCenterTargetWhenOfficialGiftHbp01050RestrictsArtTarget() {
+        StartedMatchContext context = createStartedMatch("gift-hbp01050-reject-center-host", "gift-hbp01050-reject-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            120,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":120}",
+            0,
+            "RED",
+            "THBP01050_REJECT_ATTACKER"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP01-050",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        assertThatThrownBy(() -> matchActionService.attackArt(matchId, hostId, attack))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("只能以對手 COLLAB Holomen 為目標");
+    }
+
+    @Test
+    void attackArtShouldRejectCenterTargetWhenOfficialGiftHbp05010ConditionIsMet() {
+        StartedMatchContext context = createStartedMatch("gift-hbp05010-reject-center-host", "gift-hbp05010-reject-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            120,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":120}",
+            0,
+            "RED",
+            "THBP05010_REJECT_ATTACKER"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP05-010",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP05-010",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        assertThat(guestCenterCardInstanceId).isNotNull();
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        assertThatThrownBy(() -> matchActionService.attackArt(matchId, hostId, attack))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("只能以對手 COLLAB Holomen 為目標");
+    }
+
+    @Test
+    void attackArtShouldAllowCenterTargetWhenOfficialGiftHbp05010CenterTagConditionNotMet() {
+        StartedMatchContext context = createStartedMatch("gift-hbp05010-center-tag-miss-host", "gift-hbp05010-center-tag-miss-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            120,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":120}",
+            0,
+            "RED",
+            "THBP05010_ALLOW_ATTACKER"
+        );
+        String guestCenterCardId = createMemberCardDefinition("THBP05010_NO_TAG_CENTER", "No Tag Center", "DEBUT", 160, "WHITE");
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            guestCenterCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long guestCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP05-010",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        Long guestCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCollabCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer centerDamage = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+        Integer collabDamage = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCollabHolomemId
+        );
+        assertThat(centerDamage).isEqualTo(120);
+        assertThat(collabDamage).isZero();
+    }
+
+    @Test
+    void attackArtShouldRejectCenterTargetWhenOfficialGiftHbp05043ConditionIsMet() {
+        StartedMatchContext context = createStartedMatch("gift-hbp05043-reject-center-host", "gift-hbp05043-reject-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "BLUE",
+            120,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":120}",
+            0,
+            "BLUE",
+            "THBP05043_REJECT_ATTACKER"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP05-043",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP05-043",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        assertThat(guestCenterCardInstanceId).isNotNull();
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        assertThatThrownBy(() -> matchActionService.attackArt(matchId, hostId, attack))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("只能以對手 COLLAB Holomen 為目標");
+    }
+
+    @Test
+    void attackArtShouldAllowCenterTargetWhenOfficialGiftHbp05043CenterTagConditionNotMet() {
+        StartedMatchContext context = createStartedMatch("gift-hbp05043-center-tag-miss-host", "gift-hbp05043-center-tag-miss-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "BLUE",
+            120,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":120}",
+            0,
+            "BLUE",
+            "THBP05043_ALLOW_ATTACKER"
+        );
+        String guestCenterCardId = createMemberCardDefinition("THBP05043_NO_TAG_CENTER", "No Tag Center", "DEBUT", 160, "WHITE");
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            guestCenterCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long guestCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP05-043",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        Long guestCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCollabCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer centerDamage = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+        Integer collabDamage = jdbcTemplate.queryForObject(
+            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCollabHolomemId
+        );
+        assertThat(centerDamage).isEqualTo(120);
+        assertThat(collabDamage).isZero();
+    }
+
+    @Test
     void attackArtShouldCreateDefenderGiftConfirmWhenSelfDownedGiftTriggered() {
         StartedMatchContext context = createStartedMatch("gift-self-down-host", "gift-self-down-guest");
         Long matchId = context.matchId();
@@ -16020,6 +23470,202 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
     }
 
     @Test
+    void attackArtShouldTriggerOfficialGiftHbp06020WhenSelfDownedOnOpponentTurnAndDrawByDistinctFlowGlowNames() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06020-host", "gift-hbp06020-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            260,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":260}",
+            0,
+            "RED",
+            "THBP06020_ATTACKER"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP06-020",
+            "CENTER",
+            "SECOND",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP06-015",
+            "COLLAB",
+            "DEBUT",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HSD10-002",
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int guestDeckBefore = countZone(matchId, guestId, "DECK");
+        int guestArchiveBefore = countZone(matchId, guestId, "ARCHIVE");
+        int guestHandBefore = countZone(matchId, guestId, "HAND");
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            guestId
+        );
+        assertThat(pendingContextText).contains("HBP06-020");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"SELF_DOWNED\"");
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
+
+        int guestDeckAfterConfirm = countZone(matchId, guestId, "DECK");
+        int guestArchiveAfterConfirm = countZone(matchId, guestId, "ARCHIVE");
+        int guestHandAfterConfirm = countZone(matchId, guestId, "HAND");
+
+        String latestGiftPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+
+        assertThat(guestDeckAfterConfirm).isEqualTo(guestDeckBefore - 4);
+        assertThat(guestArchiveAfterConfirm).isGreaterThanOrEqualTo(guestArchiveBefore + 2);
+        assertThat(guestHandAfterConfirm).isEqualTo(guestHandBefore + 2);
+        assertThat(latestGiftPayload).containsPattern("\"triggerType\"\\s*:\\s*\"SELF_DOWNED\"");
+        assertThat(latestGiftPayload).containsPattern("\"effectType\"\\s*:\\s*\"REVEAL_TO_ARCHIVE\"");
+        assertThat(latestGiftPayload).containsPattern("\"archiveApplied\"\\s*:\\s*2");
+        assertThat(latestGiftPayload).containsPattern("\"effectType\"\\s*:\\s*\"DRAW\"");
+        assertThat(latestGiftPayload).containsPattern("\"drawApplied\"\\s*:\\s*2");
+    }
+
+    @Test
+    void attackArtShouldNotTriggerOfficialGiftHbp06020WhenAnotherAllyDowned() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06020-no-self-host", "gift-hbp06020-no-self-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            260,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":260}",
+            0,
+            "RED",
+            "THBP06020_NO_SELF_ATTACKER"
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP06-020",
+            "BACK",
+            "SECOND",
+            0
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int guestDeckBefore = countZone(matchId, guestId, "DECK");
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer pendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+        int guestDeckAfterAttack = countZone(matchId, guestId, "DECK");
+
+        assertThat(pendingCount).isZero();
+        assertThat(guestDeckAfterAttack).isEqualTo(guestDeckBefore);
+    }
+
+    @Test
     void attackArtShouldNotTriggerOfficialGiftHbp04063WhenAnotherAllyDowned() {
         StartedMatchContext context = createStartedMatch("gift-hbp04063-no-self-host", "gift-hbp04063-no-self-guest");
         Long matchId = context.matchId();
@@ -16093,6 +23739,3844 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         );
         assertThat(pendingCount).isZero();
         assertThat(countZone(matchId, guestId, "DECK")).isEqualTo(guestDeckBefore);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHbp03066WhenSelfDownedAndAttachCheerToOwnKorone() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03066-host", "gift-hbp03066-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP03066_ATTACKER"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-066",
+            "CENTER",
+            "SECOND",
+            0
+        );
+        Long targetKoroneCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-065",
+            "BACK",
+            "FIRST",
+            0
+        );
+        Long targetKoroneHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, targetKoroneCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int guestCheerDeckBefore = countZone(matchId, guestId, "CHEER_DECK");
+        int targetKoroneCheerBefore = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            targetKoroneHolomemId
+        );
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            guestId
+        );
+        assertThat(pendingContextText).contains("HBP03-066");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"SELF_DOWNED\"");
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
+
+        int guestCheerDeckAfter = countZone(matchId, guestId, "CHEER_DECK");
+        int targetKoroneCheerAfter = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            targetKoroneHolomemId
+        );
+        String executedPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+
+        assertThat(guestCheerDeckAfter).isEqualTo(guestCheerDeckBefore - 1);
+        assertThat(targetKoroneCheerAfter).isEqualTo(targetKoroneCheerBefore + 1);
+        assertThat(executedPayloadText).contains("\"effectType\": \"ADD_CHEER\"");
+        assertThat(executedPayloadText).doesNotContain("\"skipped\": true");
+    }
+
+    @Test
+    void attackArtShouldNotTriggerOfficialGiftHbp03066WhenAnotherAllyDowned() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03066-no-self-host", "gift-hbp03066-no-self-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP03066_OTHER_ATTACKER"
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-066",
+            "BACK",
+            "SECOND",
+            0
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int guestCheerDeckBefore = countZone(matchId, guestId, "CHEER_DECK");
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer pendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+        assertThat(pendingCount).isZero();
+        assertThat(countZone(matchId, guestId, "CHEER_DECK")).isEqualTo(guestCheerDeckBefore);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHbp03072WhenSelfDownedAndReattachCheerToOtherWatame() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03072-host", "gift-hbp03072-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP03072_ATTACKER"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-072",
+            "CENTER",
+            "SECOND",
+            0
+        );
+        Long watameBackCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-071",
+            "BACK",
+            "FIRST",
+            0
+        );
+        Long nonWatameBackCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            1
+        );
+        Long targetHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, targetCardInstanceId);
+        Long watameBackHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, watameBackCardInstanceId);
+        Long nonWatameBackHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, nonWatameBackCardInstanceId);
+        Long attachedCheerInstanceId = insertCheerCardIntoZone(matchId, guestId, "YELLOW", "STAGE");
+        String attachedCheerCardId = jdbcTemplate.queryForObject(
+            "SELECT card_id FROM match_cards WHERE id = ?",
+            String.class,
+            attachedCheerInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
+            """,
+            targetHolomemId,
+            attachedCheerInstanceId,
+            attachedCheerCardId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            guestId
+        );
+        assertThat(pendingContextText).contains("HBP03-072");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"SELF_DOWNED\"");
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
+
+        String sourceCheerZoneAfterConfirm = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            attachedCheerInstanceId
+        );
+        Integer watameSpecificCheerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomem_cheers
+            WHERE match_holomem_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            watameBackHolomemId,
+            attachedCheerInstanceId
+        );
+        Integer nonWatameSpecificCheerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomem_cheers
+            WHERE match_holomem_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            nonWatameBackHolomemId,
+            attachedCheerInstanceId
+        );
+        String executedPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+
+        assertThat(sourceCheerZoneAfterConfirm).isEqualTo("STAGE");
+        assertThat(watameSpecificCheerCount).isEqualTo(1);
+        assertThat(nonWatameSpecificCheerCount).isZero();
+        assertThat(executedPayloadText).contains("\"effectType\": \"REATTACH\"");
+        assertThat(executedPayloadText).contains("\"moveApplied\": 1");
+        assertThat(executedPayloadText).doesNotContain("\"skipped\": true");
+    }
+
+    @Test
+    void attackArtShouldNotTriggerOfficialGiftHbp03072WhenAnotherAllyDowned() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03072-no-self-host", "gift-hbp03072-no-self-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP03072_OTHER_ATTACKER"
+        );
+        Long holderCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-072",
+            "BACK",
+            "SECOND",
+            0
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long holderHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, holderCardInstanceId);
+        Long attachedCheerInstanceId = insertCheerCardIntoZone(matchId, guestId, "YELLOW", "STAGE");
+        String attachedCheerCardId = jdbcTemplate.queryForObject(
+            "SELECT card_id FROM match_cards WHERE id = ?",
+            String.class,
+            attachedCheerInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
+            """,
+            holderHolomemId,
+            attachedCheerInstanceId,
+            attachedCheerCardId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int holderCheerBefore = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        );
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer pendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+
+        assertThat(pendingCount).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        )).isEqualTo(holderCheerBefore);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHbp04077WhenSelfDownedAndReturnSelectedStackCardToHand() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04077-host", "gift-hbp04077-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP04077_ATTACKER"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-077",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+        Long targetHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, targetCardInstanceId);
+        String stackedCardId = createMemberCardDefinition(
+            "THBP04077_STACK",
+            "HBP04-077 疊牌回手目標",
+            "DEBUT",
+            110,
+            "YELLOW"
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
+            VALUES (?, ?, ?, 'STAGE', NULL, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            matchId,
+            guestId,
+            stackedCardId
+        );
+        Long stackedCardInstanceId = jdbcTemplate.queryForObject(
+            """
+            SELECT id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND card_id = ?
+              AND zone = 'STAGE'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            Long.class,
+            matchId,
+            guestId,
+            stackedCardId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomem_stack_cards
+            SET stack_order = 2
+            WHERE match_holomem_id = ?
+              AND match_card_id = ?
+            """,
+            targetHolomemId,
+            targetCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_stack_cards (match_holomem_id, match_card_id, stack_order)
+            VALUES (?, ?, 1)
+            """,
+            targetHolomemId,
+            stackedCardInstanceId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int guestHandBefore = countZone(matchId, guestId, "HAND");
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Long pendingDecisionId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            guestId
+        );
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE id = ?
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            pendingDecisionId
+        );
+        String stackedZoneAfterAttack = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            stackedCardInstanceId
+        );
+
+        assertThat(pendingDecisionId).isNotNull();
+        assertThat(pendingContextText).contains("HBP04-077");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"SELF_DOWNED\"");
+        assertThat(pendingContextText).contains("giftHolderStackCardInstanceIds");
+        assertThat(pendingContextText).contains("selectionCandidateCardInstanceIds");
+        assertThat(stackedZoneAfterAttack).isEqualTo("ARCHIVE");
+
+        ResolveDecisionRequest resolve = new ResolveDecisionRequest();
+        resolve.setDecisionId(pendingDecisionId);
+        resolve.setSelectedCardInstanceIds(List.of(stackedCardInstanceId));
+        matchActionService.resolveDecision(matchId, guestId, resolve);
+
+        int guestHandAfter = countZone(matchId, guestId, "HAND");
+        String stackedZoneAfterConfirm = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            stackedCardInstanceId
+        );
+        String holderZoneAfterConfirm = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            targetCardInstanceId
+        );
+        String executedPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+
+        assertThat(guestHandAfter).isEqualTo(guestHandBefore + 1);
+        assertThat(stackedZoneAfterConfirm).isEqualTo("HAND");
+        assertThat(holderZoneAfterConfirm).isEqualTo("ARCHIVE");
+        assertThat(executedPayloadText).contains("\"effectType\": \"RETURN_TO_HAND\"");
+        assertThat(executedPayloadText).contains(stackedCardInstanceId.toString());
+        assertThat(executedPayloadText).doesNotContain("\"skipped\": true");
+    }
+
+    @Test
+    void attackArtShouldNotTriggerOfficialGiftHbp04077WhenAnotherAllyDowned() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04077-no-self-host", "gift-hbp04077-no-self-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP04077_OTHER_ATTACKER"
+        );
+        Long holderCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-077",
+            "BACK",
+            "FIRST",
+            0
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long holderHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, holderCardInstanceId);
+        String stackedCardId = createMemberCardDefinition(
+            "THBP04077_NOSELF_STACK",
+            "HBP04-077 非 self down 疊牌",
+            "DEBUT",
+            110,
+            "YELLOW"
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
+            VALUES (?, ?, ?, 'STAGE', NULL, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            matchId,
+            guestId,
+            stackedCardId
+        );
+        Long stackedCardInstanceId = jdbcTemplate.queryForObject(
+            """
+            SELECT id
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND card_id = ?
+              AND zone = 'STAGE'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            Long.class,
+            matchId,
+            guestId,
+            stackedCardId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomem_stack_cards
+            SET stack_order = 2
+            WHERE match_holomem_id = ?
+              AND match_card_id = ?
+            """,
+            holderHolomemId,
+            holderCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_stack_cards (match_holomem_id, match_card_id, stack_order)
+            VALUES (?, ?, 1)
+            """,
+            holderHolomemId,
+            stackedCardInstanceId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer pendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+        String stackedZoneAfterAttack = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            stackedCardInstanceId
+        );
+
+        assertThat(pendingCount).isZero();
+        assertThat(stackedZoneAfterAttack).isEqualTo("STAGE");
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp04078ArtCostReductionOnCenterHolderSelf() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04078-center-host", "gift-hbp04078-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP04-078',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP04-078',
+                current_level = 'SECOND',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 1, "YELLOW", "h478cy");
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 2, "COLORLESS", "h478cc");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        entityManager.clear();
+
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "THBP04078_WEAPON_" + System.nanoTime(),
+            "古代武器",
+            false,
+            "BUFF",
+            "{\"type\":\"BUFF\",\"rawText\":\"カードタイプ\\nサポート・ツール\\nテスト用。\"}",
+            "SELF"
+        );
+        PlaySupportActionRequest playSupport = new PlaySupportActionRequest();
+        playSupport.setCardInstanceId(supportCardInstanceId);
+        playSupport.setTargetHolomemCardInstanceId(hostCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, playSupport);
+
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 1, "YELLOW", "h478cy");
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 2, "COLORLESS", "h478cc");
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET current_phase = 'PERFORMANCE',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            matchId
+        );
+        entityManager.clear();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+
+        assertThat(payloadText).containsPattern("\"artBaseCost\"\\s*:\\s*\\{[^}]*\"YELLOW\"\\s*:\\s*2[^}]*\"COLORLESS\"\\s*:\\s*2");
+        assertThat(payloadText).containsPattern("\"passiveGiftArtCostReduction\"\\s*:\\s*\\{[^}]*\"YELLOW\"\\s*:\\s*1");
+        assertThat(payloadText).containsPattern("\"artCost\"\\s*:\\s*\\{[^}]*\"YELLOW\"\\s*:\\s*1[^}]*\"COLORLESS\"\\s*:\\s*2");
+        assertThat(payloadText).containsPattern("\"paidTotal\"\\s*:\\s*3");
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp04078ArtCostReductionFromCollabHolderToCenterAnya() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04078-collab-host", "gift-hbp04078-collab-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String centerAttackerCardId = createMemberCardDefinition(
+            "THBP04078_CENTER",
+            "アーニャ・メルフィッサ",
+            "DEBUT",
+            180,
+            "YELLOW"
+        );
+        insertPrimaryArtForMember(
+            centerAttackerCardId,
+            "測試藝能 90",
+            "{\"YELLOW\":2,\"COLORLESS\":2}",
+            "{\"type\":\"DAMAGE\",\"value\":90,\"rawHeader\":\"測試藝能 90\"}"
+        );
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            centerAttackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            centerAttackerCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 1, "YELLOW", "h478yy");
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 2, "COLORLESS", "h478wc");
+
+        createStageHolomemWithSingleCard(matchId, hostId, "HBP04-078", "COLLAB", "SECOND", 0);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        entityManager.clear();
+
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "THBP04078_WEAPON_COLLAB_" + System.nanoTime(),
+            "古代武器",
+            false,
+            "BUFF",
+            "{\"type\":\"BUFF\",\"rawText\":\"カードタイプ\\nサポート・ツール\\nテスト用。\"}",
+            "SELF"
+        );
+        PlaySupportActionRequest playSupport = new PlaySupportActionRequest();
+        playSupport.setCardInstanceId(supportCardInstanceId);
+        playSupport.setTargetHolomemCardInstanceId(hostCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, playSupport);
+
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 1, "YELLOW", "h478yy");
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 2, "COLORLESS", "h478wc");
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET current_phase = 'PERFORMANCE',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            matchId
+        );
+        entityManager.clear();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+
+        assertThat(payloadText).containsPattern("\"artBaseCost\"\\s*:\\s*\\{[^}]*\"YELLOW\"\\s*:\\s*2[^}]*\"COLORLESS\"\\s*:\\s*2");
+        assertThat(payloadText).containsPattern("\"passiveGiftArtCostReduction\"\\s*:\\s*\\{[^}]*\"YELLOW\"\\s*:\\s*1");
+        assertThat(payloadText).containsPattern("\"artCost\"\\s*:\\s*\\{[^}]*\"YELLOW\"\\s*:\\s*1[^}]*\"COLORLESS\"\\s*:\\s*2");
+        assertThat(payloadText).containsPattern("\"paidTotal\"\\s*:\\s*3");
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp04078ArtCostReductionWithoutAttachedAncientWeapon() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04078-no-weapon-host", "gift-hbp04078-no-weapon-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP04-078',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP04-078',
+                current_level = 'SECOND',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update("DELETE FROM match_holomem_cheers WHERE match_holomem_id = ?", hostCenterHolomemId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 1, "YELLOW", "h478ny");
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 2, "COLORLESS", "h478nc");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        entityManager.clear();
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET current_phase = 'PERFORMANCE',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            matchId
+        );
+        entityManager.clear();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+
+        assertThatThrownBy(() -> matchActionService.attackArt(matchId, hostId, attack))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("需要 YELLOW Cheer x2");
+        assertThat(jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        )).isZero();
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp06056ArtCostReductionAfterReferencedSpOshiSkillUsedThisGame() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06056-cost-host", "gift-hbp06056-cost-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-056",
+            "COLLAB",
+            "SECOND",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 2, "BLUE", "hbp06056-blue");
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "COLORLESS", "hbp06056-colorless");
+        insertOshiSkillHistoryAction(matchId, hostId, 1, 99, "SP", "人生リセットボタン");
+        assertThat(jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'USE_OSHI_SKILL'
+              AND payload ->> 'skillType' = 'SP'
+              AND payload ->> 'skillName' = '人生リセットボタン'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        )).isEqualTo(1);
+        assertThat(
+            matchEffectService.resolvePassiveGiftArtCheerCostReduction(
+                matchId,
+                hostId,
+                attackerHolomemId,
+                "沙花叉と青春しよ？ 120+紫+50"
+            )
+        ).containsEntry("COLORLESS", 1);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'PERFORMANCE',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        entityManager.clear();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer passiveReduction = jdbcTemplate.query(
+            """
+            SELECT CAST(payload -> 'passiveGiftArtCostReduction' ->> 'COLORLESS' AS INTEGER)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt(1) : null,
+            matchId,
+            hostId
+        );
+        Integer colorlessCost = jdbcTemplate.query(
+            """
+            SELECT CAST(payload -> 'artCost' ->> 'COLORLESS' AS INTEGER)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt(1) : null,
+            matchId,
+            hostId
+        );
+        Integer paidTotal = jdbcTemplate.query(
+            """
+            SELECT CAST(payload -> 'costPayment' ->> 'paidTotal' AS INTEGER)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getInt(1) : null,
+            matchId,
+            hostId
+        );
+        Boolean consumed = jdbcTemplate.query(
+            """
+            SELECT CAST(payload -> 'costPayment' ->> 'consumed' AS BOOLEAN)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getBoolean(1) : null,
+            matchId,
+            hostId
+        );
+
+        assertThat(passiveReduction).isEqualTo(1);
+        assertThat(colorlessCost).isEqualTo(1);
+        assertThat(paidTotal).isEqualTo(3);
+        assertThat(consumed).isFalse();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            attackerHolomemId
+        )).isEqualTo(3);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp06056ArtCostReductionWithoutReferencedSpOshiSkillHistory() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06056-no-skill-host", "gift-hbp06056-no-skill-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-056",
+            "COLLAB",
+            "SECOND",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 2, "BLUE", "hbp06056-ns-blue");
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "COLORLESS", "hbp06056-ns-colorless");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'PERFORMANCE',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        entityManager.clear();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+
+        assertThatThrownBy(() -> matchActionService.attackArt(matchId, hostId, attack))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("需要無色 Cheer x2");
+        assertThat(jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        )).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            attackerHolomemId
+        )).isEqualTo(3);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp06046ArtBonusAfterReferencedSpOshiSkillUsedThisGame() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06046-skill-host", "gift-hbp06046-skill-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-046",
+            "CENTER",
+            "SECOND",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "RED", "hbp06046-red");
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 2, "COLORLESS", "hbp06046-colorless");
+        insertOshiSkillHistoryAction(matchId, hostId, 1, 99, "SP", "ホークアイ");
+
+        assertThat(matchEffectService.resolvePassiveGiftArtBonus(matchId, hostId, attackerHolomemId, "CENTER")).isEqualTo(20);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        String durableTargetCardId = createMemberCardDefinition("THBP06046_TARGET", "HBP06-046 測試目標", "DEBUT", 300, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*140");
+        assertThat(damageTaken).isEqualTo(140);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp06046ArtBonusWithoutReferencedSpOshiSkillHistory() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06046-no-skill-host", "gift-hbp06046-no-skill-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-046",
+            "CENTER",
+            "SECOND",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "RED", "hbp06046-ns-red");
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 2, "COLORLESS", "hbp06046-ns-colorless");
+
+        assertThat(matchEffectService.resolvePassiveGiftArtBonus(matchId, hostId, attackerHolomemId, "CENTER")).isZero();
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        String durableTargetCardId = createMemberCardDefinition("THBP06046_NS_TARGET", "HBP06-046 無技能測試目標", "DEBUT", 300, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*120");
+        assertThat(damageTaken).isEqualTo(120);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp06082DamageReductionToAncientWeaponCenterWhenGuestOshiIsAnya() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06082-center-host", "gift-hbp06082-center-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        String protectedCenterCardId = createMemberCardDefinition(
+            "THBP06082_CENTER",
+            "HBP06-082 Protected Center",
+            "DEBUT",
+            200,
+            "YELLOW"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        createStageHolomemWithSingleCard(matchId, guestId, "HBP06-082", "COLLAB", "SECOND", 0);
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET oshi_card_id = 'HBP04-007',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            matchId,
+            guestId
+        );
+        attachDirectTestSupport(
+            matchId,
+            guestId,
+            guestCenterHolomemId,
+            "THBP06082_WEAPON_CENTER_" + System.nanoTime(),
+            "古代武器",
+            "TOOL"
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP06082_ATTACK_CENTER"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*70");
+        assertThat(damageTaken).isEqualTo(70);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialArtBonusHbp05050WhenMococoArtUsedAndReferencedOshiSkillUsedThisTurn() {
+        StartedMatchContext context = createStartedMatch("art-hbp05050-both-host", "art-hbp05050-both-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP05-050",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "BLUE", "hbp05050-blue");
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 2, "COLORLESS", "hbp05050-colorless");
+
+        String mococoCardId = createMemberCardDefinition("THBP05050_MOCOCO", "モココ・アビスガード", "DEBUT", 180, "BLUE");
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        insertAttackArtHistoryAction(matchId, hostId, 2, 90, mococoCardId, "BAU BAU 攻擊");
+        insertOshiSkillHistoryAction(matchId, hostId, 2, 91, "NORMAL", "モコちゃん！");
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        String durableTargetCardId = createMemberCardDefinition("THBP05050_TARGET", "HBP05-050 測試目標", "DEBUT", 300, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"artTextDamageBonus\"\\s*:\\s*70");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*170");
+        assertThat(damageTaken).isEqualTo(170);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialArtBonusHbp05050WhenOnlyReferencedOshiSkillUsedThisTurn() {
+        StartedMatchContext context = createStartedMatch("art-hbp05050-oshi-only-host", "art-hbp05050-oshi-only-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP05-050",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "BLUE", "hbp05050-only-blue");
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 2, "COLORLESS", "hbp05050-only-colorless");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        insertOshiSkillHistoryAction(matchId, hostId, 2, 90, "NORMAL", "モコちゃん！");
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        String durableTargetCardId = createMemberCardDefinition("THBP05050_ONLY_TARGET", "HBP05-050 單技能測試目標", "DEBUT", 300, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"artTextDamageBonus\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*130");
+        assertThat(damageTaken).isEqualTo(130);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialArtBonusHbp06052WhenMunaOshiAndFourCheersAttached() {
+        StartedMatchContext context = createStartedMatch("art-hbp06052-ok-host", "art-hbp06052-ok-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET oshi_card_id = 'HBP06-006',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            matchId,
+            hostId
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-052",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "BLUE", "hbp06052-blue");
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 3, "COLORLESS", "hbp06052-colorless");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        String durableTargetCardId = createMemberCardDefinition("THBP06052_TARGET", "HBP06-052 測試目標", "DEBUT", 300, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"artTextDamageBonus\"\\s*:\\s*60");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*80");
+        assertThat(damageTaken).isEqualTo(80);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialArtBonusHbp06052WhenOshiIsNotMuna() {
+        StartedMatchContext context = createStartedMatch("art-hbp06052-no-oshi-host", "art-hbp06052-no-oshi-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET oshi_card_id = 'HBP04-006',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            matchId,
+            hostId
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-052",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "BLUE", "hbp06052-no-oshi-blue");
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 3, "COLORLESS", "hbp06052-no-oshi-colorless");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        String durableTargetCardId = createMemberCardDefinition("THBP06052_NO_OSHI_TARGET", "HBP06-052 非指定推し測試目標", "DEBUT", 300, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"artTextDamageBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*20");
+        assertThat(damageTaken).isEqualTo(20);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialArtBonusHbp06070WhenReferencedOshiSkillUsedThisTurn() {
+        StartedMatchContext context = createStartedMatch("art-hbp06070-ok-host", "art-hbp06070-ok-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-070",
+            "CENTER",
+            "SECOND",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 4, "COLORLESS", "hbp06070-ok");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        insertOshiSkillHistoryAction(matchId, hostId, 2, 90, "SP", "無限の体力");
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        String durableTargetCardId = createMemberCardDefinition("THBP06070_TARGET", "HBP06-070 測試目標", "DEBUT", 500, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"artTextDamageBonus\"\\s*:\\s*40");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*210");
+        assertThat(damageTaken).isEqualTo(210);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialArtBonusHbp06070WithoutReferencedOshiSkillHistory() {
+        StartedMatchContext context = createStartedMatch("art-hbp06070-no-skill-host", "art-hbp06070-no-skill-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP06-070",
+            "CENTER",
+            "SECOND",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 4, "COLORLESS", "hbp06070-no-skill");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        String durableTargetCardId = createMemberCardDefinition("THBP06070_NS_TARGET", "HBP06-070 無技能測試目標", "DEBUT", 500, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"artTextDamageBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*170");
+        assertThat(damageTaken).isEqualTo(170);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialPassiveGiftHbp06082DamageReductionToAncientWeaponCollabWhenGuestOshiIsAnya() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06082-collab-host", "gift-hbp06082-collab-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCollabCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP06-082",
+            "COLLAB",
+            "SECOND",
+            0
+        );
+        Long guestCollabHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCollabCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET oshi_card_id = 'HBP04-007',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            matchId,
+            guestId
+        );
+        attachDirectTestSupport(
+            matchId,
+            guestId,
+            guestCollabHolomemId,
+            "THBP06082_WEAPON_COLLAB_" + System.nanoTime(),
+            "古代武器",
+            "TOOL"
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP06082_ATTACK_COLLAB"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCollabCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCollabHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*30");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*70");
+        assertThat(damageTaken).isEqualTo(70);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp06082DamageReductionWhenGuestOshiIsNotAnya() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06082-no-oshi-host", "gift-hbp06082-no-oshi-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        String protectedCenterCardId = createMemberCardDefinition(
+            "THBP06082_NO_OSHI_CENTER",
+            "HBP06-082 Protected Center",
+            "DEBUT",
+            200,
+            "YELLOW"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        createStageHolomemWithSingleCard(matchId, guestId, "HBP06-082", "COLLAB", "SECOND", 0);
+        attachDirectTestSupport(
+            matchId,
+            guestId,
+            guestCenterHolomemId,
+            "THBP06082_WEAPON_NO_OSHI_" + System.nanoTime(),
+            "古代武器",
+            "TOOL"
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP06082_ATTACK_NO_OSHI"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(damageTaken).isEqualTo(100);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialPassiveGiftHbp06082DamageReductionWithoutAttachedAncientWeapon() {
+        StartedMatchContext context = createStartedMatch("gift-hbp06082-no-weapon-host", "gift-hbp06082-no-weapon-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+        String protectedCenterCardId = createMemberCardDefinition(
+            "THBP06082_NO_WEAPON_CENTER",
+            "HBP06-082 Protected Center",
+            "DEBUT",
+            200,
+            "YELLOW"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            protectedCenterCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        createStageHolomemWithSingleCard(matchId, guestId, "HBP06-082", "COLLAB", "SECOND", 0);
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET oshi_card_id = 'HBP04-007',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            matchId,
+            guestId
+        );
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            100,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"target\":\"ANY_HOLOMEM\",\"value\":100,\"rawHeader\":\"測試藝能 100\"}",
+            0,
+            "RED",
+            "THBP06082_ATTACK_NO_WEAPON"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftIncomingDamageReduction\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(damageTaken).isEqualTo(100);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHbp04088WhenSelfDownedAndAttachCheerToRemainingHolomem() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04088-host", "gift-hbp04088-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP04088_ATTACKER"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-088",
+            "CENTER",
+            "SPOT",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int guestCheerDeckBefore = countZone(matchId, guestId, "CHEER_DECK");
+        int guestStageCheerBefore = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomem_cheers hc
+            JOIN match_holomems h ON h.id = hc.match_holomem_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            guestId
+        );
+        assertThat(pendingContextText).contains("HBP04-088");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"SELF_DOWNED\"");
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
+
+        int guestCheerDeckAfter = countZone(matchId, guestId, "CHEER_DECK");
+        int guestStageCheerAfter = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomem_cheers hc
+            JOIN match_holomems h ON h.id = hc.match_holomem_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+        String executedPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+
+        assertThat(guestCheerDeckAfter).isEqualTo(guestCheerDeckBefore - 1);
+        assertThat(guestStageCheerAfter).isEqualTo(guestStageCheerBefore + 1);
+        assertThat(executedPayloadText).contains("\"effectType\": \"ADD_CHEER\"");
+        assertThat(executedPayloadText).contains("CHEER_DECK");
+        assertThat(executedPayloadText).doesNotContain("\"skipped\": true");
+    }
+
+    @Test
+    void attackArtShouldNotTriggerOfficialGiftHbp04088WhenAnotherAllyDowned() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04088-no-self-host", "gift-hbp04088-no-self-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP04088_OTHER_ATTACKER"
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-088",
+            "BACK",
+            "SPOT",
+            0
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long survivingBackCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            1
+        );
+        Long survivingBackHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, survivingBackCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int guestCheerDeckBefore = countZone(matchId, guestId, "CHEER_DECK");
+        int backCheerBefore = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            survivingBackHolomemId
+        );
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer pendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+
+        assertThat(pendingCount).isZero();
+        assertThat(countZone(matchId, guestId, "CHEER_DECK")).isEqualTo(guestCheerDeckBefore);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            survivingBackHolomemId
+        )).isEqualTo(backCheerBefore);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHbp04079WhenSelfDownedAndReattachOwnCheer() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04079-host", "gift-hbp04079-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP04079_ATTACKER"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-079",
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long survivingBackCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            1
+        );
+        Long targetHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, targetCardInstanceId);
+        Long survivingBackHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, survivingBackCardInstanceId);
+        Long attachedCheerInstanceId = insertCheerCardIntoZone(matchId, guestId, "YELLOW", "STAGE");
+        String attachedCheerCardId = jdbcTemplate.queryForObject(
+            "SELECT card_id FROM match_cards WHERE id = ?",
+            String.class,
+            attachedCheerInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
+            """,
+            targetHolomemId,
+            attachedCheerInstanceId,
+            attachedCheerCardId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            guestId
+        );
+        String sourceCheerZoneAfterAttack = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            attachedCheerInstanceId
+        );
+        int survivingBackCheerAfterAttack = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            survivingBackHolomemId
+        );
+
+        assertThat(pendingContextText).contains("HBP04-079");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"SELF_DOWNED\"");
+        assertThat(pendingContextText).contains("giftHolderAttachedCheerCardInstanceIds");
+        assertThat(sourceCheerZoneAfterAttack).isEqualTo("ARCHIVE");
+        assertThat(survivingBackCheerAfterAttack).isZero();
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
+
+        String sourceCheerZoneAfterConfirm = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            attachedCheerInstanceId
+        );
+        Integer reattachedSpecificCheerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomem_cheers hc
+            JOIN match_holomems h ON h.id = hc.match_holomem_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND hc.match_card_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId,
+            attachedCheerInstanceId
+        );
+        String executedPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+
+        assertThat(sourceCheerZoneAfterConfirm).isEqualTo("STAGE");
+        assertThat(reattachedSpecificCheerCount).isEqualTo(1);
+        assertThat(executedPayloadText).contains("\"effectType\": \"REATTACH\"");
+        assertThat(executedPayloadText).contains("\"moveApplied\": 1");
+        assertThat(executedPayloadText).doesNotContain("\"skipped\": true");
+    }
+
+    @Test
+    void attackArtShouldNotTriggerOfficialGiftHbp04079WhenAnotherAllyDowned() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04079-no-self-host", "gift-hbp04079-no-self-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP04079_OTHER_ATTACKER"
+        );
+        Long holderCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-079",
+            "BACK",
+            "DEBUT",
+            0
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long holderHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, holderCardInstanceId);
+        Long attachedCheerInstanceId = insertCheerCardIntoZone(matchId, guestId, "YELLOW", "STAGE");
+        String attachedCheerCardId = jdbcTemplate.queryForObject(
+            "SELECT card_id FROM match_cards WHERE id = ?",
+            String.class,
+            attachedCheerInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
+            """,
+            holderHolomemId,
+            attachedCheerInstanceId,
+            attachedCheerCardId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int holderCheerBefore = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        );
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer pendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+
+        assertThat(pendingCount).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        )).isEqualTo(holderCheerBefore);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHbp04023OnlyToOtherReglossHolomem() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04023-host", "gift-hbp04023-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP04023_ATTACKER"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-023",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        String reglossTargetCardId = createMemberCardDefinition(
+            "THBP04023_REGLOSS_TARGET",
+            "ReGLOSS Target",
+            "DEBUT",
+            110,
+            "GREEN"
+        );
+        jdbcTemplate.update(
+            "UPDATE cards SET tags_json = '[\"#ReGLOSS\"]'::jsonb, updated_at = CURRENT_TIMESTAMP WHERE card_id = ?",
+            reglossTargetCardId
+        );
+        Long reglossBackCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            reglossTargetCardId,
+            "BACK",
+            "DEBUT",
+            1
+        );
+        Long nonReglossBackCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            1
+        );
+        Long targetHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, targetCardInstanceId);
+        Long reglossBackHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, reglossBackCardInstanceId);
+        Long nonReglossBackHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, nonReglossBackCardInstanceId);
+        Long attachedCheerInstanceId = insertCheerCardIntoZone(matchId, guestId, "GREEN", "STAGE");
+        String attachedCheerCardId = jdbcTemplate.queryForObject(
+            "SELECT card_id FROM match_cards WHERE id = ?",
+            String.class,
+            attachedCheerInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
+            """,
+            targetHolomemId,
+            attachedCheerInstanceId,
+            attachedCheerCardId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            guestId
+        );
+        assertThat(pendingContextText).contains("HBP04-023");
+        assertThat(pendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"SELF_DOWNED\"");
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
+
+        String sourceCheerZoneAfterConfirm = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            attachedCheerInstanceId
+        );
+        Integer reglossSpecificCheerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomem_cheers
+            WHERE match_holomem_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            reglossBackHolomemId,
+            attachedCheerInstanceId
+        );
+        Integer nonReglossSpecificCheerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomem_cheers
+            WHERE match_holomem_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            nonReglossBackHolomemId,
+            attachedCheerInstanceId
+        );
+        String executedPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+
+        assertThat(sourceCheerZoneAfterConfirm).isEqualTo("STAGE");
+        assertThat(reglossSpecificCheerCount).isEqualTo(1);
+        assertThat(nonReglossSpecificCheerCount).isZero();
+        assertThat(executedPayloadText).contains("\"effectType\": \"REATTACH\"");
+        assertThat(executedPayloadText).contains("\"moveApplied\": 1");
+        assertThat(executedPayloadText).doesNotContain("\"skipped\": true");
+    }
+
+    @Test
+    void attackArtShouldNotTriggerOfficialGiftHbp04023WhenAnotherAllyDowned() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04023-no-self-host", "gift-hbp04023-no-self-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            180,
+            "RED",
+            220,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":220}",
+            0,
+            "RED",
+            "THBP04023_OTHER_ATTACKER"
+        );
+        Long holderCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-023",
+            "BACK",
+            "FIRST",
+            0
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        Long holderHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, holderCardInstanceId);
+        Long attachedCheerInstanceId = insertCheerCardIntoZone(matchId, guestId, "GREEN", "STAGE");
+        String attachedCheerCardId = jdbcTemplate.queryForObject(
+            "SELECT card_id FROM match_cards WHERE id = ?",
+            String.class,
+            attachedCheerInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
+            """,
+            holderHolomemId,
+            attachedCheerInstanceId,
+            attachedCheerCardId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+        int holderCheerBefore = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        );
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(targetCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        Integer pendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+
+        assertThat(pendingCount).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            holderHolomemId
+        )).isEqualTo(holderCheerBefore);
+    }
+
+    @Test
+    void playSupportDamageShouldNotChangeHpOfOfficialGiftHbp04024DuringOpponentMainStep() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04024-damage-host", "gift-hbp04024-damage-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(matchId, hostId, findMemberCardIdByLevel("DEBUT"), "CENTER", "DEBUT", 0);
+        Long protectedCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-024",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TSUP_HBP04024_DAMAGE_" + System.nanoTime(),
+            false,
+            "DAMAGE",
+            "{\"type\":\"DAMAGE\",\"value\":30}",
+            "ENEMY"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        request.setTargetHolomemCardInstanceId(protectedCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(damage_taken, 0)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId,
+            protectedCenterCardInstanceId
+        );
+        assertThat(damageTaken).isZero();
+    }
+
+    @Test
+    void playSupportHealShouldNotChangeHpOfOfficialGiftHbp04024DuringOpponentMainStep() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04024-heal-host", "gift-hbp04024-heal-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(matchId, hostId, findMemberCardIdByLevel("DEBUT"), "CENTER", "DEBUT", 0);
+        Long protectedCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-024",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET damage_taken = 50
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            protectedCenterCardInstanceId
+        );
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TSUP_HBP04024_HEAL_" + System.nanoTime(),
+            false,
+            "HEAL",
+            "{\"type\":\"HEAL\",\"value\":30}",
+            "ENEMY"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        request.setTargetHolomemCardInstanceId(protectedCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(damage_taken, 0)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId,
+            protectedCenterCardInstanceId
+        );
+        assertThat(damageTaken).isEqualTo(50);
+    }
+
+    @Test
+    void playSupportDamageShouldAffectOfficialGiftHbp04024WhenHolderIsNotCenter() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04024-back-host", "gift-hbp04024-back-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(matchId, hostId, findMemberCardIdByLevel("DEBUT"), "CENTER", "DEBUT", 0);
+        Long backCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP04-024",
+            "BACK",
+            "FIRST",
+            0
+        );
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TSUP_HBP04024_BACK_" + System.nanoTime(),
+            false,
+            "DAMAGE",
+            "{\"type\":\"DAMAGE\",\"value\":30}",
+            "ENEMY"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        request.setTargetHolomemCardInstanceId(backCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(damage_taken, 0)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId,
+            backCardInstanceId
+        );
+        assertThat(damageTaken).isEqualTo(30);
+    }
+
+    @Test
+    void playSupportDamageShouldNotChangeHpOfCenterKoroneWhenOfficialGiftHbp03065IsInCollab() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03065-damage-host", "gift-hbp03065-damage-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(matchId, hostId, findMemberCardIdByLevel("DEBUT"), "CENTER", "DEBUT", 0);
+        Long protectedCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-065",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        Long collabHolderCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-065",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TSUP_HBP03065_DAMAGE_" + System.nanoTime(),
+            false,
+            "DAMAGE",
+            "{\"type\":\"DAMAGE\",\"value\":30}",
+            "ENEMY"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        assertThat(collabHolderCardInstanceId).isNotNull();
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        request.setTargetHolomemCardInstanceId(protectedCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(damage_taken, 0)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId,
+            protectedCenterCardInstanceId
+        );
+        assertThat(damageTaken).isZero();
+    }
+
+    @Test
+    void playSupportHealShouldNotChangeHpOfCenterKoroneWhenOfficialGiftHbp03065IsInCollab() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03065-heal-host", "gift-hbp03065-heal-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(matchId, hostId, findMemberCardIdByLevel("DEBUT"), "CENTER", "DEBUT", 0);
+        Long protectedCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-065",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-065",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET damage_taken = 50
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            protectedCenterCardInstanceId
+        );
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TSUP_HBP03065_HEAL_" + System.nanoTime(),
+            false,
+            "HEAL",
+            "{\"type\":\"HEAL\",\"value\":30}",
+            "ENEMY"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        request.setTargetHolomemCardInstanceId(protectedCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(damage_taken, 0)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId,
+            protectedCenterCardInstanceId
+        );
+        assertThat(damageTaken).isEqualTo(50);
+    }
+
+    @Test
+    void playSupportDamageShouldAffectCenterWhenOfficialGiftHbp03065HolderIsNotCollab() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03065-back-host", "gift-hbp03065-back-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(matchId, hostId, findMemberCardIdByLevel("DEBUT"), "CENTER", "DEBUT", 0);
+        Long targetCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-065",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-065",
+            "BACK",
+            "FIRST",
+            0
+        );
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TSUP_HBP03065_BACK_" + System.nanoTime(),
+            false,
+            "DAMAGE",
+            "{\"type\":\"DAMAGE\",\"value\":30}",
+            "ENEMY"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        request.setTargetHolomemCardInstanceId(targetCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(damage_taken, 0)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId,
+            targetCenterCardInstanceId
+        );
+        assertThat(damageTaken).isEqualTo(30);
+    }
+
+    @Test
+    void playSupportHealShouldAffectEnemyHolomemWhenNoPassiveProtectionApplies() {
+        StartedMatchContext context = createStartedMatch("gift-hbp04024-heal-control-host", "gift-hbp04024-heal-control-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(matchId, hostId, findMemberCardIdByLevel("DEBUT"), "CENTER", "DEBUT", 0);
+        String targetCardId = createMemberCardDefinition(
+            "THBP04024_HEAL_CONTROL",
+            "Heal Control Target",
+            "DEBUT",
+            120,
+            "GREEN"
+        );
+        Long targetCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            targetCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET damage_taken = 50
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            targetCardInstanceId
+        );
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TSUP_HBP04024_HEAL_CONTROL_" + System.nanoTime(),
+            false,
+            "HEAL",
+            "{\"type\":\"HEAL\",\"value\":30}",
+            "ENEMY"
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        request.setTargetHolomemCardInstanceId(targetCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(damage_taken, 0)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            Integer.class,
+            matchId,
+            guestId,
+            targetCardInstanceId
+        );
+        assertThat(damageTaken).isEqualTo(20);
     }
 
     @Test
@@ -17054,6 +28538,121 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
     }
 
     @Test
+    void advancePhaseShouldTriggerOfficialGiftHbp03022OnOpponentPerformanceStart() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03022-perf-start-host", "gift-hbp03022-perf-start-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String hostVanillaCardId = createMemberCardDefinition(
+            "THBP03022_HOST_VANILLA",
+            "HBP03-022 Host Vanilla",
+            "DEBUT",
+            120,
+            "WHITE"
+        );
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            hostVanillaCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            hostVanillaCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = 'HBP03-022',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = 'HBP03-022',
+                current_level = 'FIRST',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        matchActionService.advancePhase(matchId, hostId);
+
+        String guestPendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            guestId
+        );
+        assertThat(guestPendingContextText).contains("HBP03-022");
+        assertThat(guestPendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"PERFORMANCE_START_OPPONENT\"");
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
+
+        assertThat(jdbcTemplate.queryForObject("SELECT current_phase FROM matches WHERE id = ?", String.class, matchId))
+            .isEqualTo("PERFORMANCE");
+    }
+
+    @Test
     void advancePhaseShouldCreateOwnPerformanceEndGiftConfirm() {
         StartedMatchContext context = createStartedMatch("gift-performance-end-self-host", "gift-performance-end-self-guest");
         Long matchId = context.matchId();
@@ -17447,6 +29046,1040 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             Integer.class,
             guestHolderHolomemId
         )).isEqualTo(holderCheerBefore);
+    }
+
+    @Test
+    void advancePhaseShouldTriggerOfficialGiftHbp03083WhenOpponentPerformanceEndsAndLifeReduced() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03083-perf-end-host", "gift-hbp03083-perf-end-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            "HBP03-083",
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'FIRST',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            "HBP03-083",
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestHolderHolomemId = jdbcTemplate.queryForObject(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            Long.class,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        insertCheerCardIntoZone(matchId, guestId, "YELLOW", "ARCHIVE");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, loadFirstCenterCardInstanceId(matchId, hostId));
+        int guestArchiveBefore = countZone(matchId, guestId, "ARCHIVE");
+        int holderCheerBefore = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            guestHolderHolomemId
+        );
+
+        matchActionService.advancePhase(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET current_life = GREATEST(COALESCE(current_life, 0) - 1, 0),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            matchId,
+            guestId
+        );
+        matchActionService.advancePhase(matchId, hostId);
+
+        String guestPendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            guestId
+        );
+        assertThat(guestPendingContextText).contains("HBP03-083");
+        assertThat(guestPendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"PERFORMANCE_END_OPPONENT\"");
+
+        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
+
+        int guestArchiveAfter = countZone(matchId, guestId, "ARCHIVE");
+        int holderCheerAfter = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            guestHolderHolomemId
+        );
+        String executedPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+
+        assertThat(guestArchiveAfter).isEqualTo(guestArchiveBefore - 1);
+        assertThat(holderCheerAfter).isEqualTo(holderCheerBefore + 1);
+        assertThat(executedPayloadText).contains("\"effectType\": \"ADD_CHEER\"");
+        assertThat(executedPayloadText).contains("ARCHIVE");
+    }
+
+    @Test
+    void advancePhaseShouldNotTriggerOfficialGiftHbp03083WhenOpponentPerformanceEndsWithoutLifeReduced() {
+        StartedMatchContext context = createStartedMatch("gift-hbp03083-perf-end-fail-host", "gift-hbp03083-perf-end-fail-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            "HBP03-083",
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'FIRST',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            "HBP03-083",
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestHolderHolomemId = jdbcTemplate.queryForObject(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            Long.class,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        insertCheerCardIntoZone(matchId, guestId, "YELLOW", "ARCHIVE");
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, loadFirstCenterCardInstanceId(matchId, hostId));
+        int guestArchiveBefore = countZone(matchId, guestId, "ARCHIVE");
+        int holderCheerBefore = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            guestHolderHolomemId
+        );
+
+        matchActionService.advancePhase(matchId, hostId);
+        matchActionService.advancePhase(matchId, hostId);
+
+        Integer pendingCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+        assertThat(pendingCount).isZero();
+        assertThat(countZone(matchId, guestId, "ARCHIVE")).isEqualTo(guestArchiveBefore);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_holomem_cheers WHERE match_holomem_id = ?",
+            Integer.class,
+            guestHolderHolomemId
+        )).isEqualTo(holderCheerBefore);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialExtraLifeLossForHbp03083WhenSelfDowned() {
+        StartedMatchContext context = createStartedMatch("hbp03083-down-host", "hbp03083-down-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id IN (?, ?)
+            """,
+            matchId,
+            hostId,
+            guestId
+        );
+
+        Long hostCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            200,
+            "RED",
+            260,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":260,\"rawHeader\":\"測試藝能 260\"}",
+            0,
+            "RED",
+            "hbp03083-down-host-center"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP03-083",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        int lifeBefore = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeBefore).isGreaterThanOrEqualTo(3);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_phase = 'PERFORMANCE',
+                current_turn_player_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_pending_decisions
+            SET status = 'RESOLVED',
+                resolved_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND status = 'PENDING'
+            """,
+            matchId
+        );
+        entityManager.clear();
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        int lifeAfterAttack = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterAttack).isEqualTo(lifeBefore - 1);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("HBP03-083");
+        assertThat(pendingContextText).containsPattern("\"sectionType\"\\s*:\\s*\"DOWN_EVENT\"");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int lifeAfterConfirm = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterConfirm).isEqualTo(lifeBefore - 3);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialGiftHbp05028WhenStageBotanDealsSpecialDamageThirtyOrMore() {
+        StartedMatchContext context = createStartedMatch("hbp05028-special-host", "hbp05028-special-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long hostCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP05-028",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        Long hostCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, hostCenterCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 1, "GREEN", "hbp05028-green");
+        attachDirectTestCheers(matchId, hostId, hostCenterHolomemId, 1, "COLORLESS", "hbp05028-colorless");
+
+        String durableTargetCardId = createMemberCardDefinition("THBP05028_TARGET", "HBP05-028 特傷目標", "DEBUT", 400, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_phase = 'MAIN',
+                current_turn_player_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+        int hostDeckBefore = countZone(matchId, hostId, "DECK");
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("HBP05-028");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int hostDeckAfterConfirm = countZone(matchId, hostId, "DECK");
+        assertThat(hostDeckAfterConfirm).isEqualTo(hostDeckBefore - 1);
+    }
+
+    @Test
+    void attackArtShouldTriggerOfficialExtraLifeLossForHbp05028WhenSelfDowned() {
+        StartedMatchContext context = createStartedMatch("hbp05028-down-host", "hbp05028-down-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id IN (?, ?)
+            """,
+            matchId,
+            hostId,
+            guestId
+        );
+
+        Long hostCenterCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "CENTER",
+            200,
+            "RED",
+            260,
+            "{}",
+            "{\"type\":\"DAMAGE\",\"value\":260,\"rawHeader\":\"測試藝能 260\"}",
+            0,
+            "RED",
+            "hbp05028-down-host-center"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            "HBP05-028",
+            "CENTER",
+            "FIRST",
+            0
+        );
+        createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            findMemberCardIdByLevel("DEBUT"),
+            "BACK",
+            "DEBUT",
+            0
+        );
+
+        int lifeBefore = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeBefore).isGreaterThanOrEqualTo(3);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_phase = 'PERFORMANCE',
+                current_turn_player_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 2, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_pending_decisions
+            SET status = 'RESOLVED',
+                resolved_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND status = 'PENDING'
+            """,
+            matchId
+        );
+        entityManager.clear();
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(hostCenterCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        int lifeAfterAttack = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterAttack).isEqualTo(lifeBefore - 1);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).contains("HBP05-028");
+        assertThat(pendingContextText).containsPattern("\"sectionType\"\\s*:\\s*\"DOWN_EVENT\"");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int lifeAfterConfirm = countZone(matchId, guestId, "LIFE");
+        assertThat(lifeAfterConfirm).isEqualTo(lifeBefore - 3);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialArtBonusHbp05038WhenSpOshiBauBauUsedAndHolderInCollab() {
+        StartedMatchContext context = createStartedMatch("art-hbp05038-bau-host", "art-hbp05038-bau-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP05-038",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "COLORLESS", "hbp05038-bau-colorless");
+        String hostDebutCardId = findMemberCardIdByLevel("DEBUT");
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id <> ?
+              AND id IN (
+                  SELECT match_card_id
+                  FROM match_holomems
+                  WHERE match_id = ?
+                    AND owner_user_id = ?
+              )
+            """,
+            hostDebutCardId,
+            matchId,
+            hostId,
+            attackerCardInstanceId,
+            matchId,
+            hostId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id <> ?
+            """,
+            hostDebutCardId,
+            matchId,
+            hostId,
+            attackerCardInstanceId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        insertOshiSkillHistoryAction(matchId, hostId, 2, 90, "SP", "BAU BAU!");
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        String durableTargetCardId = createMemberCardDefinition("THBP05038_TARGET", "HBP05-038 測試目標", "DEBUT", 300, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*70");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*100");
+        assertThat(damageTaken).isEqualTo(100);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialExtraArtBonusHbp05038WhenSecondHolomemAlsoOnStage() {
+        StartedMatchContext context = createStartedMatch("art-hbp05038-second-host", "art-hbp05038-second-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP05-038",
+            "COLLAB",
+            "FIRST",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "COLORLESS", "hbp05038-second-colorless");
+        createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            findMemberCardIdByLevel("SECOND"),
+            "BACK",
+            "SECOND",
+            0
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        insertOshiSkillHistoryAction(matchId, hostId, 2, 90, "SP", "BAU BAU!");
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        String durableTargetCardId = createMemberCardDefinition("THBP05038_SECOND_TARGET", "HBP05-038 二段加成目標", "DEBUT", 320, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*120");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*150");
+        assertThat(damageTaken).isEqualTo(150);
+    }
+
+    @Test
+    void attackArtShouldApplyOfficialSpecialDamageBonusHbp05045WhenAttackerIsOkayuAndTargetIsCenter() {
+        StartedMatchContext context = createStartedMatch("art-hbp05045-okayu-host", "art-hbp05045-okayu-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP05-045",
+            "CENTER",
+            "SECOND",
+            0
+        );
+        Long attackerCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP05-045",
+            "COLLAB",
+            "SECOND",
+            0
+        );
+        Long attackerHolomemId = loadHolomemIdByCardInstanceId(matchId, hostId, attackerCardInstanceId);
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 2, "BLUE", "hbp05045-okayu-blue");
+        attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "COLORLESS", "hbp05045-okayu-colorless");
+
+        String durableTargetCardId = createMemberCardDefinition("THBP05045_TARGET", "HBP05-045 測試中心目標", "DEBUT", 300, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*20");
+        assertThat(payloadText).containsPattern("\"artBaseDamage\"\\s*:\\s*120");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*140");
+        assertThat(damageTaken).isEqualTo(140);
+    }
+
+    @Test
+    void attackArtShouldNotApplyOfficialSpecialDamageBonusHbp05045WhenAttackerIsNotOkayu() {
+        StartedMatchContext context = createStartedMatch("art-hbp05045-non-okayu-host", "art-hbp05045-non-okayu-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        createStageHolomemWithSingleCard(
+            matchId,
+            hostId,
+            "HBP05-045",
+            "CENTER",
+            "SECOND",
+            0
+        );
+        Long attackerCardInstanceId = createStageHolomemWithArtAndCheer(
+            matchId,
+            hostId,
+            "COLLAB",
+            180,
+            "BLUE",
+            30,
+            "{\"COLORLESS\":1}",
+            "{\"type\":\"DAMAGE\",\"value\":30}",
+            1,
+            "COLORLESS",
+            "T5045NOA"
+        );
+
+        String durableTargetCardId = createMemberCardDefinition("THBP05045_NON_OKAYU_TARGET", "HBP05-045 非おかゆ中心目標", "DEBUT", 300, "BLUE");
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                damage_taken = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            durableTargetCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        Long guestCenterHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, guestCenterCardInstanceId);
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+        advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
+
+        AttackArtActionRequest attack = new AttackArtActionRequest();
+        attack.setAttackerCardInstanceId(attackerCardInstanceId);
+        attack.setTargetCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.attackArt(matchId, hostId, attack);
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        Integer damageTaken = jdbcTemplate.queryForObject(
+            "SELECT damage_taken FROM match_holomems WHERE id = ?",
+            Integer.class,
+            guestCenterHolomemId
+        );
+
+        assertThat(payloadText).containsPattern("\"passiveGiftArtBonus\"\\s*:\\s*0");
+        assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*30");
+        assertThat(damageTaken).isEqualTo(30);
     }
 
     @Test
@@ -18710,6 +31343,48 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         }
     }
 
+    private void insertOshiSkillHistoryAction(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        int actionOrder,
+        String skillType,
+        String skillName
+    ) {
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'USE_OSHI_SKILL', CAST(? AS jsonb), CURRENT_TIMESTAMP, ?, ?)
+            """,
+            matchId,
+            userId,
+            "{\"skillType\":\"" + skillType + "\",\"skillName\":\"" + skillName + "\"}",
+            turnNumber,
+            actionOrder
+        );
+    }
+
+    private void insertAttackArtHistoryAction(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        int actionOrder,
+        String attackerCardId,
+        String artName
+    ) {
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'ATTACK_ART', CAST(? AS jsonb), CURRENT_TIMESTAMP, ?, ?)
+            """,
+            matchId,
+            userId,
+            "{\"attackerCardId\":\"" + attackerCardId + "\",\"artName\":\"" + artName + "\"}",
+            turnNumber,
+            actionOrder
+        );
+    }
+
     private String normalizeCheerColorForTest(String color) {
         if (color == null || color.isBlank()) {
             return "WHITE";
@@ -19108,6 +31783,46 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             userId,
             supportCardId,
             zone
+        );
+    }
+
+    private void attachDirectTestSupport(
+        Long matchId,
+        Long userId,
+        Long targetHolomemId,
+        String supportCardId,
+        String supportName,
+        String supportType
+    ) {
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            userId,
+            supportCardId,
+            supportName,
+            false,
+            "BUFF",
+            "{\"type\":\"BUFF\",\"rawText\":\"カードタイプ\\nサポート・ツール\\nテスト用。\"}",
+            "SELF"
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'STAGE',
+                order_index = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            supportCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_supports (match_holomem_id, match_card_id, support_card_id, support_type)
+            VALUES (?, ?, ?, ?)
+            """,
+            targetHolomemId,
+            supportCardInstanceId,
+            supportCardId,
+            supportType
         );
     }
 

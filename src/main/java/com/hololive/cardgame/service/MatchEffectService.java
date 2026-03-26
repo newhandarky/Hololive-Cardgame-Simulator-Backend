@@ -27,6 +27,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -62,11 +63,40 @@ public class MatchEffectService {
         "HP\\s*([+＋−-]\\s*\\d+)"
     );
     private static final Pattern PASSIVE_GIFT_DAMAGE_REDUCTION_VALUE_PATTERN = Pattern.compile(
-        "受けるダメージ\\s*[ー\\-−]\\s*(\\d+)"
+        "受ける(?:アーツ)?ダメージ\\s*[ー\\-−]\\s*(\\d+)"
+    );
+    private static final Pattern PASSIVE_GIFT_DICE_ODD_DAMAGE_REDUCTION_PATTERN = Pattern.compile(
+        "奇数なら、[^。]*?受ける(?:アーツ)?ダメージ\\s*[ー\\-−]\\s*(\\d+)"
+    );
+    private static final Pattern PASSIVE_GIFT_DICE_EVEN_DAMAGE_REDUCTION_PATTERN = Pattern.compile(
+        "偶数なら、[^。]*?受ける(?:アーツ)?ダメージ\\s*[ー\\-−]\\s*(\\d+)"
+    );
+    private static final Pattern PASSIVE_GIFT_ART_COST_REDUCTION_PATTERN = Pattern.compile(
+        "アーツ(?:[「『][^」』]+[」』])?に必要な\\s*(赤|青|緑|白|紫|黄|無色)\\s*[ー\\-−]\\s*(\\d+)"
+    );
+    private static final Pattern PASSIVE_GIFT_SELF_DAMAGE_CLAUSE_PATTERN = Pattern.compile(
+        "このホロメン(?:[^。]*?)受ける(?:アーツ)?ダメージ"
+    );
+    private static final Pattern PASSIVE_GIFT_OWN_COLLAB_DAMAGE_CLAUSE_PATTERN = Pattern.compile(
+        "自分のコラボホロメン(?:[^。]*?)受ける(?:アーツ)?ダメージ"
+    );
+    private static final Pattern OPPONENT_STAGE_TAG_PRESENCE_PATTERN = Pattern.compile(
+        "相手のステージに\\[([^\\]]+)]を持つホロメンがいる"
+    );
+    private static final Pattern INLINE_TAG_TOKEN_PATTERN = Pattern.compile(
+        "#([\\p{L}\\p{N}_'\\-]+?)(?=(?:#|か|を|が|に|で|と|へ|や|も|、|。|\\]|\\s|$))"
+    );
+    private static final Pattern PASSIVE_GIFT_REFERENCED_OSHI_SKILL_PATTERN = Pattern.compile(
+        "(SP)?推しスキル[「『]([^」』]+)[」』]を使っていた"
+    );
+    private static final Pattern PASSIVE_GIFT_REFERENCED_ART_NAME_PATTERN = Pattern.compile(
+        "アーツ[「『]([^」』]+)[」』]"
     );
     private static final Pattern BATON_TOUCH_COST_MODIFIER_PATTERN = Pattern.compile("バトンタッチに必要な無色\\s*[+＋]\\s*(\\d+)");
     private static final Pattern DOWN_EXTRA_LIFE_PATTERN = Pattern.compile("ライフを\\s*(\\d+)\\s*つ?減ら");
     private static final Pattern DOWN_EXTRA_LIFE_MINUS_PATTERN = Pattern.compile("ライフ\\s*[ー\\-−]\\s*(\\d+)");
+    private static final Pattern PASSIVE_GIFT_SPECIAL_DAMAGE_BONUS_PATTERN = Pattern.compile("特殊ダメージ\\s*[+＋]\\s*(\\d+)");
+    private static final Pattern SPECIAL_DAMAGE_AT_LEAST_PATTERN = Pattern.compile("(\\d+)\\s*以上の特殊ダメージ");
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -406,14 +436,33 @@ public class MatchEffectService {
         Long attackTargetCardInstanceId,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
+        return previewGiftTriggeredEffectsOnArt(
+            matchId,
+            userId,
+            attackerCardInstanceId,
+            attackTargetCardInstanceId,
+            turnNumber,
+            null
+        );
+    }
+
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnArt(
+        Long matchId,
+        Long userId,
+        Long attackerCardInstanceId,
+        Long attackTargetCardInstanceId,
+        int turnNumber,
+        String attackerArtName
+    ) {
+        return applyGiftTriggeredEffectsByTriggerWithSourceArt(
             matchId,
             userId,
             "ART_USED",
             attackerCardInstanceId,
             attackTargetCardInstanceId,
             turnNumber,
-            false
+            false,
+            attackerArtName
         );
     }
 
@@ -477,7 +526,7 @@ public class MatchEffectService {
             downedCardInstanceId,
             turnNumber,
             false,
-            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone)
+            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone, null)
         );
     }
 
@@ -505,7 +554,7 @@ public class MatchEffectService {
             downedCardInstanceId,
             downedCardInstanceId,
             "SELF_DOWNED",
-            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone),
+            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone, null),
             holderSnapshot,
             false
         );
@@ -530,7 +579,7 @@ public class MatchEffectService {
             downedCardInstanceId,
             turnNumber,
             false,
-            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone)
+            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone, null)
         );
     }
 
@@ -552,7 +601,7 @@ public class MatchEffectService {
             enteredCardInstanceId,
             turnNumber,
             false,
-            loadGiftTriggerSourceContext(matchId, enteredCardInstanceId, enteredStageZone)
+            loadGiftTriggerSourceContext(matchId, enteredCardInstanceId, enteredStageZone, null)
         );
     }
 
@@ -573,7 +622,7 @@ public class MatchEffectService {
             collabCardInstanceId,
             turnNumber,
             false,
-            loadGiftTriggerSourceContext(matchId, collabCardInstanceId, "COLLAB")
+            loadGiftTriggerSourceContext(matchId, collabCardInstanceId, "COLLAB", null)
         );
     }
 
@@ -594,7 +643,7 @@ public class MatchEffectService {
             movedToBackCardInstanceId,
             turnNumber,
             false,
-            loadGiftTriggerSourceContext(matchId, movedToBackCardInstanceId, "BACK")
+            loadGiftTriggerSourceContext(matchId, movedToBackCardInstanceId, "BACK", null)
         );
     }
 
@@ -610,6 +659,26 @@ public class MatchEffectService {
             matchId,
             userId,
             "PERFORMANCE_START_SELF",
+            null,
+            null,
+            turnNumber,
+            false,
+            null
+        );
+    }
+
+    /**
+     * 預覽「自己的主階段」會觸發的 Gift（不執行效果）。
+     */
+    public List<Map<String, Object>> previewGiftTriggeredEffectsOnOwnMainStep(
+        Long matchId,
+        Long userId,
+        int turnNumber
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            "MAIN_STEP_SELF",
             null,
             null,
             turnNumber,
@@ -808,7 +877,7 @@ public class MatchEffectService {
         if (holder == null) {
             return null;
         }
-        GiftTriggerSourceContext sourceContext = loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null);
+        GiftTriggerSourceContext sourceContext = loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null, null);
         return buildGiftTriggerSummary(
             matchId,
             userId,
@@ -849,7 +918,8 @@ public class MatchEffectService {
             userId,
             holderCardInstanceId,
             triggerTargetCardInstanceId,
-            giftText
+            giftText,
+            storedTrigger
         );
 
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -891,13 +961,63 @@ public class MatchEffectService {
                 if (!rs.next()) {
                     return null;
                 }
+                Long holomemId = rs.getLong("holomem_id");
                 Map<String, Object> row = new LinkedHashMap<>();
-                row.put("holomem_id", rs.getLong("holomem_id"));
+                row.put("holomem_id", holomemId);
                 row.put("match_card_id", rs.getLong("match_card_id"));
                 row.put("card_id", rs.getString("card_id"));
                 row.put("zone", rs.getString("zone"));
                 row.put("current_level", rs.getString("current_level"));
                 row.put("passive_text", rs.getString("passive_text"));
+                List<Map<String, Object>> attachedCheers = jdbcTemplate.queryForList(
+                    """
+                    SELECT match_card_id,
+                           cheer_card_id
+                    FROM match_holomem_cheers
+                    WHERE match_holomem_id = ?
+                    ORDER BY id
+                    """,
+                    holomemId
+                );
+                List<Long> attachedCheerCardInstanceIds = new ArrayList<>();
+                List<String> attachedCheerCardIds = new ArrayList<>();
+                for (Map<String, Object> attachedCheer : attachedCheers) {
+                    Long attachedCheerCardInstanceId = asLong(attachedCheer.get("match_card_id"));
+                    String attachedCheerCardId = asText(attachedCheer.get("cheer_card_id"));
+                    if (attachedCheerCardInstanceId != null && attachedCheerCardInstanceId > 0) {
+                        attachedCheerCardInstanceIds.add(attachedCheerCardInstanceId);
+                    }
+                    if (StringUtils.hasText(attachedCheerCardId)) {
+                        attachedCheerCardIds.add(attachedCheerCardId);
+                    }
+                }
+                row.put("attached_cheer_card_instance_ids", attachedCheerCardInstanceIds);
+                row.put("attached_cheer_card_ids", attachedCheerCardIds);
+                List<Map<String, Object>> stackCards = jdbcTemplate.queryForList(
+                    """
+                    SELECT s.match_card_id,
+                           mc.card_id
+                    FROM match_holomem_stack_cards s
+                    JOIN match_cards mc ON mc.id = s.match_card_id
+                    WHERE s.match_holomem_id = ?
+                    ORDER BY s.stack_order DESC, s.id DESC
+                    """,
+                    holomemId
+                );
+                List<Long> stackCardInstanceIds = new ArrayList<>();
+                List<String> stackCardIds = new ArrayList<>();
+                for (Map<String, Object> stackCard : stackCards) {
+                    Long stackCardInstanceId = asLong(stackCard.get("match_card_id"));
+                    String stackCardId = asText(stackCard.get("card_id"));
+                    if (stackCardInstanceId != null && stackCardInstanceId > 0) {
+                        stackCardInstanceIds.add(stackCardInstanceId);
+                    }
+                    if (StringUtils.hasText(stackCardId)) {
+                        stackCardIds.add(stackCardId);
+                    }
+                }
+                row.put("stack_card_instance_ids", stackCardInstanceIds);
+                row.put("stack_card_ids", stackCardIds);
                 return row;
             },
             matchId,
@@ -916,7 +1036,7 @@ public class MatchEffectService {
         String downedCardId,
         int currentTurn
     ) {
-        return executeDownEvent(matchId, actorUserId, downedOwnerUserId, downedCardId, currentTurn, false);
+        return executeDownEvent(matchId, actorUserId, downedOwnerUserId, downedCardId, currentTurn, false, null);
     }
 
     /**
@@ -929,7 +1049,26 @@ public class MatchEffectService {
         String downedCardId,
         int currentTurn
     ) {
-        return executeDownEvent(matchId, actorUserId, downedOwnerUserId, downedCardId, currentTurn, true);
+        return applyDownEventEffect(matchId, actorUserId, downedOwnerUserId, downedCardId, currentTurn, null);
+    }
+
+    public Map<String, Object> applyDownEventEffect(
+        Long matchId,
+        Long actorUserId,
+        Long downedOwnerUserId,
+        String downedCardId,
+        int currentTurn,
+        String downedStageZone
+    ) {
+        return executeDownEvent(
+            matchId,
+            actorUserId,
+            downedOwnerUserId,
+            downedCardId,
+            currentTurn,
+            true,
+            downedStageZone
+        );
     }
 
     /**
@@ -952,7 +1091,29 @@ public class MatchEffectService {
             triggerTargetCardInstanceId,
             turnNumber,
             executeEffects,
-            loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null)
+            loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null, null)
+        );
+    }
+
+    private List<Map<String, Object>> applyGiftTriggeredEffectsByTriggerWithSourceArt(
+        Long matchId,
+        Long userId,
+        String triggerType,
+        Long sourceCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        int turnNumber,
+        boolean executeEffects,
+        String sourceArtName
+    ) {
+        return applyGiftTriggeredEffectsByTrigger(
+            matchId,
+            userId,
+            triggerType,
+            sourceCardInstanceId,
+            triggerTargetCardInstanceId,
+            turnNumber,
+            executeEffects,
+            loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null, sourceArtName)
         );
     }
 
@@ -997,7 +1158,7 @@ public class MatchEffectService {
                 ? asLong(holder.get("match_card_id"))
                 : sourceCardInstanceId;
             GiftTriggerSourceContext effectiveSourceContext = sourceContext == null
-                ? loadGiftTriggerSourceContext(matchId, effectiveSourceCardInstanceId, asText(holder.get("zone")))
+                ? loadGiftTriggerSourceContext(matchId, effectiveSourceCardInstanceId, asText(holder.get("zone")), null)
                 : sourceContext;
             Map<String, Object> summary = buildGiftTriggerSummary(
                 matchId,
@@ -1071,7 +1232,7 @@ public class MatchEffectService {
         } else {
             execution = previewGiftEffects(giftText);
         }
-        return giftTriggerPreviewService.buildTriggerSummary(
+        Map<String, Object> summary = giftTriggerPreviewService.buildTriggerSummary(
             normalizedTriggerType,
             holderHolomemId,
             holderCardInstanceId,
@@ -1083,6 +1244,69 @@ public class MatchEffectService {
             execution,
             !executeEffects
         );
+        appendGiftHolderSnapshotContext(summary, holder);
+        if (!executeEffects) {
+            appendGiftSelectionPreviewContext(summary, matchId, userId, giftText, holder);
+        }
+        return summary;
+    }
+
+    private void appendGiftHolderSnapshotContext(Map<String, Object> summary, Map<String, Object> holder) {
+        if (summary == null || summary.isEmpty() || holder == null || holder.isEmpty()) {
+            return;
+        }
+        List<Long> attachedCheerCardInstanceIds = toLongList(holder.get("attached_cheer_card_instance_ids"));
+        if (!attachedCheerCardInstanceIds.isEmpty()) {
+            summary.put("giftHolderAttachedCheerCardInstanceIds", attachedCheerCardInstanceIds);
+        }
+        List<String> attachedCheerCardIds = toTextList(holder.get("attached_cheer_card_ids"));
+        if (!attachedCheerCardIds.isEmpty()) {
+            summary.put("giftHolderAttachedCheerCardIds", attachedCheerCardIds);
+        }
+        List<Long> stackCardInstanceIds = toLongList(holder.get("stack_card_instance_ids"));
+        if (!stackCardInstanceIds.isEmpty()) {
+            summary.put("giftHolderStackCardInstanceIds", stackCardInstanceIds);
+        }
+        List<String> stackCardIds = toTextList(holder.get("stack_card_ids"));
+        if (!stackCardIds.isEmpty()) {
+            summary.put("giftHolderStackCardIds", stackCardIds);
+        }
+    }
+
+    private void appendGiftSelectionPreviewContext(
+        Map<String, Object> summary,
+        Long matchId,
+        Long userId,
+        String giftText,
+        Map<String, Object> storedTriggerContext
+    ) {
+        if (summary == null || summary.isEmpty() || matchId == null || userId == null || !StringUtils.hasText(giftText)) {
+            return;
+        }
+        ObjectNode giftNode = objectMapper.createObjectNode();
+        giftNode.put("rawText", giftText);
+        appendStoredGiftExecutionContext(giftNode, storedTriggerContext);
+        for (String effectType : toTextList(summary.get("requestedEffects"))) {
+            SelectionProbe probe = probeSelectionCandidates(matchId, userId, effectType, giftNode);
+            if (probe == null || probe.candidates().isEmpty()) {
+                continue;
+            }
+            int maxSelect = Math.min(probe.requestedCount(), probe.candidates().size());
+            if (maxSelect <= 0 || probe.candidates().size() <= maxSelect) {
+                continue;
+            }
+            summary.put("selectionRequired", true);
+            summary.put("selectionEffectType", effectTextParser.normalizeEffectType(effectType));
+            summary.put("selectionMinSelect", 1);
+            summary.put("selectionMaxSelect", maxSelect);
+            List<Long> candidateCardInstanceIds = probe.candidates().stream()
+                .map(DecisionCandidate::cardInstanceId)
+                .filter(Objects::nonNull)
+                .toList();
+            summary.put("selectionCandidateCardInstanceIds", candidateCardInstanceIds);
+            summary.put("selectionCandidates", probe.candidates());
+            break;
+        }
     }
 
     /**
@@ -1104,6 +1328,13 @@ public class MatchEffectService {
         if (giftText.contains("このホロメンが") && !sourceCardInstanceId.equals(holderCardInstanceId)) {
             return false;
         }
+        if ("ART_USED".equals(triggerType)
+            && !matchesGiftReferencedArtNameCondition(giftText, sourceContext == null ? null : sourceContext.artName())) {
+            return false;
+        }
+        if ("ART_USED".equals(triggerType) && !matchesGiftSpecialDamageThresholdCondition(giftText, sourceContext)) {
+            return false;
+        }
         if (!matchesGiftTurnOwnershipCondition(matchId, userId, giftText)) {
             return false;
         }
@@ -1111,6 +1342,11 @@ public class MatchEffectService {
             return false;
         }
         if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(giftText, holderZone)) {
+            return false;
+        }
+        if (giftText.contains("このホロメンに")
+            && giftText.contains("が付いている")
+            && !matchesPassiveGiftAttachedSupportCondition(giftText, holderHolomemId)) {
             return false;
         }
         if (giftText.contains("1stホロメンからBloomしているこのホロメン")) {
@@ -1167,6 +1403,19 @@ public class MatchEffectService {
             return false;
         }
         return true;
+    }
+
+    private boolean matchesGiftReferencedArtNameCondition(String giftText, String attackerArtName) {
+        if (!StringUtils.hasText(giftText)) {
+            return false;
+        }
+        if (!giftText.contains("アーツ")) {
+            return true;
+        }
+        if (!giftText.contains("「") && !giftText.contains("『")) {
+            return true;
+        }
+        return matchesPassiveGiftReferencedArtNameCondition(giftText, attackerArtName);
     }
 
     /**
@@ -1297,6 +1546,80 @@ public class MatchEffectService {
             userId
         );
         return currentHandCount != null && currentHandCount >= requiredHandCount;
+    }
+
+    private boolean matchesGiftSpecialDamageThresholdCondition(String giftText, GiftTriggerSourceContext sourceContext) {
+        if (!StringUtils.hasText(giftText)) {
+            return false;
+        }
+        String normalizedText = effectTextParser.normalizeDigits(giftText);
+        int requiredSpecialDamage = effectTextParser.extractByPattern(normalizedText, SPECIAL_DAMAGE_AT_LEAST_PATTERN);
+        if (requiredSpecialDamage <= 0) {
+            return true;
+        }
+        if (sourceContext == null || !StringUtils.hasText(sourceContext.cardId())) {
+            return false;
+        }
+        if (!giftTriggerMatcher.matchesGiftExplicitSourceNameCondition(giftText, sourceContext.cardName())) {
+            return false;
+        }
+        int sourceSpecialDamage = resolveSourceArtSpecialDamageValue(sourceContext.cardId(), sourceContext.artName());
+        return sourceSpecialDamage >= requiredSpecialDamage;
+    }
+
+    private int resolveSourceArtSpecialDamageValue(String sourceCardId, String sourceArtName) {
+        if (!StringUtils.hasText(sourceCardId)) {
+            return 0;
+        }
+        List<Map<String, Object>> arts;
+        if (StringUtils.hasText(sourceArtName)) {
+            arts = jdbcTemplate.queryForList(
+                """
+                SELECT effect_json::text AS effect_json_text,
+                       description,
+                       name
+                FROM member_arts
+                WHERE member_card_id = ?
+                  AND name = ?
+                """,
+                sourceCardId,
+                sourceArtName
+            );
+            if (arts.isEmpty()) {
+                arts = jdbcTemplate.queryForList(
+                    """
+                    SELECT effect_json::text AS effect_json_text,
+                           description,
+                           name
+                    FROM member_arts
+                    WHERE member_card_id = ?
+                    """,
+                    sourceCardId
+                );
+            }
+        } else {
+            arts = jdbcTemplate.queryForList(
+                """
+                SELECT effect_json::text AS effect_json_text,
+                       description,
+                       name
+                FROM member_arts
+                WHERE member_card_id = ?
+                """,
+                sourceCardId
+            );
+        }
+        int maxSpecialDamage = 0;
+        for (Map<String, Object> art : arts) {
+            String merged = effectTextParser.normalizeDigits(
+                asText(art.get("effect_json_text")) + " " + asText(art.get("description"))
+            );
+            int specialDamage = effectTextParser.extractByPattern(merged, SPECIAL_DAMAGE_PATTERN);
+            if (specialDamage > maxSpecialDamage) {
+                maxSpecialDamage = specialDamage;
+            }
+        }
+        return maxSpecialDamage;
     }
 
     private boolean matchesGiftPerformanceEndCondition(
@@ -1453,7 +1776,30 @@ public class MatchEffectService {
         Long triggerTargetCardInstanceId,
         String giftText
     ) {
-        JsonNode giftNode = objectMapper.valueToTree(Map.of("rawText", giftText));
+        return executeGiftEffectsForHolder(
+            matchId,
+            userId,
+            holderCardInstanceId,
+            triggerTargetCardInstanceId,
+            giftText,
+            null
+        );
+    }
+
+    private GiftExecutionSummary executeGiftEffectsForHolder(
+        Long matchId,
+        Long userId,
+        Long holderCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        String giftText,
+        Map<String, Object> storedTriggerContext
+    ) {
+        if (isHbp06020SelfDownedGiftText(giftText)) {
+            return executeHbp06020SelfDownedGiftEffects(matchId, userId, giftText);
+        }
+        ObjectNode giftNode = objectMapper.createObjectNode();
+        giftNode.put("rawText", giftText);
+        appendStoredGiftExecutionContext(giftNode, storedTriggerContext);
         int clauseSeparatorIndex = findClauseSeparator(giftText);
         List<String> costEffectTypes = clauseSeparatorIndex >= 0 ? inferBloomEffectTypes(extractCostClause(giftText)) : List.of();
         List<String> resolvedEffectTypes = clauseSeparatorIndex >= 0 ? inferBloomEffectTypes(extractResolvedEffectClause(giftText)) : List.of();
@@ -1535,6 +1881,143 @@ public class MatchEffectService {
             }
         }
         return new GiftExecutionSummary(effectTypes, executed, unsupported, skippedEffects);
+    }
+
+    private boolean isHbp06020SelfDownedGiftText(String giftText) {
+        if (!StringUtils.hasText(giftText)) {
+            return false;
+        }
+        return giftText.contains("相手のターンで、このホロメンがダウンした時")
+            && giftText.contains("自分のデッキの上から2枚をアーカイブ")
+            && giftText.contains("異なるカード名の#FLOW GLOWを持つホロメン1人につき")
+            && giftText.contains("自分のデッキを1枚引く");
+    }
+
+    private GiftExecutionSummary executeHbp06020SelfDownedGiftEffects(
+        Long matchId,
+        Long userId,
+        String giftText
+    ) {
+        ObjectNode archiveNode = objectMapper.createObjectNode();
+        archiveNode.put("rawText", "自分のデッキの上から2枚をアーカイブする");
+        archiveNode.put("value", 2);
+        Map<String, Object> archiveSummary = executeRevealToArchiveEffect(
+            matchId,
+            userId,
+            "REVEAL_TO_ARCHIVE",
+            archiveNode
+        );
+
+        List<Map<String, Object>> executed = new ArrayList<>();
+        List<Map<String, Object>> skipped = new ArrayList<>();
+        executed.add(archiveSummary);
+        int archiveApplied = asInt(archiveSummary.get("archiveApplied"));
+        int drawCount = archiveApplied > 0 ? countDistinctFlowGlowStageHolomemNames(matchId, userId) : 0;
+        if (drawCount > 0) {
+            ObjectNode drawNode = objectMapper.createObjectNode();
+            drawNode.put("rawText", "自分のデッキを" + drawCount + "枚引く");
+            drawNode.put("value", drawCount);
+            Map<String, Object> drawSummary = executeDrawEffect(matchId, userId, "DRAW", drawNode);
+            executed.add(drawSummary);
+            return new GiftExecutionSummary(
+                List.of("REVEAL_TO_ARCHIVE", "DRAW"),
+                executed,
+                List.of(),
+                skipped
+            );
+        }
+
+        Map<String, Object> drawSkipped = buildSkippedEffect("DRAW", "條件未成立：沒有可計算的 #FLOW GLOW 異名目標");
+        executed.add(drawSkipped);
+        skipped.add(drawSkipped);
+        return new GiftExecutionSummary(
+            List.of("REVEAL_TO_ARCHIVE", "DRAW"),
+            executed,
+            List.of(),
+            skipped
+        );
+    }
+
+    private int countDistinctFlowGlowStageHolomemNames(Long matchId, Long userId) {
+        if (matchId == null || userId == null) {
+            return 0;
+        }
+        Integer count = jdbcTemplate.query(
+            """
+            SELECT COUNT(DISTINCT c.name)
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone IN ('CENTER', 'COLLAB', 'BACK')
+              AND EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements_text(COALESCE(c.tags_json, '[]'::jsonb)) AS t(tag)
+                    WHERE t.tag IN ('#FLOW GLOW', '#FLOW')
+              )
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            userId
+        );
+        return count == null ? 0 : Math.max(count, 0);
+    }
+
+    private void appendStoredGiftExecutionContext(ObjectNode giftNode, Map<String, Object> storedTriggerContext) {
+        if (giftNode == null || storedTriggerContext == null || storedTriggerContext.isEmpty()) {
+            return;
+        }
+        Long giftHolderHolomemId = asLong(storedTriggerContext.get("giftHolderHolomemId"));
+        if (giftHolderHolomemId != null && giftHolderHolomemId > 0) {
+            giftNode.put("giftHolderHolomemId", giftHolderHolomemId);
+        }
+        List<Long> attachedCheerCardInstanceIds = toLongList(storedTriggerContext.get("giftHolderAttachedCheerCardInstanceIds"));
+        if (attachedCheerCardInstanceIds.isEmpty()) {
+            attachedCheerCardInstanceIds = toLongList(storedTriggerContext.get("attached_cheer_card_instance_ids"));
+        }
+        if (!attachedCheerCardInstanceIds.isEmpty()) {
+            giftNode.set(
+                "giftHolderAttachedCheerCardInstanceIds",
+                objectMapper.valueToTree(attachedCheerCardInstanceIds)
+            );
+        }
+        List<String> attachedCheerCardIds = toTextList(storedTriggerContext.get("giftHolderAttachedCheerCardIds"));
+        if (attachedCheerCardIds.isEmpty()) {
+            attachedCheerCardIds = toTextList(storedTriggerContext.get("attached_cheer_card_ids"));
+        }
+        if (!attachedCheerCardIds.isEmpty()) {
+            giftNode.set(
+                "giftHolderAttachedCheerCardIds",
+                objectMapper.valueToTree(attachedCheerCardIds)
+            );
+        }
+        List<Long> stackCardInstanceIds = toLongList(storedTriggerContext.get("giftHolderStackCardInstanceIds"));
+        if (stackCardInstanceIds.isEmpty()) {
+            stackCardInstanceIds = toLongList(storedTriggerContext.get("stack_card_instance_ids"));
+        }
+        if (!stackCardInstanceIds.isEmpty()) {
+            giftNode.set(
+                "giftHolderStackCardInstanceIds",
+                objectMapper.valueToTree(stackCardInstanceIds)
+            );
+        }
+        List<String> stackCardIds = toTextList(storedTriggerContext.get("giftHolderStackCardIds"));
+        if (stackCardIds.isEmpty()) {
+            stackCardIds = toTextList(storedTriggerContext.get("stack_card_ids"));
+        }
+        if (!stackCardIds.isEmpty()) {
+            giftNode.set(
+                "giftHolderStackCardIds",
+                objectMapper.valueToTree(stackCardIds)
+            );
+        }
+        List<Long> selectedCardInstanceIds = toLongList(storedTriggerContext.get("selectedCardInstanceIds"));
+        if (!selectedCardInstanceIds.isEmpty()) {
+            giftNode.set(
+                "selectedCardInstanceIds",
+                objectMapper.valueToTree(selectedCardInstanceIds)
+            );
+        }
     }
 
     /**
@@ -1624,6 +2107,13 @@ public class MatchEffectService {
         return switch (effectType) {
             case "DRAW" -> executeDrawEffect(matchId, userId, effectType, giftNode);
             case "SEARCH" -> executeSearchEffect(matchId, userId, effectType, giftNode, null);
+            case "REPLACE_ARCHIVE_WITH_HAND" -> executeReplaceArchiveWithHandEffect(
+                matchId,
+                userId,
+                effectType,
+                giftNode,
+                holderCardInstanceId
+            );
             case "RETURN_TO_HAND" -> executeReturnToHandEffect(matchId, userId, effectType, giftNode, null);
             case "RETURN_TO_DECK_TOP" -> executeReturnToDeckTopEffect(matchId, userId, effectType, giftNode, null);
             case "ADD_CHEER" -> executeAddCheerEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
@@ -1655,10 +2145,24 @@ public class MatchEffectService {
                 holderCardInstanceId
             );
             case "ACTION_LOCK" -> executeActionLockEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
-            case "ALLOW_EXTRA_BLOOM" -> executeAllowExtraBloomEffect(matchId, userId, effectType, giftNode);
+            case "ALLOW_EXTRA_BLOOM" -> executeAllowExtraBloomEffect(
+                matchId,
+                userId,
+                effectType,
+                giftNode,
+                null,
+                holderCardInstanceId
+            );
             case "LOOK_TOP_DECK" -> executeLookTopDeckEffect(matchId, userId, effectType, giftNode);
             case "LOOK_OPPONENT_HAND" -> executeLookOpponentHandEffect(matchId, userId, effectType, giftNode);
             case "LOOK_HOLOPOWER" -> executeLookHolopowerEffect(matchId, userId, effectType, giftNode);
+            case "ARCHIVE_STACK_CARD" -> executeArchiveStackCardEffect(
+                matchId,
+                userId,
+                effectType,
+                giftNode,
+                holderCardInstanceId
+            );
             case "SWAP_WITH_COLLAB" -> executeSwapWithCollabEffect(matchId, userId, effectType, giftNode, holderCardInstanceId);
             case "HEAL" -> executeHealEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
             case "BUFF", "DEBUFF" -> executeBuffDebuffEffect(matchId, userId, effectType, giftNode, targetType);
@@ -1735,17 +2239,286 @@ public class MatchEffectService {
     }
 
     /**
+     * 在藝能傷害套用前，處理「受傷時觸發」的 Gift（例如 HBP01-027）。
+     */
+    public Map<String, Object> resolveTriggeredGiftDamagePrevention(
+        Long matchId,
+        Long defendingUserId,
+        Long attackingUserId,
+        Long sourceCardInstanceId,
+        Long targetCardInstanceId,
+        int turnNumber,
+        int incomingDamage
+    ) {
+        if (
+            matchId == null
+                || defendingUserId == null
+                || attackingUserId == null
+                || targetCardInstanceId == null
+                || targetCardInstanceId <= 0
+                || turnNumber <= 0
+                || incomingDamage <= 0
+        ) {
+            return null;
+        }
+
+        Map<String, Object> targetHolomem = jdbcTemplate.query(
+            """
+            SELECT id, match_card_id, zone, current_level
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id"));
+                row.put("match_card_id", rs.getLong("match_card_id"));
+                row.put("zone", normalize(rs.getString("zone")));
+                row.put("current_level", normalizeLevelType(rs.getString("current_level")));
+                return row;
+            },
+            matchId,
+            defendingUserId,
+            targetCardInstanceId
+        );
+        if (targetHolomem == null || targetHolomem.isEmpty()) {
+            return null;
+        }
+
+        List<Map<String, Object>> holders = jdbcTemplate.queryForList(
+            """
+            SELECT h.id AS holomem_id,
+                   h.match_card_id,
+                   h.card_id,
+                   h.zone,
+                   h.current_level,
+                   m.passive_effect_json::text AS passive_text
+            FROM match_holomems h
+            JOIN member_cards m ON m.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+            ORDER BY h.id
+            """,
+            matchId,
+            defendingUserId
+        );
+        if (holders.isEmpty()) {
+            return null;
+        }
+
+        for (Map<String, Object> holder : holders) {
+            Long holderHolomemId = asLong(holder.get("holomem_id"));
+            Long holderCardInstanceId = asLong(holder.get("match_card_id"));
+            String holderZone = normalize(asText(holder.get("zone")));
+            String holderLevel = normalizeLevelType(asText(holder.get("current_level")));
+            String giftText = loadGiftEffectText(asText(holder.get("passive_text")));
+            if (!StringUtils.hasText(giftText)) {
+                continue;
+            }
+            boolean alwaysPreventOpponentDamage = giftText.contains("相手からダメージを受けない")
+                || giftText.contains("相手からアーツダメージを受けない");
+            if (!alwaysPreventOpponentDamage && !giftTriggerMatcher.matchesGiftTriggerType(giftText, "DAMAGE_RECEIVED")) {
+                continue;
+            }
+            String normalizedGiftText = effectTextParser.normalizeDigits(giftText);
+            if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(giftText, holderZone)) {
+                continue;
+            }
+            if (
+                normalizedGiftText.contains("ターンに1回")
+                    && isGiftAlreadyUsedThisTurn(matchId, defendingUserId, turnNumber, holderHolomemId)
+            ) {
+                continue;
+            }
+            if (!matchesGiftTurnOwnershipCondition(matchId, defendingUserId, giftText)) {
+                continue;
+            }
+            if (!matchesGiftLifeComparisonCondition(matchId, defendingUserId, giftText)) {
+                continue;
+            }
+            if (!matchesGiftHandCountCondition(matchId, defendingUserId, giftText)) {
+                continue;
+            }
+            if (!matchesGiftDamageReceivedCollabPresenceCondition(matchId, defendingUserId, attackingUserId, giftText)) {
+                continue;
+            }
+            if (
+                !matchesGiftDamageReceivedTargetCondition(
+                    giftText,
+                    asText(targetHolomem.get("zone")),
+                    targetCardInstanceId,
+                    holderCardInstanceId
+                )
+            ) {
+                continue;
+            }
+            if (giftText.contains("相手からダメージを受ける時") && Objects.equals(defendingUserId, attackingUserId)) {
+                continue;
+            }
+            if (giftText.contains("このホロメンが") && !Objects.equals(targetCardInstanceId, holderCardInstanceId)) {
+                continue;
+            }
+            if (normalizedGiftText.contains("1stホロメンから") && !"FIRST".equals(asText(targetHolomem.get("current_level")))) {
+                continue;
+            }
+            if (normalizedGiftText.contains("2ndホロメンから") && !"SECOND".equals(asText(targetHolomem.get("current_level")))) {
+                continue;
+            }
+            if (normalizedGiftText.contains("Debutホロメンから") && !"DEBUT".equals(asText(targetHolomem.get("current_level")))) {
+                continue;
+            }
+
+            Integer diceRoll = null;
+            if (giftText.contains("サイコロ")) {
+                diceRoll = diceService.rollD6();
+            }
+            boolean diceMatched = matchesGiftDamageReceivedDiceCondition(giftText, diceRoll);
+            boolean prevented = alwaysPreventOpponentDamage || (diceMatched && giftText.contains("そのダメージを受けない"));
+
+            Map<String, Object> executed = new LinkedHashMap<>();
+            executed.put("effectType", "PREVENT_DAMAGE");
+            executed.put("applied", prevented);
+            executed.put("damageBefore", incomingDamage);
+            executed.put("damageAfter", prevented ? 0 : incomingDamage);
+            if (diceRoll != null) {
+                executed.put("diceRoll", diceRoll);
+                executed.put("diceMatched", diceMatched);
+            }
+            if (!prevented) {
+                executed.put("skipped", true);
+                executed.put("reason", "條件未成立：骰子結果不符");
+            }
+
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("triggerType", "DAMAGE_RECEIVED");
+            summary.put("giftHolderHolomemId", holderHolomemId);
+            summary.put("giftHolderCardInstanceId", holderCardInstanceId);
+            summary.put("giftHolderCardId", asText(holder.get("card_id")));
+            summary.put("giftHolderZone", holderZone);
+            summary.put("sourceCardInstanceId", sourceCardInstanceId);
+            summary.put("triggerTargetCardInstanceId", targetCardInstanceId);
+            summary.put("rawText", giftText);
+            summary.put("requestedEffects", List.of("PREVENT_DAMAGE"));
+            summary.put("executedEffects", List.of(executed));
+            summary.put("unsupportedEffects", List.of());
+            summary.put("skippedEffects", prevented ? List.of() : List.of(executed));
+            summary.put("incomingDamage", incomingDamage);
+            summary.put("damageAfter", prevented ? 0 : incomingDamage);
+            summary.put("applied", true);
+            summary.put("preventedDamage", prevented);
+            if (diceRoll != null) {
+                summary.put("diceRoll", diceRoll);
+                summary.put("diceMatched", diceMatched);
+            }
+            return summary;
+        }
+        return null;
+    }
+
+    private boolean matchesGiftDamageReceivedTargetCondition(
+        String giftText,
+        String targetZone,
+        Long targetCardInstanceId,
+        Long holderCardInstanceId
+    ) {
+        if (!StringUtils.hasText(giftText)) {
+            return false;
+        }
+        if (giftText.contains("このホロメンは相手からダメージを受けない")) {
+            return Objects.equals(targetCardInstanceId, holderCardInstanceId);
+        }
+        String normalizedTargetZone = normalize(targetZone);
+        if (giftText.contains("このホロメンがダメージを受ける時")) {
+            return Objects.equals(targetCardInstanceId, holderCardInstanceId);
+        }
+        if (giftText.contains("自分のホロメン全員は相手からアーツダメージを受けない")) {
+            return true;
+        }
+        if (giftText.contains("自分のセンターホロメンがダメージを受ける時")) {
+            return "CENTER".equals(normalizedTargetZone);
+        }
+        if (giftText.contains("自分のコラボホロメンがダメージを受ける時")) {
+            return "COLLAB".equals(normalizedTargetZone);
+        }
+        if (giftText.contains("自分のバックホロメンがダメージを受ける時")) {
+            return "BACK".equals(normalizedTargetZone);
+        }
+        return giftText.contains("自分のホロメンが相手からダメージを受ける時")
+            || giftText.contains("自分のホロメンがダメージを受ける時");
+    }
+
+    private boolean matchesGiftDamageReceivedCollabPresenceCondition(
+        Long matchId,
+        Long defendingUserId,
+        Long attackingUserId,
+        String giftText
+    ) {
+        if (!StringUtils.hasText(giftText)) {
+            return true;
+        }
+        if (!giftText.contains("自分のコラボホロメンがいて、相手のコラボホロメンがいないなら")) {
+            return true;
+        }
+        int ownCollabCount = countHolomemsInZone(matchId, defendingUserId, "COLLAB");
+        int opponentCollabCount = countHolomemsInZone(matchId, attackingUserId, "COLLAB");
+        return ownCollabCount > 0 && opponentCollabCount == 0;
+    }
+
+    private boolean matchesGiftDamageReceivedDiceCondition(String giftText, Integer diceRoll) {
+        if (!StringUtils.hasText(giftText)) {
+            return false;
+        }
+        if (!giftText.contains("サイコロ")) {
+            return true;
+        }
+        if (diceRoll == null || diceRoll <= 0) {
+            return false;
+        }
+        String text = effectTextParser.normalizeDigits(giftText);
+        if (text.contains("奇数の時")) {
+            return diceRoll % 2 == 1;
+        }
+        if (text.contains("偶数の時")) {
+            return diceRoll % 2 == 0;
+        }
+        Matcher atLeastMatcher = DICE_AT_LEAST_PATTERN.matcher(text);
+        if (atLeastMatcher.find()) {
+            try {
+                return diceRoll >= Integer.parseInt(atLeastMatcher.group(1));
+            } catch (NumberFormatException ignored) {
+                return false;
+            }
+        }
+        Matcher atMostMatcher = DICE_AT_MOST_PATTERN.matcher(text);
+        if (atMostMatcher.find()) {
+            try {
+                return diceRoll <= Integer.parseInt(atMostMatcher.group(1));
+            } catch (NumberFormatException ignored) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Gift trigger type 正規化。
      */
     private String normalizeGiftTriggerType(String triggerType) {
         String normalized = normalize(triggerType);
         return switch (normalized) {
+            case "DAMAGE_RECEIVED", "ON_DAMAGE_RECEIVED", "ON_TAKE_DAMAGE", "TAKE_DAMAGE" -> "DAMAGE_RECEIVED";
             case "OPPONENT_DOWNED", "DOWNED", "DOWNED_OPPONENT" -> "OPPONENT_DOWNED";
             case "SELF_DOWNED", "DOWNED_SELF", "OWN_SELF_DOWNED" -> "SELF_DOWNED";
             case "ALLY_DOWNED", "OWN_DOWNED", "OWN_HOLOMEM_DOWNED", "FRIENDLY_DOWNED" -> "ALLY_DOWNED";
             case "COLLAB", "ON_COLLAB", "SELF_COLLAB" -> "COLLAB";
             case "BATON_TOUCH_BACK", "BATON_TOUCH_MOVE_TO_BACK", "ON_BATON_TOUCH_BACK" -> "BATON_TOUCH_BACK";
             case "PERFORMANCE_START_SELF", "OWN_PERFORMANCE_START", "PERFORMANCE_START" -> "PERFORMANCE_START_SELF";
+            case "MAIN_STEP_SELF", "OWN_MAIN_STEP", "MAIN_STEP_START_SELF" -> "MAIN_STEP_SELF";
             case "PERFORMANCE_START_OPPONENT", "OPPONENT_PERFORMANCE_START" -> "PERFORMANCE_START_OPPONENT";
             case "PERFORMANCE_END_SELF", "OWN_PERFORMANCE_END", "PERFORMANCE_END" -> "PERFORMANCE_END_SELF";
             case "PERFORMANCE_END_OPPONENT", "OPPONENT_PERFORMANCE_END" -> "PERFORMANCE_END_OPPONENT";
@@ -1798,7 +2571,8 @@ public class MatchEffectService {
     private GiftTriggerSourceContext loadGiftTriggerSourceContext(
         Long matchId,
         Long sourceCardInstanceId,
-        String fallbackStageZone
+        String fallbackStageZone,
+        String sourceArtName
     ) {
         if (matchId == null || sourceCardInstanceId == null || sourceCardInstanceId <= 0) {
             return null;
@@ -1833,7 +2607,8 @@ public class MatchEffectService {
                     rs.getString("name"),
                     rs.getString("level_type"),
                     stageZone,
-                    rs.getString("tags_json")
+                    rs.getString("tags_json"),
+                    sourceArtName
                 );
             },
             matchId,
@@ -1849,7 +2624,8 @@ public class MatchEffectService {
         String cardName,
         String levelType,
         String stageZone,
-        String tagsJson
+        String tagsJson,
+        String artName
     ) {}
 
     private record PerformancePhaseSnapshot(
@@ -1866,7 +2642,9 @@ public class MatchEffectService {
         Long holomemId,
         String stageZone,
         String levelType,
-        Set<String> tags
+        String cardName,
+        Set<String> tags,
+        Set<String> opponentStageTags
     ) {}
 
     /**
@@ -1891,7 +2669,8 @@ public class MatchEffectService {
         String levelType,
         Set<String> tags,
         int attachedCheerCount,
-        int currentLife
+        int currentLife,
+        String oshiCardName
     ) {}
 
     /**
@@ -1901,6 +2680,26 @@ public class MatchEffectService {
         Long holomemId,
         String stageZone,
         String passiveEffectJsonText
+    ) {}
+
+    /**
+     * 描述「常駐 Gift 藝能費用減免」的受益者。
+     *
+     * <p>這類文案目前已知會同時依賴：
+     *
+     * <p>- 受益者站位（例如 `センターホロメン`）
+     * <p>- 受益者卡名（例如 `〈アーニャ・メルフィッサ〉`）
+     * <p>- 受益者是否附著指定名稱的 support（例如 `〈古代武器〉が付いている`）
+     *
+     * <p>因此需要比一般 `アーツ+N` 多帶出卡名欄位。
+     */
+    private record PassiveGiftArtCostReductionTargetContext(
+        Long holomemId,
+        String stageZone,
+        String levelType,
+        String cardName,
+        String artName,
+        Set<String> tags
     ) {}
 
     /**
@@ -1926,6 +2725,7 @@ public class MatchEffectService {
      * <p>這和 HP 加成類似，也只保留目前規則判斷真正需要的欄位；差別是受傷減免文案目前先聚焦：
      *
      * <p>- `このホロメンが受けるダメージ-10`
+     * <p>- `このホロメンが相手の1stホロメンから受けるダメージ-20`
      * <p>- `自分のコラボホロメンが受けるダメージ-10`
      * <p>- `このホロメンと自分のコラボホロメンが受けるダメージ-10`
      *
@@ -1939,7 +2739,31 @@ public class MatchEffectService {
      */
     private record PassiveGiftIncomingDamageReductionTargetContext(
         Long holomemId,
-        String stageZone
+        String stageZone,
+        String levelType,
+        String cardName,
+        Set<String> tags,
+        String oshiCardName,
+        String incomingSourceLevelType
+    ) {}
+
+    /**
+     * 描述「相手能力不能改變 HP」判斷所需的最小 target 狀態。
+     */
+    private record PassiveGiftHpChangePreventionTargetContext(
+        Long holomemId,
+        String stageZone,
+        String levelType,
+        String cardName,
+        Set<String> tags
+    ) {}
+
+    /**
+     * 描述當前回合狀態，供靜態常駐條件判斷。
+     */
+    private record MatchTurnContext(
+        String phase,
+        Long currentTurnPlayerId
     ) {}
 
     /**
@@ -1970,7 +2794,7 @@ public class MatchEffectService {
      * 一整套 aura / layer 系統，風險會遠高於收益。先把「攻擊時計算可驗證的靜態加成」抽成
      * 單一入口，可以讓後續每張類似卡片都沿用同一條主幹。
      */
-    public int resolvePassiveGiftArtBonus(Long matchId, Long userId, Long attackerHolomemId) {
+    public int resolvePassiveGiftArtBonus(Long matchId, Long userId, Long attackerHolomemId, String targetZone) {
         if (matchId == null || userId == null || attackerHolomemId == null) {
             return 0;
         }
@@ -1978,13 +2802,68 @@ public class MatchEffectService {
         if (attackerContext == null) {
             return 0;
         }
-        List<PassiveGiftHolderContext> holderContexts = loadPassiveGiftHolderContexts(matchId, userId);
+        List<PassiveGiftHolderContext> holderContexts = loadPassiveGiftArtBonusHolderContexts(matchId, userId);
         if (holderContexts.isEmpty()) {
             return 0;
         }
         int total = 0;
         for (PassiveGiftHolderContext holderContext : holderContexts) {
-            total += resolvePassiveGiftArtBonusFromHolder(holderContext, attackerContext);
+            total += resolvePassiveGiftArtBonusFromHolder(matchId, userId, holderContext, attackerContext, targetZone);
+        }
+        return total;
+    }
+
+    /**
+     * 計算我方常駐 Gift 對指定攻擊者提供的藝能 Cheer 費用減免。
+     *
+     * <p>目前先保守支援官方已驗證句型：
+     *
+     * <p>- `[センターポジション・コラボポジション限定]自分の〈古代武器〉が付いているセンターホロメンの〈アーニャ・メルフィッサ〉のアーツに必要な黄-1。`
+     *
+     * <p>也就是：
+     *
+     * <p>- holder 可在 `CENTER / COLLAB`
+     * <p>- 受益者可帶 `zone / name / tag / level` 條件
+     * <p>- 受益者身上可要求附著指定名稱 support
+     * <p>- 目前回傳的是依顏色聚合後的減免 map，交由 `attackArt(...)` 在付費前套用
+     */
+    public Map<String, Integer> resolvePassiveGiftArtCheerCostReduction(
+        Long matchId,
+        Long userId,
+        Long attackerHolomemId,
+        String attackerArtName
+    ) {
+        if (matchId == null || userId == null || attackerHolomemId == null) {
+            return Map.of();
+        }
+        PassiveGiftArtCostReductionTargetContext attackerContext =
+            loadPassiveGiftArtCostReductionTargetContext(matchId, userId, attackerHolomemId, attackerArtName);
+        if (attackerContext == null) {
+            return Map.of();
+        }
+        List<PassiveGiftHolderContext> holderContexts = loadPassiveGiftArtBonusHolderContexts(matchId, userId);
+        if (holderContexts.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Integer> total = new LinkedHashMap<>();
+        for (PassiveGiftHolderContext holderContext : holderContexts) {
+            Map<String, Integer> reduction = resolvePassiveGiftArtCostReductionFromHolder(
+                matchId,
+                userId,
+                holderContext,
+                attackerContext
+            );
+            if (reduction.isEmpty()) {
+                continue;
+            }
+            for (Map.Entry<String, Integer> entry : reduction.entrySet()) {
+                String color = normalizeColorType(entry.getKey());
+                int value = entry.getValue() == null ? 0 : entry.getValue();
+                if (!StringUtils.hasText(color) || value <= 0) {
+                    continue;
+                }
+                total.merge(color, value, Integer::sum);
+            }
         }
         return total;
     }
@@ -2002,7 +2881,13 @@ public class MatchEffectService {
      * <p>先把這一類常見格式集中成單一入口，後續若出現更多「依附著資源數量放大藝能傷害」的卡，
      * 可以在這裡往外擴，而不是每張卡都在 `attackArt(...)` 各自補特例。
      */
-    public int resolveArtTextDamageBonus(Long matchId, Long userId, Long attackerHolomemId, String artEffectJsonText) {
+    public int resolveArtTextDamageBonus(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        Long attackerHolomemId,
+        String artEffectJsonText
+    ) {
         if (matchId == null || userId == null || attackerHolomemId == null || !StringUtils.hasText(artEffectJsonText)) {
             return 0;
         }
@@ -2010,7 +2895,13 @@ public class MatchEffectService {
         if (attackerContext == null) {
             return 0;
         }
-        return resolveArtTextDamageBonusFromRawText(extractAttachedSupportRawText(artEffectJsonText), attackerContext);
+        return resolveArtTextDamageBonusFromRawText(
+            matchId,
+            userId,
+            turnNumber,
+            extractAttachedSupportRawText(artEffectJsonText),
+            attackerContext
+        );
     }
 
     /**
@@ -2030,12 +2921,17 @@ public class MatchEffectService {
      * <p>這樣做可以先讓既有 `attackArt(...)` 在不改結算模型的前提下，吃到官方已知被動減傷卡，
      * 同時避免把其他尚未完整建模的防禦文案誤判成已支援。
      */
-    public int resolvePassiveGiftIncomingDamageReduction(Long matchId, Long userId, Long targetHolomemId) {
+    public int resolvePassiveGiftIncomingDamageReduction(
+        Long matchId,
+        Long userId,
+        Long targetHolomemId,
+        String incomingSourceLevelType
+    ) {
         if (matchId == null || userId == null || targetHolomemId == null) {
             return 0;
         }
         PassiveGiftIncomingDamageReductionTargetContext targetContext =
-            loadPassiveGiftIncomingDamageReductionTargetContext(matchId, userId, targetHolomemId);
+            loadPassiveGiftIncomingDamageReductionTargetContext(matchId, userId, targetHolomemId, incomingSourceLevelType);
         if (targetContext == null) {
             return 0;
         }
@@ -2045,7 +2941,7 @@ public class MatchEffectService {
         }
         int total = 0;
         for (PassiveGiftHolderContext holderContext : holderContexts) {
-            total += resolvePassiveGiftIncomingDamageReductionFromHolder(holderContext, targetContext);
+            total += resolvePassiveGiftIncomingDamageReductionFromHolder(matchId, userId, holderContext, targetContext);
         }
         return total;
     }
@@ -3122,15 +4018,18 @@ public class MatchEffectService {
         int returnCount = Math.max(requestedCount, 1);
         SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         boolean excludeLimitedSupport = rawText.contains("LIMITED以外");
-
-        List<Map<String, Object>> candidates = loadCandidatesFromZone(
+        List<Long> effectiveSelectedCardInstanceIds = selectedCardInstanceIds;
+        if (effectiveSelectedCardInstanceIds == null || effectiveSelectedCardInstanceIds.isEmpty()) {
+            effectiveSelectedCardInstanceIds = extractEffectNodeLongList(effectNode, "selectedCardInstanceIds");
+        }
+        List<Map<String, Object>> candidates = resolveReturnToHandCandidates(
             matchId,
             userId,
-            "ARCHIVE",
+            effectNode,
             criteria,
             excludeLimitedSupport
         );
-        List<Map<String, Object>> selected = selectSearchCards(candidates, selectedCardInstanceIds, returnCount);
+        List<Map<String, Object>> selected = selectSearchCards(candidates, effectiveSelectedCardInstanceIds, returnCount);
 
         List<Long> movedCardInstanceIds = new ArrayList<>();
         List<String> movedCardIds = new ArrayList<>();
@@ -3170,13 +4069,49 @@ public class MatchEffectService {
         summary.put("returnRequested", returnCount);
         summary.put("candidateCount", candidates.size());
         summary.put("returnApplied", movedCardInstanceIds.size());
-        summary.put("selectedByClient", selectedCardInstanceIds != null && !selectedCardInstanceIds.isEmpty());
+        summary.put("selectedByClient", effectiveSelectedCardInstanceIds != null && !effectiveSelectedCardInstanceIds.isEmpty());
         summary.put("returnedCardInstanceIds", movedCardInstanceIds);
         summary.put("returnedCardIds", movedCardIds);
         Map<String, Object> criteriaSummary = buildCriteriaSummary(criteria);
         criteriaSummary.put("excludeLimitedSupport", excludeLimitedSupport);
+        criteriaSummary.put("sourceZone", resolveReturnToHandSourceZone(effectNode, rawText));
         summary.put("criteria", criteriaSummary);
         return summary;
+    }
+
+    private List<Map<String, Object>> resolveReturnToHandCandidates(
+        Long matchId,
+        Long userId,
+        JsonNode effectNode,
+        SearchCriteria criteria,
+        boolean excludeLimitedSupport
+    ) {
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
+        if (usesGiftHolderStackSnapshotForReturnToHand(rawText, effectNode)) {
+            return loadCandidatesByCardInstanceIds(
+                matchId,
+                userId,
+                extractEffectNodeLongList(effectNode, "giftHolderStackCardInstanceIds"),
+                criteria
+            );
+        }
+        return loadCandidatesFromZone(
+            matchId,
+            userId,
+            "ARCHIVE",
+            criteria,
+            excludeLimitedSupport
+        );
+    }
+
+    private String resolveReturnToHandSourceZone(JsonNode effectNode, String rawText) {
+        return usesGiftHolderStackSnapshotForReturnToHand(rawText, effectNode) ? "GIFT_HOLDER_STACK" : "ARCHIVE";
+    }
+
+    private boolean usesGiftHolderStackSnapshotForReturnToHand(String rawText, JsonNode effectNode) {
+        return StringUtils.hasText(rawText)
+            && rawText.contains("重なっているホロメン")
+            && !extractEffectNodeLongList(effectNode, "giftHolderStackCardInstanceIds").isEmpty();
     }
 
     /**
@@ -3276,19 +4211,31 @@ public class MatchEffectService {
             return executeNoOpEffect(effectType, effectNode, "目前僅支援 Cheer 的付け/付け替え");
         }
 
-        boolean opponentContext = rawText.contains("相手の");
+        String normalizedTargetType = normalize(targetType);
+        boolean opponentContext =
+            isOpponentTargetType(normalizedTargetType)
+                || rawText.contains("相手のステージ")
+                || rawText.contains("相手のアーカイブ")
+                || rawText.contains("相手のエールデッキ");
         Long sourceOwnerUserId = opponentContext ? resolveOpponentUserId(matchId, userId) : userId;
         if (sourceOwnerUserId == null) {
             return executeNoOpEffect(effectType, effectNode, "找不到可操作的玩家");
         }
         String effectiveTargetType = opponentContext ? "ENEMY" : targetType;
-
-        Long targetHolomemId = resolveEffectTargetHolomemId(
+        Long holderHolomemId = resolveGiftEffectHolderHolomemId(
             matchId,
-            userId,
+            sourceOwnerUserId,
+            targetHolomemCardInstanceId,
+            effectNode
+        );
+        Long targetHolomemId = resolvePreferredAddCheerTargetHolomemId(
+            matchId,
+            sourceOwnerUserId,
             effectiveTargetType,
             targetHolomemCardInstanceId,
-            false
+            rawText,
+            false,
+            holderHolomemId
         );
         if (targetHolomemId == null) {
             throw new IllegalStateException("REATTACH 找不到目標 Holomen");
@@ -3360,6 +4307,37 @@ public class MatchEffectService {
             }
         } else {
             sourceMode = "STAGE";
+            boolean restrictToHolderCheer = rawText.contains("このホロメンのエール");
+            if (restrictToHolderCheer) {
+                List<Map<String, Object>> holderCheerRows = resolvePreferredReattachSourceRows(
+                    matchId,
+                    sourceOwnerUserId,
+                    holderHolomemId,
+                    effectNode
+                );
+                String holderCheerSourceMode = moveSpecificCheerRowsToHolomem(
+                    matchId,
+                    sourceOwnerUserId,
+                    targetHolomemId,
+                    holderCheerRows,
+                    moveCount,
+                    movedCheerCardIds,
+                    movedCheerRowIds
+                );
+                if (StringUtils.hasText(holderCheerSourceMode)) {
+                    sourceMode = holderCheerSourceMode;
+                }
+                Map<String, Object> summary = new LinkedHashMap<>();
+                summary.put("effectType", effectType);
+                summary.put("moveRequested", moveCount);
+                summary.put("moveApplied", movedCheerCardIds.size());
+                summary.put("targetHolomemId", targetHolomemId);
+                summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
+                summary.put("movedCheerCardIds", movedCheerCardIds);
+                summary.put("movedCheerRowIds", movedCheerRowIds);
+                summary.put("sourceMode", StringUtils.hasText(sourceMode) ? sourceMode : "HOLDER_CHEER");
+                return summary;
+            }
             List<Map<String, Object>> attachedRows = jdbcTemplate.queryForList(
                 """
                 SELECT c.id AS cheer_row_id,
@@ -3595,6 +4573,118 @@ public class MatchEffectService {
         summary.put("summonedZones", summonedZones);
         summary.put("criteria", buildCriteriaSummary(criteria));
         return summary;
+    }
+
+    /**
+     * 執行「將已公開且本來要進 Archive 的支援卡改為回手」效果。
+     *
+     * <p>目前用於 `HBP02-039`。公開本體在 `ATTACK_ART` 的 `holoxReveal` payload，這裡只負責把
+     * 本次公開進 Archive 的支援卡 1 張改到手牌。
+     */
+    private Map<String, Object> executeReplaceArchiveWithHandEffect(
+        Long matchId,
+        Long userId,
+        String effectType,
+        JsonNode effectNode,
+        Long holderCardInstanceId
+    ) {
+        List<Long> archivedSupportCardInstanceIds = loadLatestHoloxArchivedSupportCardInstanceIds(
+            matchId,
+            userId,
+            holderCardInstanceId
+        );
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", effectType);
+        summary.put("candidateCardInstanceIds", archivedSupportCardInstanceIds);
+        if (archivedSupportCardInstanceIds.isEmpty()) {
+            summary.put("applied", false);
+            summary.put("reason", "本次公開沒有支援卡可改為回手");
+            return summary;
+        }
+
+        Long movedCardInstanceId = null;
+        String movedCardId = null;
+        int nextHandOrder = nextZoneOrder(matchId, userId, "HAND");
+        for (Long candidateCardInstanceId : archivedSupportCardInstanceIds) {
+            if (candidateCardInstanceId == null || candidateCardInstanceId <= 0) {
+                continue;
+            }
+            int updated = jdbcTemplate.update(
+                """
+                UPDATE match_cards
+                SET zone = 'HAND',
+                    order_index = ?,
+                    is_face_down = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'ARCHIVE'
+                """,
+                nextHandOrder++,
+                candidateCardInstanceId,
+                matchId,
+                userId
+            );
+            if (updated != 1) {
+                continue;
+            }
+            movedCardInstanceId = candidateCardInstanceId;
+            movedCardId = jdbcTemplate.query(
+                "SELECT card_id FROM match_cards WHERE id = ?",
+                rs -> rs.next() ? rs.getString("card_id") : null,
+                candidateCardInstanceId
+            );
+            break;
+        }
+
+        if (movedCardInstanceId == null) {
+            summary.put("applied", false);
+            summary.put("reason", "找不到可從 Archive 改為回手的支援卡");
+            return summary;
+        }
+
+        summary.put("applied", true);
+        summary.put("movedCardInstanceId", movedCardInstanceId);
+        summary.put("movedCardId", movedCardId);
+        summary.put("movedCount", 1);
+        return summary;
+    }
+
+    private List<Long> loadLatestHoloxArchivedSupportCardInstanceIds(
+        Long matchId,
+        Long userId,
+        Long holderCardInstanceId
+    ) {
+        if (matchId == null || userId == null || holderCardInstanceId == null || holderCardInstanceId <= 0) {
+            return List.of();
+        }
+        String payloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+              AND payload ->> 'attackerCardInstanceId' = ?
+              AND payload ->> 'artName' = 'ホロックスロット'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : null,
+            matchId,
+            userId,
+            holderCardInstanceId.toString()
+        );
+        JsonNode payloadNode = effectTextParser.parseEffectJson(payloadText);
+        if (payloadNode == null || payloadNode.isNull()) {
+            return List.of();
+        }
+        JsonNode holoxRevealNode = payloadNode.get("holoxReveal");
+        if (holoxRevealNode == null || holoxRevealNode.isNull()) {
+            return List.of();
+        }
+        return toLongList(holoxRevealNode.get("archivedSupportCardInstanceIds"));
     }
 
     /**
@@ -4461,7 +5551,8 @@ public class MatchEffectService {
             opponentUserId,
             targetCardId,
             currentTurn,
-            true
+            true,
+            "BACK"
         );
         List<Long> lostLifeCardInstanceIds = extractLostLifeCardInstanceIds(downEventSummary);
 
@@ -4715,6 +5806,13 @@ public class MatchEffectService {
         }
 
         List<String> allowedNames = new ArrayList<>();
+        if (rawText.contains("このターンにBloomした")) {
+            for (String token : giftTriggerMatcher.extractNameTokens(rawText)) {
+                if (!allowedNames.contains(token)) {
+                    allowedNames.add(token);
+                }
+            }
+        }
         if (rawText.contains("〈さくらみこ〉")) {
             allowedNames.add("さくらみこ");
         }
@@ -4773,7 +5871,7 @@ public class MatchEffectService {
             JOIN cards c ON c.card_id = h.card_id
             WHERE h.match_id = ?
               AND h.owner_user_id = ?
-              AND h.zone = 'CENTER'
+              AND h.zone IN ('CENTER', 'COLLAB', 'BACK')
               AND h.last_bloom_turn = ?
             ORDER BY h.id
             """,
@@ -5357,7 +6455,8 @@ public class MatchEffectService {
             targetType,
             targetHolomemCardInstanceId,
             addCheerEffectClause,
-            preferSelfBackTarget
+            preferSelfBackTarget,
+            null
         );
         if (targetHolomemId == null) {
             throw new IllegalStateException("ADD_CHEER 需要指定可用的我方 Holomen");
@@ -5450,9 +6549,12 @@ public class MatchEffectService {
         String targetType,
         Long targetHolomemCardInstanceId,
         String rawText,
-        boolean preferSelfBackTarget
+        boolean preferSelfBackTarget,
+        Long excludedHolomemId
     ) {
         String targetClause = extractAddCheerTargetClause(rawText);
+        boolean explicitAnyOwnHolomemTarget = targetClause.contains("自分のホロメン");
+        boolean excludeCurrentHolder = targetClause.contains("他の") || targetClause.contains("以外");
         String requiredTag = searchCriteriaParser.resolveTagFromKnownTags(targetClause);
         String requiredZone = resolveRequiredAddCheerTargetZone(targetClause, preferSelfBackTarget);
         String requiredLevelType = resolveRequiredAddCheerTargetLevelType(targetClause);
@@ -5460,20 +6562,60 @@ public class MatchEffectService {
 
         // 只要文案沒有額外限制，就維持既有 targetType 解析邏輯，避免改動面過大。
         if (
+            !excludeCurrentHolder &&
             !StringUtils.hasText(requiredTag) &&
             !StringUtils.hasText(requiredZone) &&
             !StringUtils.hasText(requiredLevelType) &&
             !StringUtils.hasText(requiredNameContains)
         ) {
-            return resolveEffectTargetHolomemId(
+            Long resolvedTarget = resolveEffectTargetHolomemId(
                 matchId,
                 userId,
                 targetType,
                 targetHolomemCardInstanceId,
                 false
             );
+            if (resolvedTarget != null) {
+                return resolvedTarget;
+            }
+            if (explicitAnyOwnHolomemTarget) {
+                return findPreferredOwnedStageHolomemId(matchId, userId, "", "", "", "", null);
+            }
+            return null;
         }
 
+        Long restrictedTarget = findPreferredOwnedStageHolomemId(
+            matchId,
+            userId,
+            requiredZone,
+            requiredLevelType,
+            requiredNameContains,
+            requiredTag,
+            excludeCurrentHolder ? excludedHolomemId : null
+        );
+        if (restrictedTarget != null) {
+            return restrictedTarget;
+        }
+
+        // 有些效果文案同時帶 tag/zone 條件，找不到符合者時應視為不能執行，
+        // 不能回退成隨便貼到中心，否則會把「限定目標」做成「任意目標」。
+        return null;
+    }
+
+    /**
+     * 依文案限制選出優先的自家場上 Holomem。
+     *
+     * <p>排序固定為 `CENTER -> COLLAB -> BACK`，讓沒有互動 UI 的自動結算仍保持 deterministic。
+     */
+    private Long findPreferredOwnedStageHolomemId(
+        Long matchId,
+        Long userId,
+        String requiredZone,
+        String requiredLevelType,
+        String requiredNameContains,
+        String requiredTag,
+        Long excludedHolomemId
+    ) {
         List<Object> args = new ArrayList<>();
         StringBuilder sql = new StringBuilder(
             """
@@ -5504,6 +6646,10 @@ public class MatchEffectService {
             sql.append("\n  AND c.tags_json @> to_jsonb(ARRAY[?]::text[])");
             args.add(requiredTag);
         }
+        if (excludedHolomemId != null && excludedHolomemId > 0) {
+            sql.append("\n  AND h.id <> ?");
+            args.add(excludedHolomemId);
+        }
 
         sql.append(
             """
@@ -5519,14 +6665,258 @@ public class MatchEffectService {
             """
         );
 
-        Long restrictedTarget = jdbcTemplate.query(sql.toString(), rs -> rs.next() ? rs.getLong("id") : null, args.toArray());
-        if (restrictedTarget != null) {
-            return restrictedTarget;
-        }
+        return jdbcTemplate.query(sql.toString(), rs -> rs.next() ? rs.getLong("id") : null, args.toArray());
+    }
 
-        // 有些效果文案同時帶 tag/zone 條件，找不到符合者時應視為不能執行，
-        // 不能回退成隨便貼到中心，否則會把「限定目標」做成「任意目標」。
-        return null;
+    private Long resolveGiftEffectHolderHolomemId(
+        Long matchId,
+        Long ownerUserId,
+        Long holderCardInstanceId,
+        JsonNode effectNode
+    ) {
+        Long storedHolomemId = null;
+        if (effectNode != null && !effectNode.isNull()) {
+            JsonNode storedHolomemNode = effectNode.get("giftHolderHolomemId");
+            if (storedHolomemNode != null && !storedHolomemNode.isNull()) {
+                storedHolomemId = storedHolomemNode.isNumber()
+                    ? storedHolomemNode.longValue()
+                    : asLong(storedHolomemNode.asText());
+            }
+        }
+        if (storedHolomemId != null && storedHolomemId > 0) {
+            return storedHolomemId;
+        }
+        return resolveTargetHolomemId(matchId, ownerUserId, holderCardInstanceId);
+    }
+
+    private List<Map<String, Object>> resolvePreferredReattachSourceRows(
+        Long matchId,
+        Long ownerUserId,
+        Long holderHolomemId,
+        JsonNode effectNode
+    ) {
+        List<Long> storedCheerCardInstanceIds = extractEffectNodeLongList(effectNode, "giftHolderAttachedCheerCardInstanceIds");
+        if (!storedCheerCardInstanceIds.isEmpty()) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (Long storedCheerCardInstanceId : storedCheerCardInstanceIds) {
+                if (storedCheerCardInstanceId == null || storedCheerCardInstanceId <= 0) {
+                    continue;
+                }
+                Map<String, Object> row = jdbcTemplate.query(
+                    """
+                    SELECT c.id AS cheer_row_id,
+                           mc.id AS match_card_id,
+                           mc.card_id AS cheer_card_id,
+                           c.match_holomem_id,
+                           mc.zone
+                    FROM match_cards mc
+                    LEFT JOIN match_holomem_cheers c ON c.match_card_id = mc.id
+                    WHERE mc.match_id = ?
+                      AND mc.owner_user_id = ?
+                      AND mc.id = ?
+                    LIMIT 1
+                    """,
+                    rs -> {
+                        if (!rs.next()) {
+                            return null;
+                        }
+                        Map<String, Object> result = new LinkedHashMap<>();
+                        result.put("cheer_row_id", asLong(rs.getObject("cheer_row_id")));
+                        result.put("match_card_id", asLong(rs.getObject("match_card_id")));
+                        result.put("cheer_card_id", rs.getString("cheer_card_id"));
+                        result.put("match_holomem_id", asLong(rs.getObject("match_holomem_id")));
+                        result.put("zone", rs.getString("zone"));
+                        return result;
+                    },
+                    matchId,
+                    ownerUserId,
+                    storedCheerCardInstanceId
+                );
+                if (row != null && !row.isEmpty()) {
+                    rows.add(row);
+                }
+            }
+            return rows;
+        }
+        if (holderHolomemId == null || holderHolomemId <= 0) {
+            return List.of();
+        }
+        return jdbcTemplate.queryForList(
+            """
+            SELECT c.id AS cheer_row_id,
+                   mc.id AS match_card_id,
+                   mc.card_id AS cheer_card_id,
+                   c.match_holomem_id,
+                   mc.zone
+            FROM match_holomem_cheers c
+            JOIN match_cards mc ON mc.id = c.match_card_id
+            WHERE c.match_holomem_id = ?
+            ORDER BY c.id
+            """,
+            holderHolomemId
+        );
+    }
+
+    private String moveSpecificCheerRowsToHolomem(
+        Long matchId,
+        Long ownerUserId,
+        Long targetHolomemId,
+        List<Map<String, Object>> candidateRows,
+        int moveCount,
+        List<String> movedCheerCardIds,
+        List<Long> movedCheerRowIds
+    ) {
+        String sourceMode = null;
+        if (candidateRows == null || candidateRows.isEmpty()) {
+            return sourceMode;
+        }
+        for (Map<String, Object> row : candidateRows) {
+            if (movedCheerCardIds.size() >= moveCount) {
+                break;
+            }
+            Long cheerCardInstanceId = asLong(row.get("match_card_id"));
+            String cheerCardId = asText(row.get("cheer_card_id"));
+            String currentZone = normalize(asText(row.get("zone")));
+            if (cheerCardInstanceId == null || cheerCardInstanceId <= 0 || !StringUtils.hasText(cheerCardId)) {
+                continue;
+            }
+            if ("ARCHIVE".equals(currentZone)) {
+                int moved = jdbcTemplate.update(
+                    """
+                    UPDATE match_cards
+                    SET zone = 'STAGE',
+                        order_index = NULL,
+                        is_face_down = FALSE,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                      AND match_id = ?
+                      AND owner_user_id = ?
+                      AND zone = 'ARCHIVE'
+                    """,
+                    cheerCardInstanceId,
+                    matchId,
+                    ownerUserId
+                );
+                if (moved != 1) {
+                    continue;
+                }
+                Long newCheerRowId = jdbcTemplate.query(
+                    """
+                    INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+                    VALUES (?, ?, ?, FALSE)
+                    RETURNING id
+                    """,
+                    rs -> rs.next() ? rs.getLong("id") : null,
+                    targetHolomemId,
+                    cheerCardInstanceId,
+                    cheerCardId
+                );
+                movedCheerCardIds.add(cheerCardId);
+                if (newCheerRowId != null) {
+                    movedCheerRowIds.add(newCheerRowId);
+                }
+                sourceMode = mergeSourceMode(sourceMode, "ARCHIVE");
+                continue;
+            }
+            if (!"STAGE".equals(currentZone)) {
+                continue;
+            }
+            jdbcTemplate.update(
+                """
+                DELETE FROM match_holomem_cheers c
+                USING match_holomems h
+                WHERE c.match_holomem_id = h.id
+                  AND c.match_card_id = ?
+                  AND h.match_id = ?
+                  AND h.owner_user_id = ?
+                """,
+                cheerCardInstanceId,
+                matchId,
+                ownerUserId
+            );
+            Long newCheerRowId = jdbcTemplate.query(
+                """
+                INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+                VALUES (?, ?, ?, FALSE)
+                RETURNING id
+                """,
+                rs -> rs.next() ? rs.getLong("id") : null,
+                targetHolomemId,
+                cheerCardInstanceId,
+                cheerCardId
+            );
+            movedCheerCardIds.add(cheerCardId);
+            if (newCheerRowId != null) {
+                movedCheerRowIds.add(newCheerRowId);
+            }
+            sourceMode = mergeSourceMode(sourceMode, "STAGE");
+        }
+        return sourceMode;
+    }
+
+    private String mergeSourceMode(String current, String next) {
+        if (!StringUtils.hasText(next)) {
+            return current;
+        }
+        if (!StringUtils.hasText(current)) {
+            return next;
+        }
+        if (current.equals(next)) {
+            return current;
+        }
+        return "MIXED";
+    }
+
+    private List<Long> extractEffectNodeLongList(JsonNode effectNode, String fieldName) {
+        if (effectNode == null || effectNode.isNull() || !StringUtils.hasText(fieldName)) {
+            return List.of();
+        }
+        JsonNode value = effectNode.get(fieldName);
+        if (value == null || value.isNull() || !value.isArray()) {
+            return List.of();
+        }
+        List<Long> ids = new ArrayList<>();
+        for (JsonNode node : value) {
+            if (node == null || node.isNull()) {
+                continue;
+            }
+            Long id = node.isNumber() ? node.longValue() : asLong(node.asText());
+            if (id == null || id <= 0 || ids.contains(id)) {
+                continue;
+            }
+            ids.add(id);
+        }
+        return ids;
+    }
+
+    private List<Long> toLongList(Object value) {
+        if (!(value instanceof List<?> list) || list.isEmpty()) {
+            return List.of();
+        }
+        List<Long> ids = new ArrayList<>();
+        for (Object item : list) {
+            Long id = asLong(item);
+            if (id == null || id <= 0 || ids.contains(id)) {
+                continue;
+            }
+            ids.add(id);
+        }
+        return ids;
+    }
+
+    private List<String> toTextList(Object value) {
+        if (!(value instanceof List<?> list) || list.isEmpty()) {
+            return List.of();
+        }
+        List<String> texts = new ArrayList<>();
+        for (Object item : list) {
+            String text = asText(item);
+            if (!StringUtils.hasText(text) || texts.contains(text)) {
+                continue;
+            }
+            texts.add(text);
+        }
+        return texts;
     }
 
     /**
@@ -5617,9 +7007,10 @@ public class MatchEffectService {
         if (archiveRequested <= 0) {
             archiveRequested = 1;
         }
+        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         String requiredLevelType = normalizeLevelType(effectTextParser.extractText(effectNode, "stackCostLevelType", "costLevelType"));
         if (!StringUtils.hasText(requiredLevelType)) {
-            requiredLevelType = "DEBUT";
+            requiredLevelType = resolveRequiredAddCheerTargetLevelType(rawText);
         }
 
         Long topCardInstanceId = selfHolomemCardInstanceId != null
@@ -5655,7 +7046,7 @@ public class MatchEffectService {
         List<Map<String, Object>> selected = new ArrayList<>();
         for (Map<String, Object> candidate : candidates) {
             String levelType = normalizeLevelType(asText(candidate.get("level_type")));
-            if (!requiredLevelType.equals(levelType)) {
+            if (StringUtils.hasText(requiredLevelType) && !requiredLevelType.equals(levelType)) {
                 continue;
             }
             selected.add(candidate);
@@ -5715,7 +7106,11 @@ public class MatchEffectService {
         summary.put("archivedStackCardIds", archivedStackCardIds);
         summary.put("applied", !archivedStackCardInstanceIds.isEmpty());
         if (archivedStackCardInstanceIds.isEmpty()) {
-            summary.put("reason", "沒有可歸檔的重疊 " + requiredLevelType + " 卡片");
+            if (StringUtils.hasText(requiredLevelType)) {
+                summary.put("reason", "沒有可歸檔的重疊 " + requiredLevelType + " 卡片");
+            } else {
+                summary.put("reason", "沒有可歸檔的重疊卡片");
+            }
         }
         return summary;
     }
@@ -5775,6 +7170,7 @@ public class MatchEffectService {
         int currentTurn = resolveCurrentTurnNumber(matchId);
         int damageModifier = resolveActiveDamageModifier(matchId, userId, currentTurn);
         int damage = Math.max(baseDamage + damageModifier, 0);
+        boolean specialDamage = StringUtils.hasText(rawText) && rawText.contains("特殊ダメージ");
         if (damage <= 0) {
             Map<String, Object> summary = new LinkedHashMap<>();
             summary.put("effectType", effectType);
@@ -5786,6 +7182,62 @@ public class MatchEffectService {
             summary.put("downed", false);
             summary.put("lifeReduced", false);
             summary.put("reason", "修正後傷害小於等於 0");
+            return summary;
+        }
+        if (isHpChangeBlockedByOpponentAbility(matchId, userId, targetOwnerUserId, targetHolomemId, effectType)) {
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("effectType", effectType);
+            summary.put("damageRequested", baseDamage);
+            summary.put("damageApplied", 0);
+            summary.put("baseDamage", baseDamage);
+            summary.put("damageModifierApplied", damageModifier);
+            summary.put("targetHolomemId", targetHolomemId);
+            summary.put("downed", false);
+            summary.put("lifeReduced", false);
+            summary.put("reason", "目標在相手のメインステップ中不受相手能力的 HP 變動影響");
+            return summary;
+        }
+        String targetCurrentZone = resolveHolomemZone(matchId, targetHolomemId);
+        if (
+            specialDamage
+                && isSpecialDamageImmunityActive(matchId, targetOwnerUserId, currentTurn, targetCurrentZone)
+        ) {
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("effectType", effectType);
+            summary.put("damageRequested", baseDamage);
+            summary.put("damageApplied", 0);
+            summary.put("baseDamage", baseDamage);
+            summary.put("damageModifierApplied", damageModifier);
+            summary.put("targetHolomemId", targetHolomemId);
+            summary.put("downed", false);
+            summary.put("lifeReduced", false);
+            summary.put("specialDamagePrevented", true);
+            summary.put("reason", "特殊ダメージ無効化効果が有効");
+            return summary;
+        }
+        Map<String, Object> specialDamageGiftSummary = specialDamage
+            ? tryActivateHsd13012SpecialDamageImmunity(
+                matchId,
+                userId,
+                targetOwnerUserId,
+                targetHolomemId,
+                targetCurrentZone,
+                currentTurn
+            )
+            : null;
+        if (specialDamageGiftSummary != null && toBoolean(specialDamageGiftSummary.get("preventedDamage"))) {
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("effectType", effectType);
+            summary.put("damageRequested", baseDamage);
+            summary.put("damageApplied", 0);
+            summary.put("baseDamage", baseDamage);
+            summary.put("damageModifierApplied", damageModifier);
+            summary.put("targetHolomemId", targetHolomemId);
+            summary.put("downed", false);
+            summary.put("lifeReduced", false);
+            summary.put("specialDamagePrevented", true);
+            summary.put("specialDamageGift", specialDamageGiftSummary);
+            summary.put("reason", "HSD13-012 特殊ダメージ無効化");
             return summary;
         }
 
@@ -5898,7 +7350,8 @@ public class MatchEffectService {
                 targetOwnerUserId,
                 targetCardId,
                 currentTurn,
-                !deferDownEvent
+                !deferDownEvent,
+                targetZone
             );
             if (!deferDownEvent && toBoolean(downEventSummary.get("lifeReduced"))) {
                 lifeReduced = true;
@@ -5928,6 +7381,246 @@ public class MatchEffectService {
             summary.put("downEvent", downEventSummary);
         }
         return summary;
+    }
+
+    private Map<String, Object> tryActivateHsd13012SpecialDamageImmunity(
+        Long matchId,
+        Long sourceUserId,
+        Long defendingUserId,
+        Long targetHolomemId,
+        String targetZone,
+        int currentTurn
+    ) {
+        if (
+            matchId == null
+                || sourceUserId == null
+                || defendingUserId == null
+                || targetHolomemId == null
+                || currentTurn <= 0
+        ) {
+            return null;
+        }
+        if (Objects.equals(sourceUserId, defendingUserId)) {
+            return null;
+        }
+        if (!"BACK".equals(normalize(targetZone))) {
+            return null;
+        }
+        if (!isOpponentTurnForUser(matchId, defendingUserId)) {
+            return null;
+        }
+        List<Map<String, Object>> holders = jdbcTemplate.queryForList(
+            """
+            SELECT h.id AS holomem_id,
+                   h.match_card_id,
+                   h.card_id,
+                   m.passive_effect_json::text AS passive_text
+            FROM match_holomems h
+            JOIN member_cards m ON m.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.card_id = 'HSD13-012'
+            ORDER BY h.id
+            """,
+            matchId,
+            defendingUserId
+        );
+        if (holders.isEmpty()) {
+            return null;
+        }
+        for (Map<String, Object> holder : holders) {
+            Long holderHolomemId = asLong(holder.get("holomem_id"));
+            Long holderCardInstanceId = asLong(holder.get("match_card_id"));
+            String giftText = loadGiftEffectText(asText(holder.get("passive_text")));
+            if (!StringUtils.hasText(giftText)) {
+                continue;
+            }
+            if (!giftText.contains("自分のバックホロメンが相手から特殊ダメージを受ける時")) {
+                continue;
+            }
+            if (!giftText.contains("このターンの間、自分のバックホロメン全員は特殊ダメージを受けない")) {
+                continue;
+            }
+            if (!matchesGiftTurnOwnershipCondition(matchId, defendingUserId, giftText)) {
+                continue;
+            }
+            Long archivedStackCardInstanceId = archiveOneStackCardFromHolder(
+                matchId,
+                defendingUserId,
+                holderHolomemId,
+                holderCardInstanceId
+            );
+            if (archivedStackCardInstanceId == null || archivedStackCardInstanceId <= 0) {
+                continue;
+            }
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("actions", List.of("SPECIAL_DAMAGE_IMMUNITY"));
+            payload.put("zones", List.of("BACK"));
+            payload.put("sourceCardId", asText(holder.get("card_id")));
+            payload.put("holderHolomemId", holderHolomemId);
+            payload.put("holderCardInstanceId", holderCardInstanceId);
+            payload.put("rawText", giftText);
+            int inserted = jdbcTemplate.update(
+                """
+                INSERT INTO match_turn_effects (
+                    match_id,
+                    source_user_id,
+                    affected_user_id,
+                    effect_type,
+                    stat_type,
+                    modifier_value,
+                    expires_turn,
+                    payload
+                ) VALUES (?, ?, ?, ?, 'ACTION_LOCK', 1, ?, CAST(? AS jsonb))
+                """,
+                matchId,
+                defendingUserId,
+                defendingUserId,
+                "BUFF",
+                currentTurn,
+                effectTextParser.toJsonString(payload)
+            );
+            if (inserted != 1) {
+                return null;
+            }
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("triggerType", "SPECIAL_DAMAGE_RECEIVED");
+            summary.put("preventedDamage", true);
+            summary.put("holderHolomemId", holderHolomemId);
+            summary.put("holderCardInstanceId", holderCardInstanceId);
+            summary.put("holderCardId", asText(holder.get("card_id")));
+            summary.put("archivedStackCardInstanceId", archivedStackCardInstanceId);
+            summary.put("expiresTurn", currentTurn);
+            summary.put("targetHolomemId", targetHolomemId);
+            return summary;
+        }
+        return null;
+    }
+
+    private Long archiveOneStackCardFromHolder(
+        Long matchId,
+        Long userId,
+        Long holderHolomemId,
+        Long holderCardInstanceId
+    ) {
+        if (matchId == null || userId == null || holderHolomemId == null || holderCardInstanceId == null) {
+            return null;
+        }
+        Long stackCardInstanceId = jdbcTemplate.query(
+            """
+            SELECT s.match_card_id
+            FROM match_holomem_stack_cards s
+            WHERE s.match_holomem_id = ?
+              AND s.match_card_id <> ?
+            ORDER BY s.stack_order DESC, s.id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("match_card_id") : null,
+            holderHolomemId,
+            holderCardInstanceId
+        );
+        if (stackCardInstanceId == null || stackCardInstanceId <= 0) {
+            return null;
+        }
+        int archiveOrder = nextZoneOrder(matchId, userId, "ARCHIVE");
+        int moved = jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'ARCHIVE',
+                order_index = ?,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            """,
+            archiveOrder,
+            stackCardInstanceId,
+            matchId,
+            userId
+        );
+        if (moved != 1) {
+            return null;
+        }
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomem_stack_cards
+            WHERE match_holomem_id = ?
+              AND match_card_id = ?
+            """,
+            holderHolomemId,
+            stackCardInstanceId
+        );
+        return stackCardInstanceId;
+    }
+
+    private boolean isSpecialDamageImmunityActive(
+        Long matchId,
+        Long affectedUserId,
+        int currentTurn,
+        String targetZone
+    ) {
+        if (
+            matchId == null
+                || affectedUserId == null
+                || currentTurn <= 0
+                || !"BACK".equals(normalize(targetZone))
+        ) {
+            return false;
+        }
+        Integer count = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_turn_effects
+            WHERE match_id = ?
+              AND affected_user_id = ?
+              AND stat_type = 'ACTION_LOCK'
+              AND expires_turn >= ?
+              AND payload::text LIKE '%"SPECIAL_DAMAGE_IMMUNITY"%'
+              AND payload::text LIKE '%"BACK"%'
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            affectedUserId,
+            currentTurn
+        );
+        return count != null && count > 0;
+    }
+
+    private boolean isOpponentTurnForUser(Long matchId, Long userId) {
+        if (matchId == null || userId == null) {
+            return false;
+        }
+        Long currentTurnPlayerId = jdbcTemplate.query(
+            """
+            SELECT current_turn_player_id
+            FROM matches
+            WHERE id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? asLong(rs.getObject("current_turn_player_id")) : null,
+            matchId
+        );
+        return currentTurnPlayerId != null && !Objects.equals(currentTurnPlayerId, userId);
+    }
+
+    private String resolveHolomemZone(Long matchId, Long holomemId) {
+        if (matchId == null || holomemId == null) {
+            return "";
+        }
+        String zone = jdbcTemplate.query(
+            """
+            SELECT zone
+            FROM match_holomems
+            WHERE id = ?
+              AND match_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("zone") : null,
+            holomemId,
+            matchId
+        );
+        return normalize(zone);
     }
 
     /**
@@ -6029,6 +7722,16 @@ public class MatchEffectService {
             summary.put("healApplied", 0);
             summary.put("targetHolomemId", targetHolomemId);
             summary.put("reason", "無可用回復數值");
+            return summary;
+        }
+        if (isHpChangeBlockedByOpponentAbility(matchId, userId, targetOwnerUserId, targetHolomemId, effectType)) {
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("effectType", effectType);
+            summary.put("targetHolomemId", targetHolomemId);
+            summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
+            summary.put("healRequested", healRequested);
+            summary.put("healApplied", 0);
+            summary.put("reason", "目標在相手のメインステップ中不受相手能力的 HP 變動影響");
             return summary;
         }
 
@@ -6872,16 +8575,16 @@ public class MatchEffectService {
         int requestedCount = Math.max(resolveActionCount(effectNode, "手札に戻", 1), 1);
         SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         boolean excludeLimitedSupport = rawText.contains("LIMITED以外");
-        List<Map<String, Object>> rows = loadCandidatesFromZone(
+        List<Map<String, Object>> rows = resolveReturnToHandCandidates(
             matchId,
             userId,
-            "ARCHIVE",
+            effectNode,
             criteria,
             excludeLimitedSupport
         );
         return new SelectionProbe(
             requestedCount,
-            mapDecisionCandidates(rows, "ARCHIVE")
+            mapDecisionCandidates(rows, resolveReturnToHandSourceZone(effectNode, rawText))
         );
     }
 
@@ -7694,9 +9397,14 @@ public class MatchEffectService {
             effectTypes.add("UNIMPLEMENTED");
             return new ArrayList<>(effectTypes);
         }
+        boolean archiveReplacementToHand = text.contains("アーカイブするかわりに手札に加えられる");
 
         if (text.contains("手札に加える")) {
             effectTypes.add("SEARCH");
+        }
+        if (archiveReplacementToHand) {
+            effectTypes.add("REPLACE_ARCHIVE_WITH_HAND");
+            effectTypes.remove("SEARCH");
         }
         if (text.contains("手札に戻")) {
             effectTypes.add("RETURN_TO_HAND");
@@ -7735,6 +9443,12 @@ public class MatchEffectService {
         }
         if (text.contains("エール") && (text.contains("アーカイブできる") || text.contains("アーカイブする"))) {
             effectTypes.add("REMOVE_CHEER");
+        }
+        if (
+            text.contains("重なっているホロメン")
+                && (text.contains("アーカイブできる") || text.contains("アーカイブする"))
+        ) {
+            effectTypes.add("ARCHIVE_STACK_CARD");
         }
         if (text.contains("手札") && (text.contains("アーカイブする") || text.contains("アーカイブできる"))) {
             effectTypes.add("DISCARD_HAND");
@@ -8408,6 +10122,92 @@ public class MatchEffectService {
         return filterCandidatesByCriteria(rows, resolved);
     }
 
+    private List<Map<String, Object>> loadCandidatesByCardInstanceIds(
+        Long matchId,
+        Long userId,
+        List<Long> cardInstanceIds,
+        SearchCriteria criteria
+    ) {
+        if (matchId == null || userId == null || cardInstanceIds == null || cardInstanceIds.isEmpty()) {
+            return List.of();
+        }
+        List<Long> orderedIds = cardInstanceIds.stream()
+            .filter(Objects::nonNull)
+            .filter(id -> id > 0)
+            .distinct()
+            .toList();
+        if (orderedIds.isEmpty()) {
+            return List.of();
+        }
+        SearchCriteria resolved = criteria == null ? SearchCriteria.empty() : criteria;
+        String placeholders = String.join(", ", java.util.Collections.nCopies(orderedIds.size(), "?"));
+        List<Object> args = new ArrayList<>();
+        args.add(matchId);
+        args.add(userId);
+        args.addAll(orderedIds);
+        List<Map<String, Object>> rows = jdbcTemplate.query(
+            """
+            SELECT mc.id,
+                   mc.card_id,
+                   c.card_type,
+                   m.level_type,
+                   c.name,
+                   c.tags_json::text AS tags_json,
+                   m.main_color,
+                   m.sub_color,
+                   cc.color AS cheer_color,
+                   h.is_rested,
+                   GREATEST(COALESCE(m.hp, 0) - COALESCE(h.damage_taken, 0), 0) AS remain_hp,
+                   mc.zone
+            FROM match_cards mc
+            JOIN cards c ON c.card_id = mc.card_id
+            LEFT JOIN member_cards m ON m.card_id = mc.card_id
+            LEFT JOIN cheer_cards cc ON cc.card_id = mc.card_id
+            LEFT JOIN match_holomems h
+              ON h.match_card_id = mc.id
+             AND h.match_id = mc.match_id
+             AND h.owner_user_id = mc.owner_user_id
+            WHERE mc.match_id = ?
+              AND mc.owner_user_id = ?
+              AND mc.id IN (PLACEHOLDER_IDS)
+            """
+                .replace("PLACEHOLDER_IDS", placeholders),
+            (rs, rowNum) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id"));
+                row.put("card_id", rs.getString("card_id"));
+                row.put("card_type", rs.getString("card_type"));
+                row.put("level_type", rs.getString("level_type"));
+                row.put("name", rs.getString("name"));
+                row.put("tags_json", rs.getString("tags_json"));
+                row.put("main_color", rs.getString("main_color"));
+                row.put("sub_color", rs.getString("sub_color"));
+                row.put("cheer_color", rs.getString("cheer_color"));
+                row.put("is_rested", rs.getObject("is_rested"));
+                row.put("remain_hp", rs.getObject("remain_hp"));
+                row.put("zone", rs.getString("zone"));
+                return row;
+            },
+            args.toArray()
+        );
+        List<Map<String, Object>> filtered = filterCandidatesByCriteria(rows, resolved);
+        Map<Long, Map<String, Object>> rowById = new LinkedHashMap<>();
+        for (Map<String, Object> row : filtered) {
+            Long id = asLong(row.get("id"));
+            if (id != null && id > 0) {
+                rowById.put(id, row);
+            }
+        }
+        List<Map<String, Object>> orderedRows = new ArrayList<>();
+        for (Long orderedId : orderedIds) {
+            Map<String, Object> row = rowById.get(orderedId);
+            if (row != null) {
+                orderedRows.add(row);
+            }
+        }
+        return orderedRows;
+    }
+
     /**
      * 從多區域載入候選卡並保留原始排序。
      */
@@ -8820,6 +10620,9 @@ public class MatchEffectService {
         if (rawText.contains("黄")) {
             return "YELLOW";
         }
+        if (rawText.contains("無色")) {
+            return "COLORLESS";
+        }
         return "";
     }
 
@@ -9091,6 +10894,115 @@ public class MatchEffectService {
     }
 
     /**
+     * 讀取當前 phase 與 turn player。
+     */
+    private MatchTurnContext loadMatchTurnContext(Long matchId) {
+        return jdbcTemplate.query(
+            """
+            SELECT current_phase, current_turn_player_id
+            FROM matches
+            WHERE id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new MatchTurnContext(
+                    effectTextParser.normalizeEffectType(rs.getString("current_phase")),
+                    asLong(rs.getObject("current_turn_player_id"))
+                );
+            },
+            matchId
+        );
+    }
+
+    /**
+     * 判斷靜態 Gift 指向的受益目標是否要求特定站位。
+     */
+    private boolean matchesPassiveGiftTargetZoneRestriction(String rawText, String targetStageZone) {
+        if (!StringUtils.hasText(rawText)) {
+            return true;
+        }
+        boolean mentionsCenterHolomem = rawText.contains("センターホロメン");
+        boolean mentionsCollabHolomem = rawText.contains("コラボホロメン");
+        boolean mentionsBackHolomem = rawText.contains("バックホロメン");
+        boolean mentionsCenterPositionDamageTarget = rawText.contains("センターポジションで受けるダメージ");
+        boolean mentionsCollabPositionDamageTarget = rawText.contains("コラボポジションで受けるダメージ");
+        boolean mentionsBackPositionDamageTarget = rawText.contains("バックポジションで受けるダメージ");
+        if (!mentionsCenterHolomem
+            && !mentionsCollabHolomem
+            && !mentionsBackHolomem
+            && !mentionsCenterPositionDamageTarget
+            && !mentionsCollabPositionDamageTarget
+            && !mentionsBackPositionDamageTarget) {
+            return true;
+        }
+        if ((mentionsCenterHolomem || mentionsCenterPositionDamageTarget) && "CENTER".equals(targetStageZone)) {
+            return true;
+        }
+        if ((mentionsCollabHolomem || mentionsCollabPositionDamageTarget) && "COLLAB".equals(targetStageZone)) {
+            return true;
+        }
+        if ((mentionsBackHolomem || mentionsBackPositionDamageTarget) && "BACK".equals(targetStageZone)) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 判斷常駐減傷是否要求來自特定等級 Holomem 的傷害來源。
+     */
+    private boolean matchesIncomingDamageSourceLevelRestriction(String rawText, String incomingSourceLevelType) {
+        if (!StringUtils.hasText(rawText)) {
+            return true;
+        }
+        String normalizedText = rawText.toUpperCase(Locale.ROOT);
+        String normalizedLevel = effectTextParser.normalizeEffectType(incomingSourceLevelType);
+        boolean mentionsDebut = normalizedText.contains("DEBUTホロメンから受けるダメージ")
+            || normalizedText.contains("DEBUTホロメンから受けるアーツダメージ");
+        boolean mentionsFirst = normalizedText.contains("1STホロメンから受けるダメージ")
+            || normalizedText.contains("FIRSTホロメンから受けるダメージ")
+            || normalizedText.contains("1STホロメンから受けるアーツダメージ")
+            || normalizedText.contains("FIRSTホロメンから受けるアーツダメージ");
+        boolean mentionsSecond = normalizedText.contains("2NDホロメンから受けるダメージ")
+            || normalizedText.contains("SECONDホロメンから受けるダメージ")
+            || normalizedText.contains("2NDホロメンから受けるアーツダメージ")
+            || normalizedText.contains("SECONDホロメンから受けるアーツダメージ");
+        boolean mentionsSpot = normalizedText.contains("SPOTホロメンから受けるダメージ")
+            || normalizedText.contains("SPOTホロメンから受けるアーツダメージ");
+        boolean mentionsBuzz = normalizedText.contains("BUZZホロメンから受けるダメージ")
+            || normalizedText.contains("BUZZホロメンから受けるアーツダメージ");
+        if (!mentionsDebut && !mentionsFirst && !mentionsSecond && !mentionsSpot && !mentionsBuzz) {
+            return true;
+        }
+        if (mentionsDebut && "DEBUT".equals(normalizedLevel)) {
+            return true;
+        }
+        if (mentionsFirst && "FIRST".equals(normalizedLevel)) {
+            return true;
+        }
+        if (mentionsSecond && "SECOND".equals(normalizedLevel)) {
+            return true;
+        }
+        if (mentionsSpot && "SPOT".equals(normalizedLevel)) {
+            return true;
+        }
+        if (mentionsBuzz && "BUZZ".equals(normalizedLevel)) {
+            return true;
+        }
+        return false;
+    }
+
+    private boolean matchesPassiveGiftRequiredOshiName(String rawText, String actualOshiCardName) {
+        String requiredOshiName = resolveRequiredOshiName(rawText);
+        if (!StringUtils.hasText(requiredOshiName)) {
+            return true;
+        }
+        return StringUtils.hasText(actualOshiCardName) && actualOshiCardName.contains(requiredOshiName);
+    }
+
+    /**
      * 彙總目前生效中的傷害修正值（match_turn_effects）。
      */
     private int resolveActiveDamageModifier(Long matchId, Long affectedUserId, int currentTurn) {
@@ -9157,11 +11069,13 @@ public class MatchEffectService {
      * <p>因此這裡只抓規則判斷需要的最小欄位，避免把整個 Holomem 狀態物件搬進來。
      */
     private StaticArtBonusTargetContext loadStaticArtBonusTargetContext(Long matchId, Long userId, Long holomemId) {
+        Set<String> opponentStageTags = loadOpponentStageTags(matchId, userId);
         return jdbcTemplate.query(
             """
             SELECT h.id,
                    h.zone,
                    h.current_level,
+                   c.name,
                    COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text
             FROM match_holomems h
             JOIN cards c ON c.card_id = h.card_id
@@ -9178,6 +11092,50 @@ public class MatchEffectService {
                     rs.getLong("id"),
                     effectTextParser.normalizeEffectType(rs.getString("zone")),
                     effectTextParser.normalizeEffectType(rs.getString("current_level")),
+                    rs.getString("name"),
+                    parseTagsJson(rs.getString("tags_json_text")),
+                    opponentStageTags
+                );
+            },
+            matchId,
+            userId,
+            holomemId
+        );
+    }
+
+    /**
+     * 載入常駐 Gift 藝能費用減免受益者所需資訊。
+     */
+    private PassiveGiftArtCostReductionTargetContext loadPassiveGiftArtCostReductionTargetContext(
+        Long matchId,
+        Long userId,
+        Long holomemId,
+        String attackerArtName
+    ) {
+        return jdbcTemplate.query(
+            """
+            SELECT h.id,
+                   h.zone,
+                   h.current_level,
+                   c.name,
+                   COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new PassiveGiftArtCostReductionTargetContext(
+                    rs.getLong("id"),
+                    effectTextParser.normalizeEffectType(rs.getString("zone")),
+                    effectTextParser.normalizeEffectType(rs.getString("current_level")),
+                    rs.getString("name"),
+                    attackerArtName,
                     parseTagsJson(rs.getString("tags_json_text"))
                 );
             },
@@ -9200,6 +11158,7 @@ public class MatchEffectService {
                    h.zone,
                    h.current_level,
                    mp.current_life,
+                   oshi.name AS oshi_card_name,
                    COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text,
                    (
                        SELECT COUNT(*)
@@ -9211,6 +11170,7 @@ public class MatchEffectService {
             JOIN match_players mp
               ON mp.match_id = h.match_id
              AND mp.user_id = h.owner_user_id
+            LEFT JOIN cards oshi ON oshi.card_id = mp.oshi_card_id
             WHERE h.match_id = ?
               AND h.owner_user_id = ?
               AND h.id = ?
@@ -9237,11 +11197,12 @@ public class MatchEffectService {
     /**
      * 載入受傷減免判斷所需的最小 target 狀態。
      *
-     * <p>目前先只需要知道這張被打的 Holomem 自己是誰，以及它實際站在哪個 stage zone。
+     * <p>目前除了既有的 self / collab 類型，也開始支援：
      * 例如：
      *
      * <p>- `HSD07-009` 需要知道受擊者是不是 holder 自己
      * <p>- `HBP06-009` 需要知道受擊者是不是 `COLLAB`
+     * <p>- `HBP04-087` / `HBP05-008` 需要知道受擊者的站位 / 等級 / tag
      *
      * <p>若未來出現更多「依等級 / tag / 名稱決定誰能被保護」的常駐減傷文案，再往這個 target context
      * 補欄位即可，不需要回頭重寫 `attackArt(...)` 主流程。
@@ -9249,13 +11210,23 @@ public class MatchEffectService {
     private PassiveGiftIncomingDamageReductionTargetContext loadPassiveGiftIncomingDamageReductionTargetContext(
         Long matchId,
         Long userId,
-        Long holomemId
+        Long holomemId,
+        String incomingSourceLevelType
     ) {
         return jdbcTemplate.query(
             """
             SELECT h.id,
-                   h.zone
+                   h.zone,
+                   h.current_level,
+                   c.name,
+                   COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text,
+                   oc.name AS oshi_card_name
             FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            JOIN match_players mp
+              ON mp.match_id = h.match_id
+             AND mp.user_id = h.owner_user_id
+            JOIN cards oc ON oc.card_id = mp.oshi_card_id
             WHERE h.match_id = ?
               AND h.owner_user_id = ?
               AND h.id = ?
@@ -9267,7 +11238,52 @@ public class MatchEffectService {
                 }
                 return new PassiveGiftIncomingDamageReductionTargetContext(
                     rs.getLong("id"),
-                    effectTextParser.normalizeEffectType(rs.getString("zone"))
+                    effectTextParser.normalizeEffectType(rs.getString("zone")),
+                    effectTextParser.normalizeEffectType(rs.getString("current_level")),
+                    rs.getString("name"),
+                    parseTagsJson(rs.getString("tags_json_text")),
+                    rs.getString("oshi_card_name"),
+                    effectTextParser.normalizeEffectType(incomingSourceLevelType)
+                );
+            },
+            matchId,
+            userId,
+            holomemId
+        );
+    }
+
+    /**
+     * 載入「相手能力不能改變 HP」所需的 target 狀態。
+     */
+    private PassiveGiftHpChangePreventionTargetContext loadPassiveGiftHpChangePreventionTargetContext(
+        Long matchId,
+        Long userId,
+        Long holomemId
+    ) {
+        return jdbcTemplate.query(
+            """
+            SELECT h.id,
+                   h.zone,
+                   h.current_level,
+                   c.name,
+                   COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new PassiveGiftHpChangePreventionTargetContext(
+                    rs.getLong("id"),
+                    effectTextParser.normalizeEffectType(rs.getString("zone")),
+                    effectTextParser.normalizeEffectType(rs.getString("current_level")),
+                    rs.getString("name"),
+                    parseTagsJson(rs.getString("tags_json_text"))
                 );
             },
             matchId,
@@ -9289,6 +11305,7 @@ public class MatchEffectService {
                    h.zone,
                    h.current_level,
                    mp.current_life,
+                   oshi.name AS oshi_card_name,
                    COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text,
                    (
                        SELECT COUNT(*)
@@ -9300,6 +11317,7 @@ public class MatchEffectService {
             JOIN match_players mp
               ON mp.match_id = h.match_id
              AND mp.user_id = h.owner_user_id
+            LEFT JOIN cards oshi ON oshi.card_id = mp.oshi_card_id
             WHERE h.match_id = ?
               AND h.owner_user_id = ?
               AND h.id = ?
@@ -9315,7 +11333,8 @@ public class MatchEffectService {
                     effectTextParser.normalizeEffectType(rs.getString("current_level")),
                     parseTagsJson(rs.getString("tags_json_text")),
                     rs.getInt("attached_cheer_count"),
-                    rs.getInt("current_life")
+                    rs.getInt("current_life"),
+                    rs.getString("oshi_card_name")
                 );
             },
             matchId,
@@ -9361,10 +11380,10 @@ public class MatchEffectService {
     }
 
     /**
-     * 載入我方中心位上所有帶被動文案的 holder。
+     * 載入我方場上可提供被動文案的 holder。
      *
-     * <p>只抓中心位，是因為像 `HSD08-004` 這種卡文已經明確要求 `[センターポジション限定]`。
-     * 若未來要支援其他站位 aura，再把這個入口擴成更通用的 holder loader 即可。
+     * <p>這裡先抓 `CENTER / COLLAB`，再交由文案 matcher 做最終站位過濾。
+     * 這樣像 `HSD07-009`（center 限定）與 `HBP04-068`（center/collab 限定）可共用同一條主幹。
      */
     private List<PassiveGiftHolderContext> loadPassiveGiftHolderContexts(Long matchId, Long userId) {
         return jdbcTemplate.query(
@@ -9376,9 +11395,84 @@ public class MatchEffectService {
             JOIN member_cards mc ON mc.card_id = h.card_id
             WHERE h.match_id = ?
               AND h.owner_user_id = ?
-              AND h.zone = 'CENTER'
+              AND h.zone IN ('CENTER', 'COLLAB')
               AND mc.passive_effect_json IS NOT NULL
-            ORDER BY h.id
+            ORDER BY CASE h.zone
+                        WHEN 'CENTER' THEN 1
+                        WHEN 'COLLAB' THEN 2
+                        ELSE 9
+                     END,
+                     h.id
+            """,
+            (rs, rowNum) -> new PassiveGiftHolderContext(
+                rs.getLong("id"),
+                effectTextParser.normalizeEffectType(rs.getString("zone")),
+                rs.getString("passive_effect_json_text")
+            ),
+            matchId,
+            userId
+        );
+    }
+
+    /**
+     * 載入常駐藝能加成可能的 holder。
+     *
+     * <p>`HSD08-004` 這類舊案例只需要中心位 holder，但像 `HBP05-013` 會把 holder 限制寫成
+     * `[センターポジション・コラボポジション限定]`。因此藝能加成入口需要額外把 `COLLAB` holder
+     * 也納入，再交由文案 matcher 做最終站位過濾。
+     */
+    private List<PassiveGiftHolderContext> loadPassiveGiftArtBonusHolderContexts(Long matchId, Long userId) {
+        return jdbcTemplate.query(
+            """
+            SELECT h.id,
+                   h.zone,
+                   mc.passive_effect_json::text AS passive_effect_json_text
+            FROM match_holomems h
+            JOIN member_cards mc ON mc.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone IN ('CENTER', 'COLLAB')
+              AND mc.passive_effect_json IS NOT NULL
+            ORDER BY CASE h.zone
+                        WHEN 'CENTER' THEN 1
+                        WHEN 'COLLAB' THEN 2
+                        ELSE 9
+                     END,
+                     h.id
+            """,
+            (rs, rowNum) -> new PassiveGiftHolderContext(
+                rs.getLong("id"),
+                effectTextParser.normalizeEffectType(rs.getString("zone")),
+                rs.getString("passive_effect_json_text")
+            ),
+            matchId,
+            userId
+        );
+    }
+
+    /**
+     * 載入場上所有可能提供「相手能力不能改變 HP」的 holder。
+     *
+     * <p>目前官方已知案例落在 `CENTER / COLLAB`，並交由文案 matcher 做最終站位判斷。
+     */
+    private List<PassiveGiftHolderContext> loadPassiveGiftHpChangePreventionHolderContexts(Long matchId, Long userId) {
+        return jdbcTemplate.query(
+            """
+            SELECT h.id,
+                   h.zone,
+                   mc.passive_effect_json::text AS passive_effect_json_text
+            FROM match_holomems h
+            JOIN member_cards mc ON mc.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone IN ('CENTER', 'COLLAB')
+              AND mc.passive_effect_json IS NOT NULL
+            ORDER BY CASE h.zone
+                        WHEN 'CENTER' THEN 1
+                        WHEN 'COLLAB' THEN 2
+                        ELSE 9
+                     END,
+                     h.id
             """,
             (rs, rowNum) -> new PassiveGiftHolderContext(
                 rs.getLong("id"),
@@ -9401,29 +11495,474 @@ public class MatchEffectService {
      * <p>如此可避免把其他非攻擊加成文案誤判為 `+damage`。
      */
     private int resolvePassiveGiftArtBonusFromHolder(
+        Long matchId,
+        Long userId,
         PassiveGiftHolderContext holderContext,
-        StaticArtBonusTargetContext attackerContext
+        StaticArtBonusTargetContext attackerContext,
+        String targetZone
     ) {
         String rawText = extractPassiveGiftRawText(holderContext.passiveEffectJsonText());
         if (!StringUtils.hasText(rawText)) {
             return 0;
         }
-        int artBonus = extractArtsModifierTotal(rawText);
+        int artBonus = extractArtsModifierTotal(rawText)
+            + extractPassiveGiftSpecialDamageBonus(rawText, attackerContext, targetZone);
+        if (artBonus > 0 && rawText.contains("2ndホロメンがいるなら")) {
+            int conditionalExtraBonus = extractArtsModifierTotal(extractClauseAfter(rawText, "さらに"));
+            if (conditionalExtraBonus > 0 && !hasStageHolomemWithLevelType(matchId, userId, "SECOND")) {
+                artBonus = Math.max(artBonus - conditionalExtraBonus, 0);
+            }
+        }
         if (artBonus == 0) {
             return 0;
         }
-        if (rawText.contains("コラボポジション") && !"COLLAB".equals(attackerContext.stageZone())) {
+        if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(rawText, holderContext.stageZone())) {
             return 0;
         }
+        if (!matchesPassiveGiftAttachedSupportCondition(rawText, holderContext.holomemId())) {
+            return 0;
+        }
+        if (!matchesPassiveGiftArtTargetZoneRestriction(rawText, attackerContext.stageZone())) {
+            return 0;
+        }
+        if (rawText.contains("このホロメンのアーツ")
+            && !Objects.equals(holderContext.holomemId(), attackerContext.holomemId())) {
+            return 0;
+        }
+        if (!matchesPassiveGiftOpponentStageTagCondition(rawText, attackerContext.opponentStageTags())) {
+            return 0;
+        }
+        if (!matchesPassiveGiftHistoricalOshiSkillCondition(matchId, userId, rawText)) {
+            return 0;
+        }
+        if (rawText.contains("このホロメンのアーツ")) {
+            return artBonus;
+        }
 
-        SearchCriteria criteria = resolveMemberCriteriaFromRawText(rawText);
+        String targetClause = extractPassiveGiftArtBonusTargetClause(rawText);
+        if (!matchesPassiveGiftTargetAttachedSupportCondition(targetClause, attackerContext.holomemId())) {
+            return 0;
+        }
+        String normalizedTargetClause = stripPassiveGiftTargetAttachedSupportCondition(targetClause);
+        if (normalizedTargetClause.contains("このホロメン以外")
+            && Objects.equals(holderContext.holomemId(), attackerContext.holomemId())) {
+            return 0;
+        }
+        SearchCriteria criteria = resolveMemberCriteriaFromRawText(normalizedTargetClause);
         if (StringUtils.hasText(criteria.levelType()) && !criteria.levelType().equals(attackerContext.levelType())) {
             return 0;
         }
         if (StringUtils.hasText(criteria.tag()) && !attackerContext.tags().contains(criteria.tag())) {
             return 0;
         }
+        if (!matchesPassiveGiftArtTargetNameCondition(normalizedTargetClause, attackerContext.cardName())) {
+            return 0;
+        }
         return artBonus;
+    }
+
+    private int extractPassiveGiftSpecialDamageBonus(
+        String rawText,
+        StaticArtBonusTargetContext attackerContext,
+        String targetZone
+    ) {
+        if (!StringUtils.hasText(rawText) || attackerContext == null) {
+            return 0;
+        }
+        int specialDamageBonus = effectTextParser.extractByPattern(rawText, PASSIVE_GIFT_SPECIAL_DAMAGE_BONUS_PATTERN);
+        if (specialDamageBonus <= 0) {
+            return 0;
+        }
+        if (rawText.contains("相手のセンターホロメンに与える") && !"CENTER".equals(effectTextParser.normalizeEffectType(targetZone))) {
+            return 0;
+        }
+        String targetClause = extractTrailingClauseBeforeMarker(rawText, "に与える特殊ダメージ");
+        if (StringUtils.hasText(targetClause)
+            && !matchesPassiveGiftArtTargetNameCondition(targetClause, attackerContext.cardName())) {
+            return 0;
+        }
+        return specialDamageBonus;
+    }
+
+    private String extractClauseAfter(String rawText, String marker) {
+        if (!StringUtils.hasText(rawText) || !StringUtils.hasText(marker)) {
+            return "";
+        }
+        int index = rawText.indexOf(marker);
+        if (index < 0) {
+            return "";
+        }
+        return rawText.substring(index + marker.length());
+    }
+
+    private boolean hasStageHolomemWithLevelType(Long matchId, Long userId, String levelType) {
+        if (matchId == null || userId == null || !StringUtils.hasText(levelType)) {
+            return false;
+        }
+        Integer count = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone IN ('CENTER', 'COLLAB', 'BACK')
+              AND UPPER(COALESCE(current_level, '')) = UPPER(?)
+            """,
+            Integer.class,
+            matchId,
+            userId,
+            levelType
+        );
+        return count != null && count > 0;
+    }
+
+    /**
+     * 以單一 holder 的常駐文案判斷是否減少攻擊者藝能所需 Cheer。
+     */
+    private Map<String, Integer> resolvePassiveGiftArtCostReductionFromHolder(
+        Long matchId,
+        Long userId,
+        PassiveGiftHolderContext holderContext,
+        PassiveGiftArtCostReductionTargetContext attackerContext
+    ) {
+        String rawText = extractPassiveGiftRawText(holderContext.passiveEffectJsonText());
+        if (!StringUtils.hasText(rawText)) {
+            return Map.of();
+        }
+        Matcher reductionMatcher = PASSIVE_GIFT_ART_COST_REDUCTION_PATTERN.matcher(rawText);
+        if (!reductionMatcher.find()) {
+            return Map.of();
+        }
+        if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(rawText, holderContext.stageZone())) {
+            return Map.of();
+        }
+        if (!matchesPassiveGiftArtTargetZoneRestriction(rawText, attackerContext.stageZone())) {
+            return Map.of();
+        }
+        if (!matchesPassiveGiftHistoricalOshiSkillCondition(matchId, userId, rawText)) {
+            return Map.of();
+        }
+        if (!matchesPassiveGiftReferencedArtNameCondition(rawText, attackerContext.artName())) {
+            return Map.of();
+        }
+        if (rawText.contains("このホロメンのアーツ")) {
+            if (!Objects.equals(holderContext.holomemId(), attackerContext.holomemId())) {
+                return Map.of();
+            }
+            return buildPassiveGiftArtCostReductionResult(reductionMatcher);
+        }
+
+        String targetClause = extractPassiveGiftArtCostTargetClause(rawText);
+        if (!StringUtils.hasText(targetClause)) {
+            return Map.of();
+        }
+        if (targetClause.contains("このホロメン")
+            && !Objects.equals(holderContext.holomemId(), attackerContext.holomemId())) {
+            return Map.of();
+        }
+        if (!matchesPassiveGiftTargetAttachedSupportCondition(targetClause, attackerContext.holomemId())) {
+            return Map.of();
+        }
+
+        String normalizedTargetClause = stripPassiveGiftTargetAttachedSupportCondition(targetClause);
+        if (!normalizedTargetClause.contains("このホロメン")) {
+            SearchCriteria criteria = resolveMemberCriteriaFromRawText(normalizedTargetClause);
+            if (!matchesPassiveGiftArtCostTargetCriteria(criteria, attackerContext)) {
+                return Map.of();
+            }
+        }
+
+        return buildPassiveGiftArtCostReductionResult(reductionMatcher);
+    }
+
+    private Map<String, Integer> buildPassiveGiftArtCostReductionResult(Matcher reductionMatcher) {
+        if (reductionMatcher == null) {
+            return Map.of();
+        }
+        String color = normalizeColorType(resolveCheerColorFilter(reductionMatcher.group(1)));
+        int reduction = Integer.parseInt(reductionMatcher.group(2));
+        if (!StringUtils.hasText(color) || reduction <= 0) {
+            return Map.of();
+        }
+        Map<String, Integer> result = new LinkedHashMap<>();
+        result.put(color, reduction);
+        return result;
+    }
+
+    private boolean matchesPassiveGiftHistoricalOshiSkillCondition(
+        Long matchId,
+        Long userId,
+        String rawText
+    ) {
+        if (matchId == null || userId == null || !StringUtils.hasText(rawText)) {
+            return false;
+        }
+        Matcher matcher = PASSIVE_GIFT_REFERENCED_OSHI_SKILL_PATTERN.matcher(rawText);
+        if (!matcher.find()) {
+            return true;
+        }
+        String skillType = StringUtils.hasText(matcher.group(1)) ? "SP" : null;
+        String skillName = matcher.group(2) == null ? "" : matcher.group(2).trim();
+        if (!StringUtils.hasText(skillName)) {
+            return false;
+        }
+        Integer count = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'USE_OSHI_SKILL'
+              AND (? IS NULL OR payload ->> 'skillType' = ?)
+              AND payload ->> 'skillName' = ?
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            userId,
+            skillType,
+            skillType,
+            skillName
+        );
+        return count != null && count > 0;
+    }
+
+    private boolean matchesPassiveGiftReferencedArtNameCondition(String rawText, String attackerArtName) {
+        if (!StringUtils.hasText(rawText)) {
+            return false;
+        }
+        Matcher matcher = PASSIVE_GIFT_REFERENCED_ART_NAME_PATTERN.matcher(rawText);
+        if (!matcher.find()) {
+            return true;
+        }
+        String requiredArtName = matcher.group(1) == null ? "" : matcher.group(1).trim();
+        return StringUtils.hasText(requiredArtName)
+            && StringUtils.hasText(attackerArtName)
+            && attackerArtName.contains(requiredArtName);
+    }
+
+    /**
+     * 判斷常駐 Gift 是否要求 holder 身上附著指定名稱的支援卡。
+     */
+    private boolean matchesPassiveGiftAttachedSupportCondition(String rawText, Long holderHolomemId) {
+        if (!StringUtils.hasText(rawText) || holderHolomemId == null) {
+            return true;
+        }
+        int attachedIndex = rawText.indexOf("が付いている");
+        if (!rawText.contains("が付いている間") && attachedIndex < 0) {
+            return true;
+        }
+        String requirementPrefix = attachedIndex < 0 ? rawText : rawText.substring(0, attachedIndex);
+        List<String> requiredSupportNames = giftTriggerMatcher.extractNameTokens(requirementPrefix);
+        if (requiredSupportNames.isEmpty()) {
+            return true;
+        }
+        List<String> attachedSupportNames = loadAttachedSupportNames(holderHolomemId);
+        if (attachedSupportNames.isEmpty()) {
+            return false;
+        }
+        for (String attachedSupportName : attachedSupportNames) {
+            if (!StringUtils.hasText(attachedSupportName)) {
+                continue;
+            }
+            for (String requiredSupportName : requiredSupportNames) {
+                if (attachedSupportName.contains(requiredSupportName)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判斷常駐 Gift 是否要求「受益者」身上附著指定名稱的支援卡。
+     */
+    private boolean matchesPassiveGiftTargetAttachedSupportCondition(String targetClause, Long targetHolomemId) {
+        if (!StringUtils.hasText(targetClause) || targetHolomemId == null) {
+            return true;
+        }
+        int attachedIndex = targetClause.indexOf("が付いている");
+        if (attachedIndex < 0) {
+            return true;
+        }
+        String requirementPrefix = targetClause.substring(0, attachedIndex);
+        if (requirementPrefix.contains("マスコット")) {
+            return loadAttachedSupportTypes(targetHolomemId).contains("MASCOT");
+        }
+        if (requirementPrefix.contains("ツール")) {
+            return loadAttachedSupportTypes(targetHolomemId).contains("TOOL");
+        }
+        if (requirementPrefix.contains("ファン")) {
+            return loadAttachedSupportTypes(targetHolomemId).contains("FAN");
+        }
+        List<String> requiredSupportNames = giftTriggerMatcher.extractNameTokens(requirementPrefix);
+        if (requiredSupportNames.isEmpty()) {
+            return true;
+        }
+        List<String> attachedSupportNames = loadAttachedSupportNames(targetHolomemId);
+        if (attachedSupportNames.isEmpty()) {
+            return false;
+        }
+        for (String attachedSupportName : attachedSupportNames) {
+            if (!StringUtils.hasText(attachedSupportName)) {
+                continue;
+            }
+            for (String requiredSupportName : requiredSupportNames) {
+                if (attachedSupportName.contains(requiredSupportName)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private Set<String> loadAttachedSupportTypes(Long holomemId) {
+        if (holomemId == null) {
+            return Set.of();
+        }
+        List<String> supportTypes = jdbcTemplate.query(
+            """
+            SELECT hs.support_type
+            FROM match_holomem_supports hs
+            WHERE hs.match_holomem_id = ?
+            ORDER BY hs.id
+            """,
+            (rs, rowNum) -> normalize(rs.getString("support_type")),
+            holomemId
+        );
+        if (supportTypes == null || supportTypes.isEmpty()) {
+            return Set.of();
+        }
+        return supportTypes.stream()
+            .filter(StringUtils::hasText)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    /**
+     * 判斷常駐藝能 buff 是否對目前攻擊者站位生效。
+     *
+     * <p>這裡只看「受益者」描述，避免把 holder restriction
+     * （例如 `[センターポジション・コラボポジション限定]`）誤判成攻擊者一定要在 `COLLAB`。
+     */
+    private boolean matchesPassiveGiftArtTargetZoneRestriction(String rawText, String attackerStageZone) {
+        if (!StringUtils.hasText(rawText)) {
+            return true;
+        }
+        String targetClause = extractPassiveGiftArtBonusTargetClause(rawText);
+        String zoneClause = StringUtils.hasText(targetClause) ? targetClause : rawText;
+        boolean mentionsCenterHolomem = zoneClause.contains("センターホロメン");
+        boolean mentionsCollabHolomem = zoneClause.contains("コラボホロメン");
+        boolean mentionsBackHolomem = zoneClause.contains("バックホロメン");
+        if (!mentionsCenterHolomem && !mentionsCollabHolomem && !mentionsBackHolomem) {
+            return true;
+        }
+        if (mentionsCenterHolomem && "CENTER".equals(attackerStageZone)) {
+            return true;
+        }
+        if (mentionsCollabHolomem && "COLLAB".equals(attackerStageZone)) {
+            return true;
+        }
+        if (mentionsBackHolomem && "BACK".equals(attackerStageZone)) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 判斷常駐 Gift 藝能費用減免的受益者是否符合名稱 / tag / level 條件。
+     */
+    private boolean matchesPassiveGiftArtCostTargetCriteria(
+        SearchCriteria criteria,
+        PassiveGiftArtCostReductionTargetContext attackerContext
+    ) {
+        if (criteria == null || criteria.isEmpty()) {
+            return true;
+        }
+        if (StringUtils.hasText(criteria.levelType()) && !criteria.levelType().equals(attackerContext.levelType())) {
+            return false;
+        }
+        if (StringUtils.hasText(criteria.tag()) && !attackerContext.tags().contains(criteria.tag())) {
+            return false;
+        }
+        if (StringUtils.hasText(criteria.nameContains())
+            && !attackerContext.cardName().contains(criteria.nameContains())) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 判斷常駐藝能 buff 是否依賴「相手ステージ存在特定 tag」條件。
+     */
+    private boolean matchesPassiveGiftOpponentStageTagCondition(String rawText, Set<String> opponentStageTags) {
+        if (!StringUtils.hasText(rawText)) {
+            return true;
+        }
+        Matcher matcher = OPPONENT_STAGE_TAG_PRESENCE_PATTERN.matcher(rawText);
+        if (!matcher.find()) {
+            return true;
+        }
+        Set<String> requiredTags = parseTagsFromText(matcher.group(1));
+        if (requiredTags.isEmpty()) {
+            return false;
+        }
+        for (String requiredTag : requiredTags) {
+            if (opponentStageTags.contains(requiredTag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Set<String> parseTagsFromText(String text) {
+        Set<String> tags = new LinkedHashSet<>();
+        if (!StringUtils.hasText(text)) {
+            return tags;
+        }
+        Matcher matcher = INLINE_TAG_TOKEN_PATTERN.matcher(text);
+        while (matcher.find()) {
+            tags.add("#" + matcher.group(1));
+        }
+        return tags;
+    }
+
+    /**
+     * 載入指定 Holomem 目前附著的 support 名稱。
+     */
+    private List<String> loadAttachedSupportNames(Long holomemId) {
+        if (holomemId == null) {
+            return List.of();
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT c.name
+            FROM match_holomem_supports hs
+            JOIN cards c ON c.card_id = hs.support_card_id
+            WHERE hs.match_holomem_id = ?
+            ORDER BY hs.id
+            """,
+            (rs, rowNum) -> rs.getString("name"),
+            holomemId
+        );
+    }
+
+    private Set<String> loadOpponentStageTags(Long matchId, Long userId) {
+        if (matchId == null || userId == null) {
+            return Set.of();
+        }
+        return new LinkedHashSet<>(jdbcTemplate.query(
+            """
+            SELECT DISTINCT tag.value AS tag
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(c.tags_json, '[]'::jsonb)) AS tag(value)
+            WHERE h.match_id = ?
+              AND h.owner_user_id <> ?
+              AND h.zone IN ('CENTER', 'COLLAB', 'BACK')
+            """,
+            (rs, rowNum) -> rs.getString("tag"),
+            matchId,
+            userId
+        ));
     }
 
     /**
@@ -9475,7 +12014,13 @@ public class MatchEffectService {
      * <p>如此可以先讓 `HSD13-007` 正確落地，同時避免把其他尚未完整建模的 BUFF 藝能誤算成
      * 「每張 Cheer 都會放大傷害」。
      */
-    private int resolveArtTextDamageBonusFromRawText(String rawText, ArtSelfBonusTargetContext attackerContext) {
+    private int resolveArtTextDamageBonusFromRawText(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        String rawText,
+        ArtSelfBonusTargetContext attackerContext
+    ) {
         if (!StringUtils.hasText(rawText) || attackerContext == null) {
             return 0;
         }
@@ -9496,7 +12041,128 @@ public class MatchEffectService {
             total += extractArtsModifierTotal(lowLifeClause);
         }
 
+        String ownHolomemArtClause = extractSentenceFromMarker(rawText, "このターンに自分の〈");
+        if (StringUtils.hasText(ownHolomemArtClause)
+            && ownHolomemArtClause.contains("〉がアーツを使っていたなら")
+            && ownHolomemArtClause.contains("このアーツ")) {
+            List<String> requiredNames = giftTriggerMatcher.extractNameTokens(ownHolomemArtClause);
+            if (didUserUseArtWithNamedHolomemThisTurn(matchId, userId, turnNumber, requiredNames)) {
+                total += extractArtsModifierTotal(ownHolomemArtClause);
+            }
+        }
+
+        String ownOshiSkillClause = extractSentenceFromMarker(rawText, "このターンに自分の推しスキル");
+        if (StringUtils.hasText(ownOshiSkillClause)
+            && ownOshiSkillClause.contains("使っていたなら")
+            && ownOshiSkillClause.contains("このアーツ")) {
+            String skillName = extractReferencedOshiSkillName(ownOshiSkillClause);
+            if (didUserUseOshiSkillThisTurn(matchId, userId, turnNumber, skillName)) {
+                total += extractArtsModifierTotal(ownOshiSkillClause);
+            }
+        }
+
+        String attachedCheerThresholdClause = extractSentenceFromMarker(rawText, "このホロメンにエールが");
+        if (StringUtils.hasText(attachedCheerThresholdClause)
+            && attachedCheerThresholdClause.contains("枚以上付いているなら")
+            && attachedCheerThresholdClause.contains("このアーツ")) {
+            String requiredOshiName = resolveRequiredOshiName(rawText);
+            Integer minimumAttachedCheerCount = extractMinimumAttachedCheerCount(attachedCheerThresholdClause);
+            if (matchesRequiredOshiName(requiredOshiName, attackerContext.oshiCardName())
+                && minimumAttachedCheerCount != null
+                && attackerContext.attachedCheerCount() >= minimumAttachedCheerCount) {
+                total += extractArtsModifierTotal(attachedCheerThresholdClause);
+            }
+        }
+
         return total;
+    }
+
+    private Integer extractMinimumAttachedCheerCount(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return null;
+        }
+        Matcher matcher = Pattern.compile("このホロメンにエールが([0-9０-９]+)枚以上付いている").matcher(rawText);
+        if (!matcher.find()) {
+            return null;
+        }
+        return parseSignedNumber(matcher.group(1));
+    }
+
+    private boolean matchesRequiredOshiName(String requiredOshiName, String actualOshiCardName) {
+        if (!StringUtils.hasText(requiredOshiName)) {
+            return true;
+        }
+        return StringUtils.hasText(actualOshiCardName) && actualOshiCardName.contains(requiredOshiName);
+    }
+
+    private boolean didUserUseArtWithNamedHolomemThisTurn(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        List<String> requiredNames
+    ) {
+        if (matchId == null || userId == null || turnNumber <= 0 || requiredNames == null || requiredNames.isEmpty()) {
+            return false;
+        }
+        List<String> attackerNames = jdbcTemplate.query(
+            """
+            SELECT c.name
+            FROM match_actions ma
+            JOIN cards c ON c.card_id = ma.payload ->> 'attackerCardId'
+            WHERE ma.match_id = ?
+              AND ma.user_id = ?
+              AND ma.turn_number = ?
+              AND ma.action_type = 'ATTACK_ART'
+            ORDER BY ma.id
+            """,
+            (rs, rowNum) -> rs.getString("name"),
+            matchId,
+            userId,
+            turnNumber
+        );
+        if (attackerNames.isEmpty()) {
+            return false;
+        }
+        for (String attackerName : attackerNames) {
+            if (containsAnyName(attackerName, requiredNames)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean didUserUseOshiSkillThisTurn(Long matchId, Long userId, int turnNumber, String skillName) {
+        if (matchId == null || userId == null || turnNumber <= 0 || !StringUtils.hasText(skillName)) {
+            return false;
+        }
+        Integer count = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND turn_number = ?
+              AND action_type = 'USE_OSHI_SKILL'
+              AND payload ->> 'skillName' = ?
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            userId,
+            turnNumber,
+            skillName
+        );
+        return count != null && count > 0;
+    }
+
+    private String extractReferencedOshiSkillName(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return "";
+        }
+        Matcher matcher = PASSIVE_GIFT_REFERENCED_OSHI_SKILL_PATTERN.matcher(rawText);
+        if (!matcher.find()) {
+            return "";
+        }
+        return matcher.group(2) == null ? "" : matcher.group(2).trim();
     }
 
     /**
@@ -9505,6 +12171,7 @@ public class MatchEffectService {
      * <p>這裡刻意只接受少數已驗證的固定寫法：
      *
      * <p>- `このホロメンが受けるダメージ-10`
+     * <p>- `このホロメンが相手の1stホロメンから受けるダメージ-20`
      * <p>- `自分のコラボホロメンが受けるダメージ-10`
      * <p>- `このホロメンと自分のコラボホロメンが受けるダメージ-10`
      *
@@ -9518,6 +12185,8 @@ public class MatchEffectService {
      * 因此這裡維持「先辨識受保護對象，再抓減傷數值」的保守順序。
      */
     private int resolvePassiveGiftIncomingDamageReductionFromHolder(
+        Long matchId,
+        Long userId,
         PassiveGiftHolderContext holderContext,
         PassiveGiftIncomingDamageReductionTargetContext targetContext
     ) {
@@ -9525,21 +12194,239 @@ public class MatchEffectService {
         if (!StringUtils.hasText(rawText) || targetContext == null) {
             return 0;
         }
-        if (rawText.contains("センターポジション限定") && !"CENTER".equals(holderContext.stageZone())) {
+        if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(rawText, holderContext.stageZone())) {
             return 0;
         }
-        boolean protectsSelf = rawText.contains("このホロメンが受けるダメージ")
+        if (!matchesPassiveGiftRequiredOshiName(rawText, targetContext.oshiCardName())) {
+            return 0;
+        }
+        if (!matchesIncomingDamageSourceLevelRestriction(rawText, targetContext.incomingSourceLevelType())) {
+            return 0;
+        }
+        Integer diceConditionalReduction = resolveDiceConditionalPassiveGiftIncomingDamageReduction(
+            matchId,
+            userId,
+            holderContext,
+            targetContext,
+            rawText
+        );
+        if (diceConditionalReduction != null) {
+            return diceConditionalReduction;
+        }
+        boolean protectsSelfAndOwnCollab = rawText.contains("このホロメンと自分のコラボホロメンが受けるダメージ");
+        boolean mentionsSelfDamageClause = PASSIVE_GIFT_SELF_DAMAGE_CLAUSE_PATTERN.matcher(rawText).find();
+        boolean mentionsOwnCollabDamageClause = PASSIVE_GIFT_OWN_COLLAB_DAMAGE_CLAUSE_PATTERN.matcher(rawText).find();
+        boolean protectsSelf = (mentionsSelfDamageClause || protectsSelfAndOwnCollab)
             && Objects.equals(holderContext.holomemId(), targetContext.holomemId());
-        boolean protectsOwnCollab = rawText.contains("自分のコラボホロメンが受けるダメージ")
+        boolean protectsOwnCollab = (mentionsOwnCollabDamageClause || protectsSelfAndOwnCollab)
             && "COLLAB".equals(targetContext.stageZone());
         if (!protectsSelf && !protectsOwnCollab) {
-            return 0;
+            if (!matchesPassiveGiftTargetZoneRestriction(rawText, targetContext.stageZone())) {
+                return 0;
+            }
+            String targetClause = extractPassiveGiftIncomingDamageReductionTargetClause(rawText);
+            if (!matchesPassiveGiftTargetAttachedSupportCondition(targetClause, targetContext.holomemId())) {
+                return 0;
+            }
+            SearchCriteria criteria = resolveMemberCriteriaFromRawText(
+                stripPassiveGiftTargetAttachedSupportCondition(targetClause)
+            );
+            if (StringUtils.hasText(criteria.levelType()) && !criteria.levelType().equals(targetContext.levelType())) {
+                return 0;
+            }
+            if (StringUtils.hasText(criteria.tag()) && !targetContext.tags().contains(criteria.tag())) {
+                return 0;
+            }
+            if (StringUtils.hasText(criteria.nameContains())
+                && !nullToEmpty(targetContext.cardName()).contains(criteria.nameContains())) {
+                return 0;
+            }
         }
         Matcher matcher = PASSIVE_GIFT_DAMAGE_REDUCTION_VALUE_PATTERN.matcher(rawText);
         if (!matcher.find()) {
             return 0;
         }
         return Math.max(parseSignedNumber("-" + matcher.group(1)) * -1, 0);
+    }
+
+    private Integer resolveDiceConditionalPassiveGiftIncomingDamageReduction(
+        Long matchId,
+        Long userId,
+        PassiveGiftHolderContext holderContext,
+        PassiveGiftIncomingDamageReductionTargetContext targetContext,
+        String rawText
+    ) {
+        if (!StringUtils.hasText(rawText)
+            || !rawText.contains("サイコロを1回振れる")
+            || !rawText.contains("奇数なら")
+            || !rawText.contains("偶数なら")) {
+            return null;
+        }
+        if (!rawText.contains("このホロメン以外の自分のホロメンが相手からダメージを受ける時")) {
+            return null;
+        }
+        if (Objects.equals(holderContext.holomemId(), targetContext.holomemId())) {
+            return 0;
+        }
+        int turnNumber = loadCurrentTurnNumber(matchId);
+        if (rawText.contains("ターンに1回")
+            && isGiftAlreadyUsedThisTurn(matchId, userId, turnNumber, holderContext.holomemId())) {
+            return 0;
+        }
+        int oddReduction = effectTextParser.extractByPattern(rawText, PASSIVE_GIFT_DICE_ODD_DAMAGE_REDUCTION_PATTERN);
+        int evenReduction = effectTextParser.extractByPattern(rawText, PASSIVE_GIFT_DICE_EVEN_DAMAGE_REDUCTION_PATTERN);
+        if (oddReduction <= 0 && evenReduction <= 0) {
+            return 0;
+        }
+        int diceRoll = diceService.rollD6();
+        int reduction = (diceRoll % 2 == 1) ? oddReduction : evenReduction;
+        recordPassiveGiftTurnUsage(matchId, userId, turnNumber, holderContext.holomemId(), rawText, diceRoll);
+        return Math.max(reduction, 0);
+    }
+
+    private int loadCurrentTurnNumber(Long matchId) {
+        if (matchId == null) {
+            return 0;
+        }
+        Integer turn = jdbcTemplate.query(
+            "SELECT turn_number FROM matches WHERE id = ?",
+            rs -> rs.next() ? rs.getInt("turn_number") : 0,
+            matchId
+        );
+        return turn == null ? 0 : turn;
+    }
+
+    private void recordPassiveGiftTurnUsage(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        Long holderHolomemId,
+        String rawText,
+        int diceRoll
+    ) {
+        if (matchId == null || userId == null || turnNumber <= 0 || holderHolomemId == null) {
+            return;
+        }
+        int nextActionOrder = resolveNextActionOrder(matchId, turnNumber);
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("triggerType", "PASSIVE_INCOMING_DAMAGE_REDUCTION");
+        payload.put("giftHolderHolomemId", holderHolomemId);
+        payload.put("giftText", nullToEmpty(rawText));
+        payload.put("diceRoll", diceRoll);
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (
+                match_id,
+                user_id,
+                turn_number,
+                action_order,
+                action_type,
+                payload,
+                executed_at
+            ) VALUES (?, ?, ?, ?, 'GIFT_TRIGGER', CAST(? AS jsonb), CURRENT_TIMESTAMP)
+            """,
+            matchId,
+            userId,
+            turnNumber,
+            nextActionOrder,
+            effectTextParser.toJsonString(payload)
+        );
+    }
+
+    private int resolveNextActionOrder(Long matchId, int turnNumber) {
+        Integer maxOrder = jdbcTemplate.query(
+            """
+            SELECT COALESCE(MAX(action_order), 0)
+            FROM match_actions
+            WHERE match_id = ?
+              AND turn_number = ?
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            turnNumber
+        );
+        return (maxOrder == null ? 0 : maxOrder) + 1;
+    }
+
+    /**
+     * 判斷單一 holder 是否提供「相手能力不能改變 HP」保護。
+     */
+    private boolean blocksOpponentAbilityHpChangeFromHolder(
+        PassiveGiftHolderContext holderContext,
+        PassiveGiftHpChangePreventionTargetContext targetContext
+    ) {
+        String rawText = extractPassiveGiftRawText(holderContext.passiveEffectJsonText());
+        if (!StringUtils.hasText(rawText) || targetContext == null) {
+            return false;
+        }
+        if (!rawText.contains("相手のメインステップ")
+            || !rawText.contains("HP")
+            || !rawText.contains("相手の能力")
+            || !rawText.contains("減らず")
+            || !rawText.contains("変動しない")) {
+            return false;
+        }
+        if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(rawText, holderContext.stageZone())) {
+            return false;
+        }
+        if (rawText.contains("このホロメンのHP")) {
+            return Objects.equals(holderContext.holomemId(), targetContext.holomemId());
+        }
+
+        if (!matchesPassiveGiftTargetZoneRestriction(rawText, targetContext.stageZone())) {
+            return false;
+        }
+        SearchCriteria criteria = resolveMemberCriteriaFromRawText(rawText);
+        if (StringUtils.hasText(criteria.levelType()) && !criteria.levelType().equals(targetContext.levelType())) {
+            return false;
+        }
+        if (StringUtils.hasText(criteria.tag()) && !targetContext.tags().contains(criteria.tag())) {
+            return false;
+        }
+        if (StringUtils.hasText(criteria.nameContains())) {
+            String cardName = targetContext.cardName() == null ? "" : targetContext.cardName();
+            if (!cardName.contains(criteria.nameContains())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 判斷目標是否受到「相手能力不能改變 HP」靜態 Gift 保護。
+     */
+    private boolean isHpChangeBlockedByOpponentAbility(
+        Long matchId,
+        Long sourceUserId,
+        Long targetOwnerUserId,
+        Long targetHolomemId,
+        String effectType
+    ) {
+        if (matchId == null
+            || sourceUserId == null
+            || targetOwnerUserId == null
+            || targetHolomemId == null
+            || Objects.equals(sourceUserId, targetOwnerUserId)
+            || "ART_DAMAGE".equals(normalize(effectType))) {
+            return false;
+        }
+        MatchTurnContext turnContext = loadMatchTurnContext(matchId);
+        if (turnContext == null
+            || !"MAIN".equals(turnContext.phase())
+            || !Objects.equals(turnContext.currentTurnPlayerId(), sourceUserId)) {
+            return false;
+        }
+        PassiveGiftHpChangePreventionTargetContext targetContext =
+            loadPassiveGiftHpChangePreventionTargetContext(matchId, targetOwnerUserId, targetHolomemId);
+        if (targetContext == null) {
+            return false;
+        }
+        for (PassiveGiftHolderContext holderContext : loadPassiveGiftHpChangePreventionHolderContexts(matchId, targetOwnerUserId)) {
+            if (blocksOpponentAbilityHpChangeFromHolder(holderContext, targetContext)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -9758,8 +12645,27 @@ public class MatchEffectService {
         if (!StringUtils.hasText(rawText)) {
             return "";
         }
-        int splitIndex = rawText.indexOf('を');
-        return splitIndex < 0 ? rawText : rawText.substring(0, splitIndex).trim();
+        String clause = rawText;
+        int sourceStart = -1;
+        String[] markers = {
+            "自分のエールデッキ",
+            "相手のエールデッキ",
+            "エールデッキ",
+            "自分のアーカイブの",
+            "相手のアーカイブの",
+            "アーカイブの"
+        };
+        for (String marker : markers) {
+            int index = rawText.lastIndexOf(marker);
+            if (index > sourceStart) {
+                sourceStart = index;
+            }
+        }
+        if (sourceStart >= 0) {
+            clause = rawText.substring(sourceStart);
+        }
+        int splitIndex = clause.indexOf('を');
+        return splitIndex < 0 ? clause.trim() : clause.substring(0, splitIndex).trim();
     }
 
     /**
@@ -9802,6 +12708,120 @@ public class MatchEffectService {
      */
     private String resolveTargetNameContains(String targetClause) {
         return resolveSearchCriteriaFromRawText(targetClause).nameContains();
+    }
+
+    /**
+     * 擷取 `...のアーツ+N` / `...全員のアーツ+N` 前真正決定受益者的子句。
+     */
+    private String extractPassiveGiftArtBonusTargetClause(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return "";
+        }
+        int markerIndex = rawText.indexOf("のアーツ");
+        if (markerIndex >= 0) {
+            return rawText.substring(0, markerIndex).trim();
+        }
+        String specialDamageClause = extractTrailingClauseBeforeMarker(rawText, "に与える特殊ダメージ");
+        if (StringUtils.hasText(specialDamageClause)) {
+            int opponentTargetIndex = specialDamageClause.indexOf("が相手の");
+            if (opponentTargetIndex > 0) {
+                return specialDamageClause.substring(0, opponentTargetIndex).trim();
+            }
+            return specialDamageClause;
+        }
+        return rawText.trim();
+    }
+
+    /**
+     * 擷取 `...のアーツに必要な` 前的受益者子句。
+     */
+    private String extractPassiveGiftArtCostTargetClause(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return "";
+        }
+        String clause = extractTrailingClauseBeforeMarker(rawText, "のアーツに必要な");
+        if (StringUtils.hasText(clause)) {
+            return clause;
+        }
+        return extractTrailingClauseBeforeMarker(rawText, "のアーツ");
+    }
+
+    /**
+     * 擷取 `...が受けるダメージ` / `...で受けるダメージ` 前真正決定受保護對象的子句。
+     */
+    private String extractPassiveGiftIncomingDamageReductionTargetClause(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return "";
+        }
+        int gaIndex = rawText.indexOf("が受ける");
+        int deIndex = rawText.indexOf("で受ける");
+        int markerIndex;
+        if (gaIndex >= 0 && deIndex >= 0) {
+            markerIndex = Math.min(gaIndex, deIndex);
+        } else {
+            markerIndex = Math.max(gaIndex, deIndex);
+        }
+        if (markerIndex < 0) {
+            return rawText.trim();
+        }
+        int clauseStart = Math.max(
+            Math.max(rawText.lastIndexOf('、', markerIndex), rawText.lastIndexOf('。', markerIndex)),
+            rawText.lastIndexOf('\n', markerIndex)
+        );
+        return rawText.substring(clauseStart < 0 ? 0 : clauseStart + 1, markerIndex).trim();
+    }
+
+    /**
+     * 移除受益者子句中「附著指定 support」的前置描述，避免把 support 名稱誤當成受益者卡名。
+     */
+    private String stripPassiveGiftTargetAttachedSupportCondition(String targetClause) {
+        if (!StringUtils.hasText(targetClause)) {
+            return "";
+        }
+        int attachedIndex = targetClause.indexOf("が付いている");
+        if (attachedIndex < 0) {
+            return targetClause;
+        }
+        return targetClause.substring(attachedIndex + "が付いている".length()).trim();
+    }
+
+    /**
+     * 判斷常駐藝能 buff 的受益者是否符合具名角色限制。
+     *
+     * <p>像 `HSD03-008` 這種文案會在同一子句列出多個 `〈名稱〉`，表示任一名稱符合即可受益。
+     * 若子句中沒有具名 token，才 fallback 到既有 `nameContains` 的單一名稱判斷。
+     */
+    private boolean matchesPassiveGiftArtTargetNameCondition(String targetClause, String attackerCardName) {
+        if (!StringUtils.hasText(targetClause)) {
+            return true;
+        }
+        String normalizedCardName = nullToEmpty(attackerCardName);
+        List<String> explicitNameTokens = giftTriggerMatcher.extractNameTokens(targetClause);
+        if (!explicitNameTokens.isEmpty()) {
+            for (String explicitNameToken : explicitNameTokens) {
+                if (StringUtils.hasText(explicitNameToken) && normalizedCardName.contains(explicitNameToken)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        String nameContains = resolveSearchCriteriaFromRawText(targetClause).nameContains();
+        return !StringUtils.hasText(nameContains) || normalizedCardName.contains(nameContains);
+    }
+
+    private String extractTrailingClauseBeforeMarker(String rawText, String marker) {
+        if (!StringUtils.hasText(rawText) || !StringUtils.hasText(marker)) {
+            return "";
+        }
+        int markerIndex = rawText.indexOf(marker);
+        if (markerIndex < 0) {
+            return "";
+        }
+        int clauseStart = Math.max(
+            Math.max(rawText.lastIndexOf('、', markerIndex), rawText.lastIndexOf('。', markerIndex)),
+            rawText.lastIndexOf('\n', markerIndex)
+        );
+        return rawText.substring(clauseStart < 0 ? 0 : clauseStart + 1, markerIndex).trim();
     }
 
     private int findClauseSeparator(String rawText) {
@@ -9992,15 +13012,21 @@ public class MatchEffectService {
         if (matchHolomemId == null || ownerUserId == null) {
             return List.of();
         }
+        Long lunaKnightReattachTargetHolomemId = resolveLunaKnightCheerReattachTargetHolomemId(
+            matchId,
+            ownerUserId,
+            matchHolomemId
+        );
         List<Map<String, Object>> cheerRows = jdbcTemplate.query(
             """
-            SELECT cheer_card_id, match_card_id
+            SELECT id, cheer_card_id, match_card_id
             FROM match_holomem_cheers
             WHERE match_holomem_id = ?
             ORDER BY id
             """,
             (rs, rowNum) -> {
                 Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rs.getLong("id"));
                 row.put("cheer_card_id", rs.getString("cheer_card_id"));
                 long matchCardId = rs.getLong("match_card_id");
                 row.put("match_card_id", rs.wasNull() ? null : matchCardId);
@@ -10013,14 +13039,120 @@ public class MatchEffectService {
         }
         List<Long> archived = new ArrayList<>();
         for (Map<String, Object> row : cheerRows) {
+            Long cheerRowId = asLong(row.get("id"));
             String cheerCardId = asText(row.get("cheer_card_id"));
             Long matchCardId = asLong(row.get("match_card_id"));
+            if (
+                lunaKnightReattachTargetHolomemId != null
+                    && cheerRowId != null
+                    && isLunaKnightCheerCard(cheerCardId)
+            ) {
+                int moved = jdbcTemplate.update(
+                    """
+                    UPDATE match_holomem_cheers
+                    SET match_holomem_id = ?
+                    WHERE id = ?
+                      AND match_holomem_id = ?
+                    """,
+                    lunaKnightReattachTargetHolomemId,
+                    cheerRowId,
+                    matchHolomemId
+                );
+                if (moved == 1) {
+                    continue;
+                }
+            }
             Long archivedCardInstanceId = moveCheerCardInstanceToArchive(matchId, ownerUserId, matchCardId, cheerCardId);
             if (archivedCardInstanceId != null) {
                 archived.add(archivedCardInstanceId);
             }
         }
         return archived;
+    }
+
+    private Long resolveLunaKnightCheerReattachTargetHolomemId(Long matchId, Long ownerUserId, Long sourceHolomemId) {
+        if (matchId == null || ownerUserId == null || sourceHolomemId == null) {
+            return null;
+        }
+        String sourceZone = jdbcTemplate.query(
+            """
+            SELECT zone
+            FROM match_holomems
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? normalize(rs.getString("zone")) : null,
+            sourceHolomemId,
+            matchId,
+            ownerUserId
+        );
+        if (!"CENTER".equals(sourceZone)) {
+            return null;
+        }
+        Long currentTurnPlayerId = jdbcTemplate.query(
+            """
+            SELECT current_turn_player_id
+            FROM matches
+            WHERE id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? asLong(rs.getObject("current_turn_player_id")) : null,
+            matchId
+        );
+        if (currentTurnPlayerId == null || Objects.equals(currentTurnPlayerId, ownerUserId)) {
+            return null;
+        }
+        Integer collabHolderCount = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'COLLAB'
+              AND card_id = 'HBP06-030'
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            ownerUserId
+        );
+        if (collabHolderCount == null || collabHolderCount <= 0) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT h.id
+            FROM match_holomems h
+            JOIN cards c ON c.card_id = h.card_id
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone = 'BACK'
+              AND c.name LIKE '%姫森ルーナ%'
+            ORDER BY h.id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            ownerUserId
+        );
+    }
+
+    private boolean isLunaKnightCheerCard(String cheerCardId) {
+        if (!StringUtils.hasText(cheerCardId)) {
+            return false;
+        }
+        Boolean matched = jdbcTemplate.query(
+            """
+            SELECT c.name LIKE '%ルーナイト%'
+            FROM cards c
+            WHERE c.card_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getBoolean(1) : false,
+            cheerCardId
+        );
+        return Boolean.TRUE.equals(matched);
     }
 
     /**
@@ -10224,7 +13356,7 @@ public class MatchEffectService {
      */
     private Long resolveTargetHolomemId(Long matchId, Long userId, Long targetHolomemCardInstanceId) {
         if (targetHolomemCardInstanceId != null && targetHolomemCardInstanceId > 0) {
-            return jdbcTemplate.query(
+            Long directMatch = jdbcTemplate.query(
                 """
                 SELECT id
                 FROM match_holomems
@@ -10237,6 +13369,28 @@ public class MatchEffectService {
                 userId,
                 targetHolomemCardInstanceId
             );
+            if (directMatch != null) {
+                return directMatch;
+            }
+            Long stackedMatch = jdbcTemplate.query(
+                """
+                SELECT h.id
+                FROM match_holomems h
+                JOIN match_holomem_stack_cards s ON s.match_holomem_id = h.id
+                WHERE h.match_id = ?
+                  AND h.owner_user_id = ?
+                  AND s.match_card_id = ?
+                ORDER BY s.stack_order DESC, h.id
+                LIMIT 1
+                """,
+                rs -> rs.next() ? rs.getLong("id") : null,
+                matchId,
+                userId,
+                targetHolomemCardInstanceId
+            );
+            if (stackedMatch != null) {
+                return stackedMatch;
+            }
         }
         Long centerId = jdbcTemplate.query(
             """
@@ -10543,39 +13697,58 @@ public class MatchEffectService {
         Long downedOwnerUserId,
         String downedCardId,
         int currentTurn,
-        boolean applyLifeLoss
+        boolean applyLifeLoss,
+        String downedStageZone
     ) {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("triggered", false);
         summary.put("effectType", "DOWN_EVENT");
         summary.put("downedCardId", downedCardId);
         summary.put("downedOwnerUserId", downedOwnerUserId);
+        summary.put("downedStageZone", normalize(downedStageZone));
         summary.put("turnNumber", currentTurn);
         if (matchId == null || downedOwnerUserId == null || !StringUtils.hasText(downedCardId)) {
             return summary;
         }
         String passiveText = loadPassiveEffectText(downedCardId);
         String extraText = loadExtraEffectText(passiveText);
-        if (!StringUtils.hasText(extraText)) {
-            summary.put("reason", "NO_EXTRA_EFFECT");
-            return summary;
-        }
+        String giftText = loadGiftEffectText(passiveText);
         String normalizedExtraText = effectTextParser.normalizeDigits(extraText);
-        if (!normalizedExtraText.contains("ダウンした時")) {
-            summary.put("reason", "EXTRA_NOT_DOWN_TRIGGER");
-            return summary;
+        int requestedLifeLoss = 0;
+        String effectRawText = null;
+        if (StringUtils.hasText(normalizedExtraText) && normalizedExtraText.contains("ダウンした時")) {
+            requestedLifeLoss = resolveDownExtraLifeCount(
+                objectMapper.valueToTree(Map.of("rawText", normalizedExtraText))
+            );
+            effectRawText = extraText;
         }
-
-        int requestedLifeLoss = resolveDownExtraLifeCount(
-            objectMapper.valueToTree(Map.of("rawText", normalizedExtraText))
-        );
+        // Gift-only down-event life modifiers (e.g. HSD09-007) still require a default life-loss baseline on non-center down.
+        if (
+            requestedLifeLoss <= 0
+                && StringUtils.hasText(giftText)
+                && giftText.contains("このホロメンがダウンした時")
+                && giftText.contains("減るライフ")
+                && !"CENTER".equals(normalize(downedStageZone))
+        ) {
+            requestedLifeLoss = 1;
+            effectRawText = giftText;
+        }
         if (requestedLifeLoss <= 0) {
             summary.put("reason", "NO_EXTRA_LIFE_LOSS");
             return summary;
         }
+        int lifeLossModifier = resolveDownEventLifeLossModifier(
+            matchId,
+            downedOwnerUserId,
+            downedCardId,
+            downedStageZone,
+            giftText,
+            requestedLifeLoss
+        );
+        int resolvedLifeLoss = Math.max(requestedLifeLoss + lifeLossModifier, 0);
 
         List<Long> lostLifeCardInstanceIds = new ArrayList<>();
-        if (applyLifeLoss) {
+        if (applyLifeLoss && resolvedLifeLoss > 0) {
             EffectContext context = new EffectContext(
                 matchId,
                 actorUserId,
@@ -10586,7 +13759,7 @@ public class MatchEffectService {
             );
             ReduceLifeAction reduceLifeAction = new ReduceLifeAction(
                 downedOwnerUserId,
-                requestedLifeLoss,
+                resolvedLifeLoss,
                 "DOWN_EVENT_EXTRA_LIFE"
             );
             List<ActionResult> results = gameActionExecutor.execute(context, List.of(reduceLifeAction));
@@ -10597,13 +13770,55 @@ public class MatchEffectService {
 
         summary.put("triggered", true);
         summary.put("deferred", !applyLifeLoss);
-        summary.put("rawText", extraText);
+        summary.put("rawText", effectRawText);
         summary.put("requestedLifeLoss", requestedLifeLoss);
+        summary.put("lifeLossModifier", lifeLossModifier);
+        summary.put("resolvedLifeLoss", resolvedLifeLoss);
         summary.put("appliedLifeLoss", lostLifeCardInstanceIds.size());
         summary.put("lifeReduced", !lostLifeCardInstanceIds.isEmpty());
         summary.put("lostLifeCardInstanceId", lostLifeCardInstanceIds.isEmpty() ? null : lostLifeCardInstanceIds.get(0));
         summary.put("lostLifeCardInstanceIds", lostLifeCardInstanceIds);
         return summary;
+    }
+
+    private int resolveDownEventLifeLossModifier(
+        Long matchId,
+        Long downedOwnerUserId,
+        String downedCardId,
+        String downedStageZone,
+        String giftText,
+        int requestedLifeLoss
+    ) {
+        if (
+            matchId == null
+                || downedOwnerUserId == null
+                || requestedLifeLoss <= 0
+                || !StringUtils.hasText(downedCardId)
+                || !StringUtils.hasText(giftText)
+        ) {
+            return 0;
+        }
+        if (!giftText.contains("このホロメンがダウンした時")) {
+            return 0;
+        }
+        if (!giftText.contains("減るライフ")) {
+            return 0;
+        }
+        if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(giftText, normalize(downedStageZone))) {
+            return 0;
+        }
+        if (!matchesGiftTurnOwnershipCondition(matchId, downedOwnerUserId, giftText)) {
+            return 0;
+        }
+        if (!matchesGiftLifeComparisonCondition(matchId, downedOwnerUserId, giftText)) {
+            return 0;
+        }
+        String normalizedGiftText = effectTextParser.normalizeDigits(giftText);
+        int reduction = effectTextParser.extractByPattern(normalizedGiftText, DOWN_EXTRA_LIFE_MINUS_PATTERN);
+        if (reduction <= 0) {
+            return 0;
+        }
+        return -Math.min(reduction, requestedLifeLoss);
     }
 
     /**
