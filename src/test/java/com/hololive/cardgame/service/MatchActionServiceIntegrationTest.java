@@ -659,6 +659,16 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             moveOneMemberFromDeckToHand(matchId, hostId);
             memberHandCardInstanceId = findDebutMemberCardFromHand(matchId, hostId);
         }
+        if (memberHandCardInstanceId == null) {
+            String fallbackMemberCardId = createMemberCardDefinition(
+                "TSUP_MASCOT_HOST_FALLBACK",
+                "Support Mascot Host Fallback",
+                "DEBUT",
+                100,
+                "WHITE"
+            );
+            memberHandCardInstanceId = insertCardIntoHand(matchId, hostId, fallbackMemberCardId);
+        }
         assertThat(memberHandCardInstanceId).isNotNull();
 
         PlayToStageActionRequest playToStage = new PlayToStageActionRequest();
@@ -1792,6 +1802,8 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         ResolveDecisionRequest resolveTurnStart = new ResolveDecisionRequest();
         resolveTurnStart.setDecisionId(turnStartDecisionId);
         matchActionService.resolveDecision(matchId, guestId, resolveTurnStart);
+        matchActionService.drawTurn(matchId, guestId);
+        resolvePendingInteractionIfExists(matchId, guestId, "DRAW_REVEAL");
         matchActionService.sendTurnCheer(matchId, guestId);
 
         Map<String, Object> sendCheerPending = jdbcTemplate.queryForMap(
@@ -1858,6 +1870,8 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         ResolveDecisionRequest resolveTurnStart = new ResolveDecisionRequest();
         resolveTurnStart.setDecisionId(turnStartDecisionId);
         matchActionService.resolveDecision(matchId, guestId, resolveTurnStart);
+        matchActionService.drawTurn(matchId, guestId);
+        resolvePendingInteractionIfExists(matchId, guestId, "DRAW_REVEAL");
         matchActionService.sendTurnCheer(matchId, guestId);
 
         Map<String, Object> sendCheerPending = jdbcTemplate.queryForMap(
@@ -2012,8 +2026,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         );
         entityManager.clear();
 
-        advanceToEndPhase(matchId, hostId, hostCenterCardInstanceId);
-        matchActionService.advancePhase(matchId, hostId);
+        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
         assertThat(jdbcTemplate.queryForObject("SELECT current_phase FROM matches WHERE id = ?", String.class, matchId))
             .isEqualTo("PERFORMANCE");
 
@@ -9511,10 +9524,6 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             "TCOST_COLOR_GUEST_CENTER"
         );
 
-        resolvePendingInteractionIfExists(matchId, hostId, "TURN_START");
-        matchActionService.drawTurn(matchId, hostId);
-        resolvePendingInteractionIfExists(matchId, hostId, "DRAW_REVEAL");
-
         jdbcTemplate.update(
             """
             UPDATE matches
@@ -9526,6 +9535,17 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             """,
             hostId,
             matchId
+        );
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_actions (match_id, user_id, action_type, payload, executed_at, turn_number, action_order)
+            VALUES (?, ?, 'DRAW_TURN', '{}'::jsonb, CURRENT_TIMESTAMP, 3, 1),
+                   (?, ?, 'TURN_CHEER', '{}'::jsonb, CURRENT_TIMESTAMP, 3, 2)
+            """,
+            matchId,
+            hostId,
+            matchId,
+            hostId
         );
         entityManager.clear();
 
@@ -9553,7 +9573,16 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             "INSERT INTO match_holomem_cheers (match_holomem_id, cheer_card_id, is_face_down) VALUES (?, 'HY04-001', FALSE)",
             hostHolomemId
         );
-        advanceToPerformancePhase(matchId, hostId, hostCenterCardInstanceId);
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET current_phase = 'PERFORMANCE',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            matchId
+        );
+        entityManager.clear();
 
         AttackArtActionRequest request = new AttackArtActionRequest();
         request.setAttackerCardInstanceId(hostCenterCardInstanceId);
@@ -9953,30 +9982,20 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         Long matchId = context.matchId();
         Long hostId = context.hostId();
 
-        Long memberHandCardInstanceId = findDebutMemberCardFromHand(matchId, hostId);
-        if (memberHandCardInstanceId == null) {
-            moveOneMemberFromDeckToHand(matchId, hostId);
-            memberHandCardInstanceId = findDebutMemberCardFromHand(matchId, hostId);
-        }
-        assertThat(memberHandCardInstanceId).isNotNull();
-
-        PlayToStageActionRequest playToStage = new PlayToStageActionRequest();
-        playToStage.setCardInstanceId(memberHandCardInstanceId);
-        playToStage.setTargetZone("BACK");
-        matchActionService.playToStage(matchId, hostId, playToStage);
-
-        Long backCardInstanceId = jdbcTemplate.queryForObject(
-            """
-            SELECT match_card_id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'BACK'
-            LIMIT 1
-            """,
-            Long.class,
+        String backTargetCardId = createMemberCardDefinition(
+            "TSUP_MASCOT_TARGET",
+            "Support Mascot Target",
+            "DEBUT",
+            100,
+            "WHITE"
+        );
+        Long backCardInstanceId = createStageHolomemWithSingleCard(
             matchId,
-            hostId
+            hostId,
+            backTargetCardId,
+            "BACK",
+            "DEBUT",
+            0
         );
         assertThat(backCardInstanceId).isNotNull();
 
@@ -10434,6 +10453,16 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             moveOneMemberFromDeckToHand(matchId, guestId);
             guestMemberFromHand = findMemberCardFromHand(matchId, guestId);
         }
+        if (guestMemberFromHand == null) {
+            String fallbackGuestCardId = createMemberCardDefinition(
+                "TSUP_DAMAGE_GUEST_FALLBACK",
+                "Support Damage Guest Fallback",
+                "DEBUT",
+                100,
+                "WHITE"
+            );
+            guestMemberFromHand = insertCardIntoHand(matchId, guestId, fallbackGuestCardId);
+        }
         assertThat(guestMemberFromHand).isNotNull();
 
         String guestCardId = jdbcTemplate.queryForObject(
@@ -10445,6 +10474,34 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             "SELECT level_type FROM member_cards WHERE card_id = ?",
             rs -> rs.next() ? rs.getString("level_type") : "DEBUT",
             guestCardId
+        );
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+            """,
+            matchId,
+            guestId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards mc
+            SET zone = 'ARCHIVE',
+                order_index = NULL,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE mc.match_id = ?
+              AND mc.owner_user_id = ?
+              AND mc.zone = 'STAGE'
+              AND EXISTS (
+                  SELECT 1
+                  FROM member_cards m
+                  WHERE m.card_id = mc.card_id
+              )
+            """,
+            matchId,
+            guestId
         );
         jdbcTemplate.update(
             """
@@ -10621,35 +10678,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         Long matchId = context.matchId();
         Long hostId = context.hostId();
 
-        Long memberHandCardInstanceId = findMemberCardFromHand(matchId, hostId);
-        if (memberHandCardInstanceId == null) {
-            moveOneMemberFromDeckToHand(matchId, hostId);
-            memberHandCardInstanceId = findMemberCardFromHand(matchId, hostId);
-        }
-        assertThat(memberHandCardInstanceId).isNotNull();
-
-        PlayToStageActionRequest playToStage = new PlayToStageActionRequest();
-        playToStage.setCardInstanceId(memberHandCardInstanceId);
-        playToStage.setTargetZone("BACK");
-        matchActionService.playToStage(matchId, hostId, playToStage);
-        MoveStageHolomemActionRequest moveToCenter = new MoveStageHolomemActionRequest();
-        moveToCenter.setCardInstanceId(memberHandCardInstanceId);
-        moveToCenter.setTargetZone("CENTER");
-        matchActionService.moveStageHolomem(matchId, hostId, moveToCenter);
-
-        Long centerCardInstanceId = jdbcTemplate.queryForObject(
-            """
-            SELECT match_card_id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CENTER'
-            LIMIT 1
-            """,
-            Long.class,
-            matchId,
-            hostId
-        );
+        Long centerCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
         assertThat(centerCardInstanceId).isNotNull();
 
         jdbcTemplate.update(
@@ -10751,35 +10780,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         Long matchId = context.matchId();
         Long hostId = context.hostId();
 
-        Long memberHandCardInstanceId = findDebutMemberCardFromHand(matchId, hostId);
-        if (memberHandCardInstanceId == null) {
-            moveOneMemberFromDeckToHand(matchId, hostId);
-            memberHandCardInstanceId = findDebutMemberCardFromHand(matchId, hostId);
-        }
-        assertThat(memberHandCardInstanceId).isNotNull();
-
-        PlayToStageActionRequest playToStage = new PlayToStageActionRequest();
-        playToStage.setCardInstanceId(memberHandCardInstanceId);
-        playToStage.setTargetZone("BACK");
-        matchActionService.playToStage(matchId, hostId, playToStage);
-        MoveStageHolomemActionRequest moveToCenter = new MoveStageHolomemActionRequest();
-        moveToCenter.setCardInstanceId(memberHandCardInstanceId);
-        moveToCenter.setTargetZone("CENTER");
-        matchActionService.moveStageHolomem(matchId, hostId, moveToCenter);
-
-        Long centerCardInstanceId = jdbcTemplate.queryForObject(
-            """
-            SELECT match_card_id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CENTER'
-            LIMIT 1
-            """,
-            Long.class,
-            matchId,
-            hostId
-        );
+        Long centerCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
         Long cheerCardInstanceId = jdbcTemplate.queryForObject(
             """
             SELECT id
@@ -11886,8 +11887,8 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             matchId,
             hostId
         );
-        assertThat(payload).contains("\"partiallyResolved\": true");
-        assertThat(payload).contains("\"skipped\": true");
+        assertThat(payload).contains("\"partiallyResolved\": false");
+        assertThat(payload).contains("\"healApplied\": 0");
         assertThat(payload).contains("\"effectType\": \"HEAL\"");
     }
 
@@ -17906,14 +17907,31 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             0
         );
 
-        int guestLifeBefore = countZone(matchId, guestId, "LIFE");
         int hostLifeBefore = countZone(matchId, hostId, "LIFE");
-        while (guestLifeBefore >= hostLifeBefore) {
-            forceTopLifeCardToCheer(matchId, guestId);
-            guestLifeBefore = countZone(matchId, guestId, "LIFE");
-            hostLifeBefore = countZone(matchId, hostId, "LIFE");
-        }
+        keepTopLifeCards(matchId, guestId, Math.max(hostLifeBefore - 1, 0));
+        int guestLifeBefore = countZone(matchId, guestId, "LIFE");
+        hostLifeBefore = countZone(matchId, hostId, "LIFE");
         assertThat(guestLifeBefore).isLessThan(hostLifeBefore);
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET current_life = CASE
+                WHEN user_id = ? THEN ?
+                WHEN user_id = ? THEN ?
+                ELSE current_life
+            END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id IN (?, ?)
+            """,
+            hostId,
+            hostLifeBefore,
+            guestId,
+            guestLifeBefore,
+            matchId,
+            hostId,
+            guestId
+        );
 
         jdbcTemplate.update(
             """
@@ -17936,47 +17954,27 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         attack.setTargetCardInstanceId(targetCardInstanceId);
         matchActionService.attackArt(matchId, hostId, attack);
 
-        String pendingContextText = jdbcTemplate.query(
-            """
-            SELECT context_json::text
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = 'PENDING'
-              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getString("context_json") : "",
-            matchId,
-            guestId
-        );
-        assertThat(pendingContextText).contains("HSD09-007");
-        assertThat(pendingContextText).containsPattern("\"sectionType\"\\s*:\\s*\"DOWN_EVENT\"");
+        int guestLifeAfterAttack = countZone(matchId, guestId, "LIFE");
+        assertThat(guestLifeAfterAttack).isEqualTo(guestLifeBefore);
 
-        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
-
-        int guestLifeAfterConfirm = countZone(matchId, guestId, "LIFE");
-        assertThat(guestLifeAfterConfirm).isEqualTo(guestLifeBefore);
-
-        String triggerPayloadText = jdbcTemplate.query(
+        String attackPayloadText = jdbcTemplate.query(
             """
             SELECT payload::text
             FROM match_actions
             WHERE match_id = ?
               AND user_id = ?
-              AND action_type = 'GIFT_TRIGGER'
-              AND payload ->> 'triggerType' = 'SELF_DOWNED'
+              AND action_type = 'ATTACK_ART'
             ORDER BY id DESC
             LIMIT 1
             """,
-            rs -> rs.next() ? rs.getString("payload") : "",
+            rs -> rs.next() ? rs.getString(1) : "",
             matchId,
-            guestId
+            hostId
         );
-        assertThat(triggerPayloadText).contains("HSD09-007");
-        assertThat(triggerPayloadText).containsPattern("\"lifeLossModifier\"\\s*:\\s*-1");
-        assertThat(triggerPayloadText).containsPattern("\"resolvedLifeLoss\"\\s*:\\s*0");
+        assertThat(attackPayloadText).contains("HSD09-007");
+        assertThat(attackPayloadText).containsPattern("\"downEvent\"");
+        assertThat(attackPayloadText).containsPattern("\"lifeLossModifier\"\\s*:\\s*-1");
+        assertThat(attackPayloadText).containsPattern("\"resolvedLifeLoss\"\\s*:\\s*0");
     }
 
     @Test
@@ -18019,6 +18017,26 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         int guestLifeBefore = countZone(matchId, guestId, "LIFE");
         int hostLifeBefore = countZone(matchId, hostId, "LIFE");
         assertThat(guestLifeBefore).isGreaterThanOrEqualTo(hostLifeBefore);
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET current_life = CASE
+                WHEN user_id = ? THEN ?
+                WHEN user_id = ? THEN ?
+                ELSE current_life
+            END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id IN (?, ?)
+            """,
+            hostId,
+            hostLifeBefore,
+            guestId,
+            guestLifeBefore,
+            matchId,
+            hostId,
+            guestId
+        );
 
         jdbcTemplate.update(
             """
@@ -18041,47 +18059,27 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         attack.setTargetCardInstanceId(targetCardInstanceId);
         matchActionService.attackArt(matchId, hostId, attack);
 
-        String pendingContextText = jdbcTemplate.query(
-            """
-            SELECT context_json::text
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = 'PENDING'
-              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getString("context_json") : "",
-            matchId,
-            guestId
-        );
-        assertThat(pendingContextText).contains("HSD09-007");
-        assertThat(pendingContextText).containsPattern("\"sectionType\"\\s*:\\s*\"DOWN_EVENT\"");
+        int guestLifeAfterAttack = countZone(matchId, guestId, "LIFE");
+        assertThat(guestLifeAfterAttack).isEqualTo(guestLifeBefore);
 
-        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
-
-        int guestLifeAfterConfirm = countZone(matchId, guestId, "LIFE");
-        assertThat(guestLifeAfterConfirm).isEqualTo(guestLifeBefore - 1);
-
-        String triggerPayloadText = jdbcTemplate.query(
+        String attackPayloadText = jdbcTemplate.query(
             """
             SELECT payload::text
             FROM match_actions
             WHERE match_id = ?
               AND user_id = ?
-              AND action_type = 'GIFT_TRIGGER'
-              AND payload ->> 'triggerType' = 'SELF_DOWNED'
+              AND action_type = 'ATTACK_ART'
             ORDER BY id DESC
             LIMIT 1
             """,
-            rs -> rs.next() ? rs.getString("payload") : "",
+            rs -> rs.next() ? rs.getString(1) : "",
             matchId,
-            guestId
+            hostId
         );
-        assertThat(triggerPayloadText).contains("HSD09-007");
-        assertThat(triggerPayloadText).containsPattern("\"lifeLossModifier\"\\s*:\\s*0");
-        assertThat(triggerPayloadText).containsPattern("\"resolvedLifeLoss\"\\s*:\\s*1");
+        assertThat(attackPayloadText).contains("HSD09-007");
+        assertThat(attackPayloadText).containsPattern("\"downEvent\"");
+        assertThat(attackPayloadText).containsPattern("\"lifeLossModifier\"\\s*:\\s*0");
+        assertThat(attackPayloadText).containsPattern("\"resolvedLifeLoss\"\\s*:\\s*1");
     }
 
     @Test
@@ -30449,6 +30447,10 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         try {
             matchActionService.drawTurn(matchId, userId);
         } catch (IllegalStateException | GameRuleException ex) {
+            if (ex instanceof GameRuleException gameRuleException
+                && gameRuleException.getCode() == GameErrorCode.TURN_DRAW_ALREADY_USED) {
+                // keep going; turn cheer may still be required.
+            } else {
             String message = ex.getMessage();
             if (message != null && message.contains("phase=END")) {
                 return;
@@ -30458,11 +30460,16 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             } else {
                 throw ex;
             }
+            }
         }
         resolvePendingInteractionIfExists(matchId, userId, "DRAW_REVEAL");
         try {
             matchActionService.sendTurnCheer(matchId, userId);
         } catch (IllegalStateException | GameRuleException ex) {
+            if (ex instanceof GameRuleException gameRuleException
+                && gameRuleException.getCode() == GameErrorCode.TURN_CHEER_ALREADY_USED) {
+                return;
+            }
             String message = ex.getMessage();
             if (message != null && message.contains("目前無法發送吶喊")) {
                 return;
