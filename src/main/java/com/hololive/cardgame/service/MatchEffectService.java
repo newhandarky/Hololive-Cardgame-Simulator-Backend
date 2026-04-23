@@ -109,6 +109,7 @@ public class MatchEffectService {
     private final GiftTriggerPreviewService giftTriggerPreviewService;
     private final SearchCriteriaParser searchCriteriaParser;
     private final MatchGiftTriggerConditionService giftTriggerConditionService;
+    private final MatchGiftTriggerSummaryService giftTriggerSummaryService;
 
     /**
      * 效果結算服務建構子。
@@ -129,6 +130,7 @@ public class MatchEffectService {
         this.giftTriggerMatcher = new GiftTriggerMatcher();
         this.giftTriggerPreviewService = new GiftTriggerPreviewService();
         this.searchCriteriaParser = new SearchCriteriaParser(jdbcTemplate, effectTextParser);
+        this.giftTriggerSummaryService = new MatchGiftTriggerSummaryService(giftTriggerPreviewService);
         this.giftTriggerConditionService = new MatchGiftTriggerConditionService(
             jdbcTemplate,
             effectTextParser,
@@ -1240,7 +1242,7 @@ public class MatchEffectService {
         } else {
             execution = previewGiftEffects(giftText);
         }
-        Map<String, Object> summary = giftTriggerPreviewService.buildTriggerSummary(
+        Map<String, Object> summary = giftTriggerSummaryService.buildTriggerSummary(
             normalizedTriggerType,
             holderHolomemId,
             holderCardInstanceId,
@@ -1250,35 +1252,13 @@ public class MatchEffectService {
             triggerTargetCardInstanceId,
             giftText,
             execution,
-            !executeEffects
+            !executeEffects,
+            holder
         );
-        appendGiftHolderSnapshotContext(summary, holder);
         if (!executeEffects) {
             appendGiftSelectionPreviewContext(summary, matchId, userId, giftText, holder);
         }
         return summary;
-    }
-
-    private void appendGiftHolderSnapshotContext(Map<String, Object> summary, Map<String, Object> holder) {
-        if (summary == null || summary.isEmpty() || holder == null || holder.isEmpty()) {
-            return;
-        }
-        List<Long> attachedCheerCardInstanceIds = toLongList(holder.get("attached_cheer_card_instance_ids"));
-        if (!attachedCheerCardInstanceIds.isEmpty()) {
-            summary.put("giftHolderAttachedCheerCardInstanceIds", attachedCheerCardInstanceIds);
-        }
-        List<String> attachedCheerCardIds = toTextList(holder.get("attached_cheer_card_ids"));
-        if (!attachedCheerCardIds.isEmpty()) {
-            summary.put("giftHolderAttachedCheerCardIds", attachedCheerCardIds);
-        }
-        List<Long> stackCardInstanceIds = toLongList(holder.get("stack_card_instance_ids"));
-        if (!stackCardInstanceIds.isEmpty()) {
-            summary.put("giftHolderStackCardInstanceIds", stackCardInstanceIds);
-        }
-        List<String> stackCardIds = toTextList(holder.get("stack_card_ids"));
-        if (!stackCardIds.isEmpty()) {
-            summary.put("giftHolderStackCardIds", stackCardIds);
-        }
     }
 
     private void appendGiftSelectionPreviewContext(
@@ -1794,15 +1774,7 @@ public class MatchEffectService {
      * <p>因此這裡要求冒號前至少要解析出一個「真正可執行」的 effect type，才視為有成本。
      */
     private boolean hasMeaningfulSequentialCost(List<String> costEffectTypes) {
-        if (costEffectTypes == null || costEffectTypes.isEmpty()) {
-            return false;
-        }
-        for (String effectType : costEffectTypes) {
-            if (StringUtils.hasText(effectType) && !"UNIMPLEMENTED".equals(normalize(effectType))) {
-                return true;
-            }
-        }
-        return false;
+        return MatchGiftExecutionHelper.hasMeaningfulSequentialCost(costEffectTypes);
     }
 
     /**
@@ -1948,50 +1920,18 @@ public class MatchEffectService {
      * <p>就視為後段效果不能繼續執行。
      */
     private boolean areSequentialCostEffectsSatisfied(List<Map<String, Object>> costExecutions) {
-        if (costExecutions == null || costExecutions.isEmpty()) {
-            return false;
-        }
-        for (Map<String, Object> summary : costExecutions) {
-            if (!isEffectSummaryApplied(summary)) {
-                return false;
-            }
-        }
-        return true;
+        return MatchGiftExecutionHelper.areSequentialCostEffectsSatisfied(costExecutions);
     }
 
     /**
      * 嘗試以共通欄位判斷單一 effect summary 是否有實際生效。
      */
     private boolean isEffectSummaryApplied(Map<String, Object> summary) {
-        if (summary == null || summary.isEmpty()) {
-            return false;
-        }
-        Object applied = summary.get("applied");
-        if (applied instanceof Boolean appliedFlag) {
-            return appliedFlag;
-        }
-        for (Map.Entry<String, Object> entry : summary.entrySet()) {
-            if (entry.getKey() == null || !entry.getKey().endsWith("Applied")) {
-                continue;
-            }
-            Object value = entry.getValue();
-            if (value instanceof Number number && number.intValue() > 0) {
-                return true;
-            }
-        }
-        Object moved = summary.get("moved");
-        return moved instanceof Boolean movedFlag && movedFlag;
+        return MatchGiftExecutionHelper.isEffectSummaryApplied(summary);
     }
 
     private List<String> mergeEffectTypes(List<String> first, List<String> second) {
-        LinkedHashSet<String> merged = new LinkedHashSet<>();
-        if (first != null) {
-            merged.addAll(first);
-        }
-        if (second != null) {
-            merged.addAll(second);
-        }
-        return new ArrayList<>(merged);
+        return MatchGiftExecutionHelper.mergeEffectTypes(first, second);
     }
 
     /**
