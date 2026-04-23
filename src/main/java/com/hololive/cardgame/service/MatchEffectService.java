@@ -19,7 +19,6 @@ import com.hololive.cardgame.service.effect.GiftTriggerPreviewService;
 import com.hololive.cardgame.service.effect.SearchCriteria;
 import com.hololive.cardgame.service.effect.SearchCriteriaParser;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -99,7 +98,6 @@ public class MatchEffectService {
     private static final Pattern DOWN_EXTRA_LIFE_PATTERN = Pattern.compile("ライフを\\s*(\\d+)\\s*つ?減ら");
     private static final Pattern DOWN_EXTRA_LIFE_MINUS_PATTERN = Pattern.compile("ライフ\\s*[ー\\-−]\\s*(\\d+)");
     private static final Pattern PASSIVE_GIFT_SPECIAL_DAMAGE_BONUS_PATTERN = Pattern.compile("特殊ダメージ\\s*[+＋]\\s*(\\d+)");
-    private static final Pattern SPECIAL_DAMAGE_AT_LEAST_PATTERN = Pattern.compile("(\\d+)\\s*以上の特殊ダメージ");
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -110,6 +108,7 @@ public class MatchEffectService {
     private final GiftTriggerMatcher giftTriggerMatcher;
     private final GiftTriggerPreviewService giftTriggerPreviewService;
     private final SearchCriteriaParser searchCriteriaParser;
+    private final MatchGiftTriggerConditionService giftTriggerConditionService;
 
     /**
      * 效果結算服務建構子。
@@ -130,6 +129,12 @@ public class MatchEffectService {
         this.giftTriggerMatcher = new GiftTriggerMatcher();
         this.giftTriggerPreviewService = new GiftTriggerPreviewService();
         this.searchCriteriaParser = new SearchCriteriaParser(jdbcTemplate, effectTextParser);
+        this.giftTriggerConditionService = new MatchGiftTriggerConditionService(
+            jdbcTemplate,
+            effectTextParser,
+            giftTriggerMatcher,
+            searchCriteriaParser
+        );
     }
 
     /**
@@ -1409,16 +1414,7 @@ public class MatchEffectService {
     }
 
     private boolean matchesGiftReferencedArtNameCondition(String giftText, String attackerArtName) {
-        if (!StringUtils.hasText(giftText)) {
-            return false;
-        }
-        if (!giftText.contains("アーツ")) {
-            return true;
-        }
-        if (!giftText.contains("「") && !giftText.contains("『")) {
-            return true;
-        }
-        return matchesPassiveGiftReferencedArtNameCondition(giftText, attackerArtName);
+        return giftTriggerConditionService.matchesReferencedArtNameCondition(giftText, attackerArtName);
     }
 
     /**
@@ -1432,32 +1428,7 @@ public class MatchEffectService {
      * <p>因此它屬於「文字 + 目前對戰上下文」的條件，最適合留在這裡集中處理。
      */
     private boolean matchesGiftTurnOwnershipCondition(Long matchId, Long userId, String giftText) {
-        if (matchId == null || userId == null || !StringUtils.hasText(giftText)) {
-            return false;
-        }
-        if (!giftText.contains("相手のターン") && !giftText.contains("自分のターン")) {
-            return true;
-        }
-        Long currentTurnPlayerId = jdbcTemplate.query(
-            """
-            SELECT current_turn_player_id
-            FROM matches
-            WHERE id = ?
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("current_turn_player_id") : null,
-            matchId
-        );
-        if (currentTurnPlayerId == null) {
-            return false;
-        }
-        if (giftText.contains("相手のターン") && userId.equals(currentTurnPlayerId)) {
-            return false;
-        }
-        if (giftText.contains("自分のターン") && !userId.equals(currentTurnPlayerId)) {
-            return false;
-        }
-        return true;
+        return giftTriggerConditionService.matchesTurnOwnershipCondition(matchId, userId, giftText);
     }
 
     /**
@@ -1472,47 +1443,7 @@ public class MatchEffectService {
      * `match_players.current_life`。之後如果再出現其他生命比較文案，只要在這裡擴充即可。
      */
     private boolean matchesGiftLifeComparisonCondition(Long matchId, Long userId, String giftText) {
-        if (matchId == null || userId == null || !StringUtils.hasText(giftText)) {
-            return false;
-        }
-        boolean requireLessOrEqual = giftText.contains("自分のライフが相手以下");
-        boolean requireStrictLess = giftText.contains("自分のライフが相手のライフより少ない")
-            || giftText.contains("自分のライフが相手より少ない");
-        if (!requireLessOrEqual && !requireStrictLess) {
-            return true;
-        }
-        Integer ownLife = jdbcTemplate.query(
-            """
-            SELECT current_life
-            FROM match_players
-            WHERE match_id = ?
-              AND user_id = ?
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getInt("current_life") : null,
-            matchId,
-            userId
-        );
-        Integer opponentLife = jdbcTemplate.query(
-            """
-            SELECT current_life
-            FROM match_players
-            WHERE match_id = ?
-              AND user_id <> ?
-            ORDER BY id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getInt("current_life") : null,
-            matchId,
-            userId
-        );
-        if (ownLife == null || opponentLife == null) {
-            return false;
-        }
-        if (requireLessOrEqual) {
-            return ownLife <= opponentLife;
-        }
-        return ownLife < opponentLife;
+        return giftTriggerConditionService.matchesLifeComparisonCondition(matchId, userId, giftText);
     }
 
     /**
@@ -1527,102 +1458,16 @@ public class MatchEffectService {
      * 直接在這裡擴充即可，不需要把查 `HAND` 張數的 SQL 散落到各個 effect executor。
      */
     private boolean matchesGiftHandCountCondition(Long matchId, Long userId, String giftText) {
-        if (matchId == null || userId == null || !StringUtils.hasText(giftText)) {
-            return false;
-        }
-        String normalizedText = effectTextParser.normalizeDigits(giftText);
-        Matcher atLeastMatcher = Pattern.compile("自分の手札が(\\d+)枚以上なら").matcher(normalizedText);
-        if (!atLeastMatcher.find()) {
-            return true;
-        }
-        int requiredHandCount = Integer.parseInt(atLeastMatcher.group(1));
-        Integer currentHandCount = jdbcTemplate.query(
-            """
-            SELECT COUNT(*)
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'HAND'
-            """,
-            rs -> rs.next() ? rs.getInt(1) : null,
-            matchId,
-            userId
-        );
-        return currentHandCount != null && currentHandCount >= requiredHandCount;
+        return giftTriggerConditionService.matchesHandCountCondition(matchId, userId, giftText);
     }
 
     private boolean matchesGiftSpecialDamageThresholdCondition(String giftText, GiftTriggerSourceContext sourceContext) {
-        if (!StringUtils.hasText(giftText)) {
-            return false;
-        }
-        String normalizedText = effectTextParser.normalizeDigits(giftText);
-        int requiredSpecialDamage = effectTextParser.extractByPattern(normalizedText, SPECIAL_DAMAGE_AT_LEAST_PATTERN);
-        if (requiredSpecialDamage <= 0) {
-            return true;
-        }
-        if (sourceContext == null || !StringUtils.hasText(sourceContext.cardId())) {
-            return false;
-        }
-        if (!giftTriggerMatcher.matchesGiftExplicitSourceNameCondition(giftText, sourceContext.cardName())) {
-            return false;
-        }
-        int sourceSpecialDamage = resolveSourceArtSpecialDamageValue(sourceContext.cardId(), sourceContext.artName());
-        return sourceSpecialDamage >= requiredSpecialDamage;
-    }
-
-    private int resolveSourceArtSpecialDamageValue(String sourceCardId, String sourceArtName) {
-        if (!StringUtils.hasText(sourceCardId)) {
-            return 0;
-        }
-        List<Map<String, Object>> arts;
-        if (StringUtils.hasText(sourceArtName)) {
-            arts = jdbcTemplate.queryForList(
-                """
-                SELECT effect_json::text AS effect_json_text,
-                       description,
-                       name
-                FROM member_arts
-                WHERE member_card_id = ?
-                  AND name = ?
-                """,
-                sourceCardId,
-                sourceArtName
-            );
-            if (arts.isEmpty()) {
-                arts = jdbcTemplate.queryForList(
-                    """
-                    SELECT effect_json::text AS effect_json_text,
-                           description,
-                           name
-                    FROM member_arts
-                    WHERE member_card_id = ?
-                    """,
-                    sourceCardId
-                );
-            }
-        } else {
-            arts = jdbcTemplate.queryForList(
-                """
-                SELECT effect_json::text AS effect_json_text,
-                       description,
-                       name
-                FROM member_arts
-                WHERE member_card_id = ?
-                """,
-                sourceCardId
-            );
-        }
-        int maxSpecialDamage = 0;
-        for (Map<String, Object> art : arts) {
-            String merged = effectTextParser.normalizeDigits(
-                asText(art.get("effect_json_text")) + " " + asText(art.get("description"))
-            );
-            int specialDamage = effectTextParser.extractByPattern(merged, SPECIAL_DAMAGE_PATTERN);
-            if (specialDamage > maxSpecialDamage) {
-                maxSpecialDamage = specialDamage;
-            }
-        }
-        return maxSpecialDamage;
+        return giftTriggerConditionService.matchesSpecialDamageThresholdCondition(
+            giftText,
+            sourceContext == null ? null : sourceContext.cardId(),
+            sourceContext == null ? null : sourceContext.cardName(),
+            sourceContext == null ? null : sourceContext.artName()
+        );
     }
 
     private boolean matchesGiftPerformanceEndCondition(
@@ -1632,108 +1477,42 @@ public class MatchEffectService {
         Long holderHolomemId,
         String giftText
     ) {
-        PerformancePhaseSnapshot snapshot = loadPerformancePhaseSnapshot(matchId, userId, turnNumber);
-        if (snapshot == null) {
-            return false;
-        }
-        if (giftText.contains("そのパフォーマンスステップに自分のライフが減っていたら")) {
-            int currentLife = jdbcTemplate.query(
-                """
-                SELECT current_life
-                FROM match_players
-                WHERE match_id = ?
-                  AND user_id = ?
-                LIMIT 1
-                """,
-                rs -> rs.next() ? rs.getInt("current_life") : 0,
-                matchId,
-                userId
-            );
-            if (currentLife >= snapshot.currentLife()) {
-                return false;
-            }
-        }
-        if (giftText.contains("このホロメンのHPが減っていないなら")) {
-            if (holderHolomemId == null || holderHolomemId <= 0) {
-                return false;
-            }
-            Integer startDamage = snapshot.holomemDamage().get(holderHolomemId);
-            Integer currentDamage = jdbcTemplate.query(
-                """
-                SELECT COALESCE(damage_taken, 0)
-                FROM match_holomems
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND id = ?
-                LIMIT 1
-                """,
-                rs -> rs.next() ? rs.getInt(1) : null,
-                matchId,
-                userId,
-                holderHolomemId
-            );
-            if (startDamage == null || currentDamage == null || !startDamage.equals(currentDamage)) {
-                return false;
-            }
-        }
-        return true;
+        return giftTriggerConditionService.matchesPerformanceEndCondition(
+            matchId,
+            userId,
+            turnNumber,
+            holderHolomemId,
+            giftText
+        );
     }
 
     private boolean matchesGiftStageEnterSourceCondition(String giftText, GiftTriggerSourceContext sourceContext) {
-        if (!StringUtils.hasText(giftText) || sourceContext == null) {
-            return false;
-        }
-        if (giftText.contains("バックホロメン") && !"BACK".equals(sourceContext.stageZone())) {
-            return false;
-        }
-        if (giftText.contains("センターホロメン") && !"CENTER".equals(sourceContext.stageZone())) {
-            return false;
-        }
-        if (!giftTriggerMatcher.matchesGiftStageEnterSourceLevelCondition(giftText, sourceContext.levelType())) {
-            return false;
-        }
-        String requiredTag = searchCriteriaParser.resolveTagFromKnownTags(giftText);
-        if (StringUtils.hasText(requiredTag) && !rowTagsContains(sourceContext.tagsJson(), requiredTag)) {
-            return false;
-        }
-        return true;
+        return giftTriggerConditionService.matchesStageEnterSourceCondition(
+            giftText,
+            sourceContext == null ? null : sourceContext.levelType(),
+            sourceContext == null ? null : sourceContext.stageZone(),
+            sourceContext == null ? null : sourceContext.tagsJson()
+        );
     }
 
     private boolean matchesGiftCollabSourceCondition(String giftText, GiftTriggerSourceContext sourceContext) {
-        if (!StringUtils.hasText(giftText) || sourceContext == null) {
-            return false;
-        }
-        if (!"COLLAB".equals(sourceContext.stageZone())) {
-            return false;
-        }
-        if (!giftTriggerMatcher.matchesGiftStageEnterSourceLevelCondition(giftText, sourceContext.levelType())) {
-            return false;
-        }
-        String requiredTag = searchCriteriaParser.resolveTagFromKnownTags(giftText);
-        if (StringUtils.hasText(requiredTag) && !rowTagsContains(sourceContext.tagsJson(), requiredTag)) {
-            return false;
-        }
-        return giftTriggerMatcher.matchesGiftDownedSourceNameCondition(giftText, sourceContext.cardName());
+        return giftTriggerConditionService.matchesCollabSourceCondition(
+            giftText,
+            sourceContext == null ? null : sourceContext.cardName(),
+            sourceContext == null ? null : sourceContext.levelType(),
+            sourceContext == null ? null : sourceContext.stageZone(),
+            sourceContext == null ? null : sourceContext.tagsJson()
+        );
     }
 
     private boolean matchesGiftBatonTouchBackSourceCondition(String giftText, GiftTriggerSourceContext sourceContext) {
-        if (!StringUtils.hasText(giftText) || sourceContext == null) {
-            return false;
-        }
-        if (!"BACK".equals(sourceContext.stageZone())) {
-            return false;
-        }
-        if (giftText.contains("バックホロメン") && !"BACK".equals(sourceContext.stageZone())) {
-            return false;
-        }
-        if (!giftTriggerMatcher.matchesGiftStageEnterSourceLevelCondition(giftText, sourceContext.levelType())) {
-            return false;
-        }
-        String requiredTag = searchCriteriaParser.resolveTagFromKnownTags(giftText);
-        if (StringUtils.hasText(requiredTag) && !rowTagsContains(sourceContext.tagsJson(), requiredTag)) {
-            return false;
-        }
-        return giftTriggerMatcher.matchesGiftExplicitSourceNameCondition(giftText, sourceContext.cardName());
+        return giftTriggerConditionService.matchesBatonTouchBackSourceCondition(
+            giftText,
+            sourceContext == null ? null : sourceContext.cardName(),
+            sourceContext == null ? null : sourceContext.levelType(),
+            sourceContext == null ? null : sourceContext.stageZone(),
+            sourceContext == null ? null : sourceContext.tagsJson()
+        );
     }
 
     private boolean matchesGiftDownedSourceCondition(
@@ -1741,32 +1520,14 @@ public class MatchEffectService {
         GiftTriggerSourceContext sourceContext,
         String triggerType
     ) {
-        if (!StringUtils.hasText(giftText) || sourceContext == null) {
-            return false;
-        }
-        if (!Set.of("SELF_DOWNED", "ALLY_DOWNED").contains(triggerType)) {
-            return true;
-        }
-        if (giftText.contains("バックホロメン") && !"BACK".equals(sourceContext.stageZone())) {
-            return false;
-        }
-        if (giftText.contains("センターホロメン") && !"CENTER".equals(sourceContext.stageZone())) {
-            return false;
-        }
-        if (giftText.contains("コラボホロメン") && !"COLLAB".equals(sourceContext.stageZone())) {
-            return false;
-        }
-        if (!giftTriggerMatcher.matchesGiftStageEnterSourceLevelCondition(giftText, sourceContext.levelType())) {
-            return false;
-        }
-        String requiredTag = searchCriteriaParser.resolveTagFromKnownTags(giftText);
-        if (StringUtils.hasText(requiredTag) && !rowTagsContains(sourceContext.tagsJson(), requiredTag)) {
-            return false;
-        }
-        if (!giftTriggerMatcher.matchesGiftDownedSourceNameCondition(giftText, sourceContext.cardName())) {
-            return false;
-        }
-        return true;
+        return giftTriggerConditionService.matchesDownedSourceCondition(
+            giftText,
+            sourceContext == null ? null : sourceContext.cardName(),
+            sourceContext == null ? null : sourceContext.levelType(),
+            sourceContext == null ? null : sourceContext.stageZone(),
+            sourceContext == null ? null : sourceContext.tagsJson(),
+            triggerType
+        );
     }
 
     /**
@@ -2530,47 +2291,6 @@ public class MatchEffectService {
         };
     }
 
-    private PerformancePhaseSnapshot loadPerformancePhaseSnapshot(Long matchId, Long userId, int turnNumber) {
-        if (matchId == null || userId == null || turnNumber <= 0) {
-            return null;
-        }
-        String payloadText = jdbcTemplate.query(
-            """
-            SELECT payload::text
-            FROM match_turn_effects
-            WHERE match_id = ?
-              AND affected_user_id = ?
-              AND stat_type = 'PERFORMANCE_SNAPSHOT'
-              AND expires_turn = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getString("payload") : null,
-            matchId,
-            userId,
-            turnNumber
-        );
-        JsonNode payloadNode = effectTextParser.parseEffectJson(payloadText);
-        if (payloadNode == null || payloadNode.isNull() || !payloadNode.isObject()) {
-            return null;
-        }
-        int currentLife = payloadNode.path("currentLife").asInt(0);
-        Map<Long, Integer> holomemDamage = new LinkedHashMap<>();
-        JsonNode damageNode = payloadNode.get("holomemDamage");
-        if (damageNode != null && damageNode.isObject()) {
-            Iterator<Map.Entry<String, JsonNode>> fields = damageNode.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> field = fields.next();
-                try {
-                    holomemDamage.put(Long.parseLong(field.getKey()), field.getValue().asInt(0));
-                } catch (NumberFormatException ignored) {
-                    // ignore invalid snapshot key
-                }
-            }
-        }
-        return new PerformancePhaseSnapshot(currentLife, holomemDamage);
-    }
-
     private GiftTriggerSourceContext loadGiftTriggerSourceContext(
         Long matchId,
         Long sourceCardInstanceId,
@@ -2629,11 +2349,6 @@ public class MatchEffectService {
         String stageZone,
         String tagsJson,
         String artName
-    ) {}
-
-    private record PerformancePhaseSnapshot(
-        int currentLife,
-        Map<Long, Integer> holomemDamage
     ) {}
 
     /**
@@ -7034,55 +6749,15 @@ public class MatchEffectService {
     }
 
     private List<Long> extractEffectNodeLongList(JsonNode effectNode, String fieldName) {
-        if (effectNode == null || effectNode.isNull() || !StringUtils.hasText(fieldName)) {
-            return List.of();
-        }
-        JsonNode value = effectNode.get(fieldName);
-        if (value == null || value.isNull() || !value.isArray()) {
-            return List.of();
-        }
-        List<Long> ids = new ArrayList<>();
-        for (JsonNode node : value) {
-            if (node == null || node.isNull()) {
-                continue;
-            }
-            Long id = node.isNumber() ? node.longValue() : asLong(node.asText());
-            if (id == null || id <= 0 || ids.contains(id)) {
-                continue;
-            }
-            ids.add(id);
-        }
-        return ids;
+        return MatchEffectValueHelper.extractEffectNodeLongList(effectNode, fieldName);
     }
 
     private List<Long> toLongList(Object value) {
-        if (!(value instanceof List<?> list) || list.isEmpty()) {
-            return List.of();
-        }
-        List<Long> ids = new ArrayList<>();
-        for (Object item : list) {
-            Long id = asLong(item);
-            if (id == null || id <= 0 || ids.contains(id)) {
-                continue;
-            }
-            ids.add(id);
-        }
-        return ids;
+        return MatchEffectValueHelper.toLongList(value);
     }
 
     private List<String> toTextList(Object value) {
-        if (!(value instanceof List<?> list) || list.isEmpty()) {
-            return List.of();
-        }
-        List<String> texts = new ArrayList<>();
-        for (Object item : list) {
-            String text = asText(item);
-            if (!StringUtils.hasText(text) || texts.contains(text)) {
-                continue;
-            }
-            texts.add(text);
-        }
-        return texts;
+        return MatchEffectValueHelper.toTextList(value);
     }
 
     /**
@@ -10708,102 +10383,28 @@ public class MatchEffectService {
      * 依欄位順序讀取第一個有效文字值。
      */
     private String readText(JsonNode node, String... fields) {
-        if (node == null || fields == null) {
-            return null;
-        }
-        for (String field : fields) {
-            JsonNode value = node.get(field);
-            if (value != null && value.isTextual() && StringUtils.hasText(value.asText())) {
-                return value.asText().trim();
-            }
-        }
-        return null;
+        return MatchEffectValueHelper.readText(node, fields);
     }
 
     /**
      * 依欄位順序讀取布林值（支援 true/false 字串）。
      */
     private Boolean readBoolean(JsonNode node, String... fields) {
-        if (node == null || fields == null) {
-            return null;
-        }
-        for (String field : fields) {
-            JsonNode value = node.get(field);
-            if (value == null || value.isNull()) {
-                continue;
-            }
-            if (value.isBoolean()) {
-                return value.asBoolean();
-            }
-            if (value.isInt() || value.isLong()) {
-                return value.asInt() != 0;
-            }
-            if (value.isTextual()) {
-                String normalized = value.asText().trim().toLowerCase(Locale.ROOT);
-                if ("true".equals(normalized) || "1".equals(normalized) || "yes".equals(normalized)) {
-                    return true;
-                }
-                if ("false".equals(normalized) || "0".equals(normalized) || "no".equals(normalized)) {
-                    return false;
-                }
-            }
-        }
-        return null;
+        return MatchEffectValueHelper.readBoolean(node, fields);
     }
 
     /**
      * 依欄位順序讀取 Long，支援數字與數字字串。
      */
     private Long readLong(JsonNode node, String... fields) {
-        if (node == null || fields == null) {
-            return null;
-        }
-        for (String field : fields) {
-            JsonNode value = node.get(field);
-            if (value == null || value.isNull()) {
-                continue;
-            }
-            if (value.isIntegralNumber()) {
-                return value.asLong();
-            }
-            if (value.isTextual()) {
-                String text = value.asText();
-                if (!StringUtils.hasText(text)) {
-                    continue;
-                }
-                try {
-                    return Long.parseLong(text.trim());
-                } catch (NumberFormatException ignored) {
-                    // ignore invalid numeric token
-                }
-            }
-        }
-        return null;
+        return MatchEffectValueHelper.readLong(node, fields);
     }
 
     /**
      * 將查詢列欄位值轉為 Boolean。
      */
     private Boolean readRowBoolean(Object value) {
-        if (value == null) {
-            return null;
-        }
-        if (value instanceof Boolean booleanValue) {
-            return booleanValue;
-        }
-        if (value instanceof Number number) {
-            return number.intValue() != 0;
-        }
-        if (value instanceof String text) {
-            String normalized = text.trim().toLowerCase(Locale.ROOT);
-            if ("true".equals(normalized) || "1".equals(normalized) || "yes".equals(normalized)) {
-                return true;
-            }
-            if ("false".equals(normalized) || "0".equals(normalized) || "no".equals(normalized)) {
-                return false;
-            }
-        }
-        return null;
+        return MatchEffectValueHelper.readRowBoolean(value);
     }
 
     /**
@@ -14375,74 +13976,35 @@ public class MatchEffectService {
      * 通用字串正規化：null 安全、trim、轉大寫。
      */
     private String normalize(Object value) {
-        if (value == null) {
-            return "";
-        }
-        return value.toString().trim().toUpperCase(Locale.ROOT);
+        return MatchEffectValueHelper.normalize(value);
     }
 
     /**
      * 安全轉 Long，支援 Number 與字串輸入。
      */
     private Long asLong(Object value) {
-        if (value instanceof Number number) {
-            return number.longValue();
-        }
-        if (value instanceof String text) {
-            try {
-                return Long.parseLong(text.trim());
-            } catch (NumberFormatException ignored) {
-                return null;
-            }
-        }
-        return null;
+        return MatchEffectValueHelper.asLong(value);
     }
 
     /**
      * 安全轉 int，失敗時回 0。
      */
     private int asInt(Object value) {
-        if (value instanceof Number number) {
-            return number.intValue();
-        }
-        if (value instanceof String text) {
-            try {
-                return Integer.parseInt(text.trim());
-            } catch (NumberFormatException ignored) {
-                return 0;
-            }
-        }
-        return 0;
+        return MatchEffectValueHelper.asInt(value);
     }
 
     /**
      * null 安全字串轉換。
      */
     private String asText(Object value) {
-        if (value == null) {
-            return null;
-        }
-        return value.toString();
+        return MatchEffectValueHelper.asText(value);
     }
 
     /**
      * 寬鬆布林轉換（Boolean/Number/String）。
      */
     private boolean toBoolean(Object value) {
-        if (value instanceof Boolean booleanValue) {
-            return booleanValue;
-        }
-        if (value instanceof Number number) {
-            return number.intValue() != 0;
-        }
-        if (value instanceof String text) {
-            String normalized = text.trim();
-            if (normalized.isEmpty()) {
-                return false;
-            }
-            return "1".equals(normalized) || "true".equalsIgnoreCase(normalized) || "yes".equalsIgnoreCase(normalized);
-        }
-        return false;
+        return MatchEffectValueHelper.toBoolean(value);
     }
 
     /**

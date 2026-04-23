@@ -5,7 +5,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import jakarta.persistence.EntityManager;
 import com.hololive.cardgame.dto.AttachCheerActionRequest;
 import com.hololive.cardgame.dto.AttackArtActionRequest;
 import com.hololive.cardgame.dto.BatonTouchActionRequest;
@@ -19,59 +18,18 @@ import com.hololive.cardgame.dto.ResolveDecisionRequest;
 import com.hololive.cardgame.dto.UseOshiSkillActionRequest;
 import com.hololive.cardgame.error.GameErrorCode;
 import com.hololive.cardgame.error.GameRuleException;
-import com.hololive.cardgame.entity.User;
-import com.hololive.cardgame.model.LobbyMatch;
-import com.hololive.cardgame.repository.UserRepository;
-import com.hololive.cardgame.support.AbstractPostgresIntegrationTest;
-import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.annotation.Transactional;
 
 @SpringBootTest
 @Transactional
-class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest {
-
-    @Autowired
-    private LobbyMatchService lobbyMatchService;
-
-    @Autowired
-    private MatchActionService matchActionService;
-
-    @Autowired
-    private MatchGameStateService matchGameStateService;
-
-    @Autowired
-    private MatchEffectService matchEffectService;
-
-    @Autowired
-    private DeckService deckService;
-
-    @Autowired
-    private UserRepository userRepository;
-
-    @Autowired
-    private JdbcTemplate jdbcTemplate;
-
-    @Autowired
-    private EntityManager entityManager;
-
-    @MockBean
-    private DiceService diceService;
-
-    @BeforeEach
-    void setupDiceRoll() {
-        Mockito.when(diceService.rollD6()).thenReturn(6);
-    }
+class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
 
     @Test
     void startMatchShouldPersistOshiAsRealMatchCardInstance() {
@@ -33545,45 +33503,6 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         assertThat(actionCount).isEqualTo(2);
     }
 
-    private StartedMatchContext createStartedMatch(String hostPrefix, String guestPrefix) {
-        StartedMatchContext context = createReadyMatch(hostPrefix, guestPrefix);
-        lobbyMatchService.startMatch(context.matchId(), context.hostId());
-        ensureOpeningHandContainsDebut(context.matchId(), context.hostId());
-        ensureOpeningHandContainsDebut(context.matchId(), context.guestId());
-
-        MulliganActionRequest hostMulligan = new MulliganActionRequest();
-        hostMulligan.setUseMulligan(false);
-        matchActionService.mulligan(context.matchId(), context.hostId(), hostMulligan);
-
-        MulliganActionRequest guestMulligan = new MulliganActionRequest();
-        guestMulligan.setUseMulligan(false);
-        matchActionService.mulligan(context.matchId(), context.guestId(), guestMulligan);
-
-        playOpeningCenter(context.matchId(), context.hostId());
-        matchActionService.advancePhase(context.matchId(), context.hostId());
-        playOpeningCenter(context.matchId(), context.guestId());
-        matchActionService.advancePhase(context.matchId(), context.guestId());
-        resolvePendingInteractionIfExists(context.matchId(), context.hostId(), "LIVE_START");
-        executeRequiredTurnActions(
-            context.matchId(),
-            context.hostId(),
-            loadFirstCenterCardInstanceId(context.matchId(), context.hostId())
-        );
-
-        return context;
-    }
-
-    private Long playOpeningCenter(Long matchId, Long userId) {
-        Long memberCardInstanceId = findMemberCardFromHand(matchId, userId);
-        assertThat(memberCardInstanceId).isNotNull();
-
-        PlayToStageActionRequest play = new PlayToStageActionRequest();
-        play.setCardInstanceId(memberCardInstanceId);
-        play.setTargetZone("CENTER");
-        matchActionService.playToStage(matchId, userId, play);
-        return memberCardInstanceId;
-    }
-
     private Long playOpeningBack(Long matchId, Long userId) {
         Long memberCardInstanceId = findOpeningBackMemberFromHand(matchId, userId);
         assertThat(memberCardInstanceId).isNotNull();
@@ -33617,31 +33536,6 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             matchId,
             userId
         );
-    }
-
-    private void resolvePendingInteractionIfExists(Long matchId, Long userId, String decisionType) {
-        Long decisionId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = 'PENDING'
-              AND decision_type = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            decisionType
-        );
-        if (decisionId == null) {
-            return;
-        }
-        ResolveDecisionRequest request = new ResolveDecisionRequest();
-        request.setDecisionId(decisionId);
-        matchActionService.resolveDecision(matchId, userId, request);
     }
 
     private void clearAttachedStageCheers(Long matchId, Long userId) {
@@ -33720,7 +33614,8 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         }
     }
 
-    private void executeRequiredTurnActions(Long matchId, Long userId, Long sendCheerTargetCardInstanceId) {
+    @Override
+    protected void executeRequiredTurnActions(Long matchId, Long userId, Long sendCheerTargetCardInstanceId) {
         resolvePendingInteractionIfExists(matchId, userId, "TURN_START");
         try {
             matchActionService.drawTurn(matchId, userId);
@@ -33817,91 +33712,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         }
     }
 
-    private Long loadFirstStageCardInstanceId(Long matchId, Long userId) {
-        return jdbcTemplate.query(
-            """
-            SELECT match_card_id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('CENTER', 'COLLAB', 'BACK')
-            ORDER BY CASE zone
-                       WHEN 'CENTER' THEN 0
-                       WHEN 'COLLAB' THEN 1
-                       ELSE 2
-                     END,
-                     id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("match_card_id") : null,
-            matchId,
-            userId
-        );
-    }
-
-    private Long loadFirstCenterCardInstanceId(Long matchId, Long userId) {
-        return jdbcTemplate.query(
-            """
-            SELECT match_card_id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CENTER'
-            ORDER BY id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("match_card_id") : null,
-            matchId,
-            userId
-        );
-    }
-
-    private StartedMatchContext createReadyMatch(String hostPrefix, String guestPrefix) {
-        User host = createUser(hostPrefix);
-        User guest = createUser(guestPrefix);
-        deckService.setupQuickDeck(host.getId());
-        deckService.setupQuickDeck(guest.getId());
-
-        LobbyMatch created = lobbyMatchService.createMatch(host.getId());
-        lobbyMatchService.joinMatch(created.getRoomCode(), guest.getId());
-        lobbyMatchService.setReady(created.getId(), host.getId(), true);
-        lobbyMatchService.setReady(created.getId(), guest.getId(), true);
-        return new StartedMatchContext(created.getId(), host.getId(), guest.getId());
-    }
-
-    private User createUser(String prefix) {
-        User user = new User();
-        String unique = prefix + "_" + System.nanoTime();
-        user.setLineUserId(unique);
-        user.setDisplayName(unique);
-        user.setAvatarUrl("https://example.com/" + unique + ".png");
-        user.setCreatedAt(LocalDateTime.now());
-        user.setUpdatedAt(LocalDateTime.now());
-        return userRepository.save(user);
-    }
-
     private Long findMemberCardFromHand(Long matchId, Long userId) {
-        return jdbcTemplate.query(
-            """
-            SELECT mc.id
-            FROM match_cards mc
-            JOIN cards c ON c.card_id = mc.card_id
-            JOIN member_cards m ON m.card_id = c.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.zone = 'HAND'
-              AND c.card_type = 'MEMBER'
-              AND UPPER(COALESCE(m.level_type, '')) = 'DEBUT'
-            ORDER BY mc.order_index, mc.id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId
-        );
-    }
-
-    private Long findDebutMemberCardFromHand(Long matchId, Long userId) {
         return jdbcTemplate.query(
             """
             SELECT mc.id
@@ -34111,7 +33922,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         int hp,
         String mainColor
     ) {
-        return createMemberCardDefinition(prefix, displayName, levelType, hp, mainColor, null);
+        return createGeneratedMemberCardDefinition(prefix, displayName, levelType, hp, mainColor);
     }
 
     private String createMemberCardDefinition(
@@ -34122,29 +33933,7 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         String mainColor,
         String passiveEffectJson
     ) {
-        String cardId = prefix + "_" + System.nanoTime();
-        jdbcTemplate.update(
-            """
-            INSERT INTO cards (card_id, name, card_type, created_at, updated_at)
-            VALUES (?, ?, 'MEMBER', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            cardId,
-            displayName
-        );
-        jdbcTemplate.update(
-            """
-            INSERT INTO member_cards (
-                card_id, hp, level_type, main_color, sub_color, bloom_level, passive_effect_json, trigger_condition, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, NULL, ?, CAST(? AS jsonb), NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            cardId,
-            hp,
-            levelType,
-            mainColor,
-            bloomLevelOf(levelType),
-            passiveEffectJson == null ? "null" : passiveEffectJson
-        );
-        return cardId;
+        return createGeneratedMemberCardDefinition(prefix, displayName, levelType, hp, mainColor, passiveEffectJson);
     }
 
     private Long insertCardIntoHand(Long matchId, Long ownerUserId, String cardId) {
@@ -34226,102 +34015,6 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             matchId,
             ownerUserId,
             cardId
-        );
-    }
-
-    private Long createStageHolomemWithSingleCard(
-        Long matchId,
-        Long ownerUserId,
-        String cardId,
-        String zone,
-        String levelType,
-        int enteredTurnNumber
-    ) {
-        jdbcTemplate.update(
-            """
-            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
-            VALUES (?, ?, ?, 'STAGE', NULL, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            matchId,
-            ownerUserId,
-            cardId
-        );
-        Long cardInstanceId = jdbcTemplate.queryForObject(
-            """
-            SELECT id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND card_id = ?
-              AND zone = 'STAGE'
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            Long.class,
-            matchId,
-            ownerUserId,
-            cardId
-        );
-        Long holomemId = jdbcTemplate.query(
-            """
-            INSERT INTO match_holomems (
-                match_id,
-                owner_user_id,
-                match_card_id,
-                card_id,
-                zone,
-                is_rested,
-                is_face_down,
-                damage_taken,
-                current_level,
-                entered_turn_number
-            ) VALUES (?, ?, ?, ?, ?, FALSE, FALSE, 0, ?, ?)
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            ownerUserId,
-            cardInstanceId,
-            cardId,
-            zone,
-            normalizeHolomemLevel(levelType),
-            enteredTurnNumber
-        );
-        jdbcTemplate.update(
-            """
-            INSERT INTO match_holomem_stack_cards (match_holomem_id, match_card_id, stack_order)
-            VALUES (?, ?, 1)
-            """,
-            holomemId,
-            cardInstanceId
-        );
-        return cardInstanceId;
-    }
-
-    /**
-     * 依 match card instance 反查目前場上的 Holomem id。
-     *
-     * <p>測試常需要同時操作：
-     *
-     * <p>- `match_cards.id`：大多數 action request 都吃 card instance id
-     * <p>- `match_holomems.id`：像直接附著 Cheer、查 damage_taken 這類底層狀態會用 holomem id
-     *
-     * <p>把這層轉換抽成 helper，能讓測試描述更專注在規則本身，而不是每次都重寫相同查詢。
-     */
-    private Long loadHolomemIdByCardInstanceId(Long matchId, Long ownerUserId, Long cardInstanceId) {
-        return jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND match_card_id = ?
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            ownerUserId,
-            cardInstanceId
         );
     }
 
@@ -34489,77 +34182,6 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
                 );
             }
         }
-    }
-
-    /**
-     * 建立測試用 Cheer 卡並直接放入指定區域。
-     *
-     * 這個 helper 主要用在驗證「效果必須從哪個來源區取 Cheer」。
-     * 因此不附著到 Holomem，只建立 match_cards 的區域狀態。
-     */
-    private Long insertCheerCardIntoZone(Long matchId, Long userId, String color, String zone) {
-        String normalizedColor = normalizeCheerColorForTest(color);
-        String normalizedZone = zone == null ? "CHEER_DECK" : zone.trim().toUpperCase();
-        Integer nextOrder = jdbcTemplate.queryForObject(
-            """
-            SELECT COALESCE(MAX(order_index), 0) + 1
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = ?
-            """,
-            Integer.class,
-            matchId,
-            userId,
-            normalizedZone
-        );
-
-        String cheerCardId = "TCHEER_ZONE_" + normalizedColor + "_" + normalizedZone + "_" + System.nanoTime();
-        jdbcTemplate.update(
-            """
-            INSERT INTO cards (card_id, name, card_type, created_at, updated_at)
-            VALUES (?, ?, 'CHEER', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            cheerCardId,
-            "測試區域 Cheer " + normalizedColor
-        );
-        jdbcTemplate.update(
-            """
-            INSERT INTO cheer_cards (card_id, color, created_at, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            cheerCardId,
-            normalizedColor
-        );
-        jdbcTemplate.update(
-            """
-            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            matchId,
-            userId,
-            cheerCardId,
-            normalizedZone,
-            nextOrder == null ? 1 : nextOrder,
-            "CHEER_DECK".equals(normalizedZone)
-        );
-        return jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND card_id = ?
-              AND zone = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            cheerCardId,
-            normalizedZone
-        );
     }
 
     /**
@@ -34751,59 +34373,6 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         assertThat(actual).isEqualTo(expected);
     }
 
-    private void ensureOpeningHandContainsDebut(Long matchId, Long userId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_cards mc
-            JOIN member_cards m ON m.card_id = mc.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.zone = 'HAND'
-              AND m.level_type = 'DEBUT'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        if (count != null && count > 0) {
-            return;
-        }
-        String debutCardId = findMemberCardIdByLevel("DEBUT");
-        Long targetCardInstanceId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'HAND'
-            ORDER BY order_index NULLS LAST, id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId
-        );
-        if (targetCardInstanceId == null) {
-            return;
-        }
-        jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET card_id = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'HAND'
-            """,
-            debutCardId,
-            targetCardInstanceId,
-            matchId,
-            userId
-        );
-    }
-
     private void replaceZoneCardsCardId(Long matchId, Long userId, String zone, String cardId) {
         jdbcTemplate.update(
             """
@@ -34819,31 +34388,6 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             userId,
             zone
         );
-    }
-
-    private String findMemberCardIdByLevel(String levelType) {
-        return jdbcTemplate.queryForObject(
-            """
-            SELECT m.card_id
-            FROM member_cards m
-            WHERE m.level_type = ?
-            ORDER BY m.card_id
-            LIMIT 1
-            """,
-            String.class,
-            levelType
-        );
-    }
-
-    private int countZone(Long matchId, Long userId, String zone) {
-        Integer value = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM match_cards WHERE match_id = ? AND owner_user_id = ? AND zone = ?",
-            Integer.class,
-            matchId,
-            userId,
-            zone
-        );
-        return value == null ? 0 : value;
     }
 
     /**
@@ -34938,15 +34482,6 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
             return rawLevel;
         }
         return "DEBUT";
-    }
-
-    private int bloomLevelOf(String levelType) {
-        return switch (levelType) {
-            case "FIRST" -> 1;
-            case "SECOND" -> 2;
-            case "BUZZ" -> 3;
-            default -> 0;
-        };
     }
 
     private Long insertSupportCardIntoHand(
@@ -35153,6 +34688,4 @@ class MatchActionServiceIntegrationTest extends AbstractPostgresIntegrationTest 
         );
     }
 
-    private record StartedMatchContext(Long matchId, Long hostId, Long guestId) {
-    }
 }

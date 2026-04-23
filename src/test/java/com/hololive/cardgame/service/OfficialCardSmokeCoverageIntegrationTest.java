@@ -3,36 +3,23 @@ package com.hololive.cardgame.service;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.hololive.cardgame.dto.AttackArtActionRequest;
-import com.hololive.cardgame.dto.MulliganActionRequest;
 import com.hololive.cardgame.dto.PlaySupportActionRequest;
-import com.hololive.cardgame.dto.PlayToStageActionRequest;
 import com.hololive.cardgame.dto.ResolveDecisionRequest;
-import com.hololive.cardgame.entity.User;
 import com.hololive.cardgame.error.GameErrorCode;
 import com.hololive.cardgame.error.GameRuleException;
-import com.hololive.cardgame.model.LobbyMatch;
-import com.hololive.cardgame.repository.UserRepository;
-import com.hololive.cardgame.support.AbstractPostgresIntegrationTest;
-import jakarta.persistence.EntityManager;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 @SpringBootTest
 @Transactional
-class OfficialCardSmokeCoverageIntegrationTest extends AbstractPostgresIntegrationTest {
+class OfficialCardSmokeCoverageIntegrationTest extends MatchIntegrationTestSupport {
 
     private static final Pattern ATTACHED_SUPPORT_HP_SMOKE_PATTERN = Pattern.compile(
         "この(?:マスコット|ツール|ファン)が付いているホロメンのHP\\s*([+＋−-]\\s*\\d+)"
@@ -43,35 +30,6 @@ class OfficialCardSmokeCoverageIntegrationTest extends AbstractPostgresIntegrati
     private static final Pattern ATTACHED_SUPPORT_DAMAGE_REDUCTION_SMOKE_PATTERN = Pattern.compile(
         "受けるダメージ\\s*[−-]\\s*(\\d+)"
     );
-
-    @Autowired
-    private LobbyMatchService lobbyMatchService;
-
-    @Autowired
-    private MatchActionService matchActionService;
-
-    @Autowired
-    private MatchEffectService matchEffectService;
-
-    @Autowired
-    private DeckService deckService;
-
-    @Autowired
-    private UserRepository userRepository;
-
-    @Autowired
-    private JdbcTemplate jdbcTemplate;
-
-    @Autowired
-    private EntityManager entityManager;
-
-    @MockBean
-    private DiceService diceService;
-
-    @BeforeEach
-    void setupDiceRoll() {
-        Mockito.when(diceService.rollD6()).thenReturn(6);
-    }
 
     @Test
     void officialNonAttachableSupportCardsShouldRemainEffectEngineSmokeCovered() {
@@ -1279,126 +1237,8 @@ class OfficialCardSmokeCoverageIntegrationTest extends AbstractPostgresIntegrati
         );
     }
 
-    private StartedMatchContext createStartedMatch(String hostPrefix, String guestPrefix) {
-        StartedMatchContext context = createReadyMatch(hostPrefix, guestPrefix);
-        lobbyMatchService.startMatch(context.matchId(), context.hostId());
-        ensureOpeningHandContainsDebut(context.matchId(), context.hostId());
-        ensureOpeningHandContainsDebut(context.matchId(), context.guestId());
-
-        MulliganActionRequest hostMulligan = new MulliganActionRequest();
-        hostMulligan.setUseMulligan(false);
-        matchActionService.mulligan(context.matchId(), context.hostId(), hostMulligan);
-
-        MulliganActionRequest guestMulligan = new MulliganActionRequest();
-        guestMulligan.setUseMulligan(false);
-        matchActionService.mulligan(context.matchId(), context.guestId(), guestMulligan);
-
-        playOpeningCenter(context.matchId(), context.hostId());
-        matchActionService.advancePhase(context.matchId(), context.hostId());
-        playOpeningCenter(context.matchId(), context.guestId());
-        matchActionService.advancePhase(context.matchId(), context.guestId());
-        resolvePendingInteractionIfExists(context.matchId(), context.hostId(), "LIVE_START");
-        executeRequiredTurnActions(
-            context.matchId(),
-            context.hostId(),
-            loadFirstCenterCardInstanceId(context.matchId(), context.hostId())
-        );
-
-        return context;
-    }
-
-    private StartedMatchContext createReadyMatch(String hostPrefix, String guestPrefix) {
-        User host = createUser(hostPrefix);
-        User guest = createUser(guestPrefix);
-        deckService.setupQuickDeck(host.getId());
-        deckService.setupQuickDeck(guest.getId());
-
-        LobbyMatch created = lobbyMatchService.createMatch(host.getId());
-        lobbyMatchService.joinMatch(created.getRoomCode(), guest.getId());
-        lobbyMatchService.setReady(created.getId(), host.getId(), true);
-        lobbyMatchService.setReady(created.getId(), guest.getId(), true);
-        return new StartedMatchContext(created.getId(), host.getId(), guest.getId());
-    }
-
-    private User createUser(String prefix) {
-        User user = new User();
-        String unique = prefix + "_" + System.nanoTime();
-        user.setLineUserId(unique);
-        user.setDisplayName(unique);
-        user.setAvatarUrl("https://example.com/" + unique + ".png");
-        user.setCreatedAt(LocalDateTime.now());
-        user.setUpdatedAt(LocalDateTime.now());
-        return userRepository.save(user);
-    }
-
-    private Long playOpeningCenter(Long matchId, Long userId) {
-        Long memberCardInstanceId = findDebutMemberCardFromHand(matchId, userId);
-        assertThat(memberCardInstanceId).isNotNull();
-
-        PlayToStageActionRequest play = new PlayToStageActionRequest();
-        play.setCardInstanceId(memberCardInstanceId);
-        play.setTargetZone("CENTER");
-        matchActionService.playToStage(matchId, userId, play);
-        return memberCardInstanceId;
-    }
-
-    private Long findDebutMemberCardFromHand(Long matchId, Long userId) {
-        return jdbcTemplate.query(
-            """
-            SELECT mc.id
-            FROM match_cards mc
-            JOIN member_cards m ON m.card_id = mc.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.zone = 'HAND'
-              AND m.level_type = 'DEBUT'
-            ORDER BY mc.order_index, mc.id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId
-        );
-    }
-
-    private void ensureOpeningHandContainsDebut(Long matchId, Long userId) {
-        if (findDebutMemberCardFromHand(matchId, userId) != null) {
-            return;
-        }
-        String debutCardId = findMemberCardIdByLevel("DEBUT");
-        Long targetCardInstanceId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'HAND'
-            ORDER BY order_index NULLS LAST, id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId
-        );
-        assertThat(targetCardInstanceId).isNotNull();
-        jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET card_id = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'HAND'
-            """,
-            debutCardId,
-            targetCardInstanceId,
-            matchId,
-            userId
-        );
-    }
-
-    private void executeRequiredTurnActions(Long matchId, Long userId, Long sendCheerTargetCardInstanceId) {
+    @Override
+    protected void executeRequiredTurnActions(Long matchId, Long userId, Long sendCheerTargetCardInstanceId) {
         resolvePendingInteractionIfExists(matchId, userId, "TURN_START");
         try {
             matchActionService.drawTurn(matchId, userId);
@@ -1434,35 +1274,6 @@ class OfficialCardSmokeCoverageIntegrationTest extends AbstractPostgresIntegrati
         request.setDecisionId(sendCheerDecisionId);
         request.setSelectedCardInstanceIds(List.of(sendCheerTargetCardInstanceId));
         matchActionService.resolveDecision(matchId, userId, request);
-    }
-
-    private void resolvePendingInteractionIfExists(Long matchId, Long userId, String decisionType) {
-        Long decisionId = findPendingDecision(matchId, userId, decisionType);
-        if (decisionId == null) {
-            return;
-        }
-        ResolveDecisionRequest request = new ResolveDecisionRequest();
-        request.setDecisionId(decisionId);
-        matchActionService.resolveDecision(matchId, userId, request);
-    }
-
-    private Long findPendingDecision(Long matchId, Long userId, String decisionType) {
-        return jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = 'PENDING'
-              AND decision_type = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            decisionType
-        );
     }
 
     private void ensureSmokeStageCoverage(Long matchId, Long hostId, Long guestId) {
@@ -1914,42 +1725,6 @@ class OfficialCardSmokeCoverageIntegrationTest extends AbstractPostgresIntegrati
         }
     }
 
-    private Long createStageHolomemWithSingleCard(Long matchId, Long ownerUserId, String cardId, String zone) {
-        Long cardInstanceId = insertCardIntoZone(matchId, ownerUserId, cardId, "STAGE", false);
-        Long holomemId = jdbcTemplate.query(
-            """
-            INSERT INTO match_holomems (
-                match_id,
-                owner_user_id,
-                match_card_id,
-                card_id,
-                zone,
-                is_rested,
-                is_face_down,
-                damage_taken,
-                current_level,
-                entered_turn_number
-            ) VALUES (?, ?, ?, ?, ?, FALSE, FALSE, 0, 'DEBUT', 0)
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            ownerUserId,
-            cardInstanceId,
-            cardId,
-            zone
-        );
-        jdbcTemplate.update(
-            """
-            INSERT INTO match_holomem_stack_cards (match_holomem_id, match_card_id, stack_order)
-            VALUES (?, ?, 1)
-            """,
-            holomemId,
-            cardInstanceId
-        );
-        return cardInstanceId;
-    }
-
     private String createMemberCardDefinition(
         String cardId,
         String displayName,
@@ -1957,101 +1732,7 @@ class OfficialCardSmokeCoverageIntegrationTest extends AbstractPostgresIntegrati
         int hp,
         String mainColor
     ) {
-        jdbcTemplate.update(
-            """
-            INSERT INTO cards (card_id, name, card_type, created_at, updated_at)
-            VALUES (?, ?, 'MEMBER', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT (card_id) DO NOTHING
-            """,
-            cardId,
-            displayName
-        );
-        jdbcTemplate.update(
-            """
-            INSERT INTO member_cards (
-                card_id, hp, level_type, main_color, sub_color, bloom_level, passive_effect_json, trigger_condition, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, NULL, 0, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT (card_id) DO NOTHING
-            """,
-            cardId,
-            hp,
-            levelType,
-            mainColor
-        );
-        return cardId;
-    }
-
-    private Long insertCardIntoZone(Long matchId, Long ownerUserId, String cardId, String zone, boolean faceDown) {
-        int nextOrder = jdbcTemplate.queryForObject(
-            """
-            SELECT COALESCE(MAX(order_index), 0) + 1
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = ?
-            """,
-            Integer.class,
-            matchId,
-            ownerUserId,
-            zone
-        );
-        jdbcTemplate.update(
-            """
-            INSERT INTO match_cards (match_id, owner_user_id, card_id, zone, order_index, is_face_down, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            matchId,
-            ownerUserId,
-            cardId,
-            zone,
-            nextOrder,
-            faceDown
-        );
-        return jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND card_id = ?
-              AND zone = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            ownerUserId,
-            cardId,
-            zone
-        );
-    }
-
-    private Long insertCheerCardIntoZone(
-        Long matchId,
-        Long userId,
-        String color,
-        String zone,
-        int index,
-        int sequence
-    ) {
-        String cheerCardId = "TSMOKE_CHEER_" + zone + "_" + index + "_" + sequence + "_" + System.nanoTime();
-        jdbcTemplate.update(
-            """
-            INSERT INTO cards (card_id, name, card_type, created_at, updated_at)
-            VALUES (?, ?, 'CHEER', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            cheerCardId,
-            "Smoke cheer " + zone
-        );
-        jdbcTemplate.update(
-            """
-            INSERT INTO cheer_cards (card_id, color, created_at, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            cheerCardId,
-            color
-        );
-        return insertCardIntoZone(matchId, userId, cheerCardId, zone, "CHEER_DECK".equals(zone));
+        return createFixedMemberCardDefinition(cardId, displayName, levelType, hp, mainColor);
     }
 
     private void cleanupSupportSmokeAttachment(Long supportCardInstanceId) {
@@ -2256,23 +1937,6 @@ class OfficialCardSmokeCoverageIntegrationTest extends AbstractPostgresIntegrati
         return opponentTargetCardInstanceId;
     }
 
-    private Long loadHolomemIdByCardInstanceId(Long matchId, Long ownerUserId, Long cardInstanceId) {
-        return jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND match_card_id = ?
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            ownerUserId,
-            cardInstanceId
-        );
-    }
-
     private void attachFullColorSmokeCheerSet(Long matchId, Long ownerUserId, Long matchHolomemId) {
         List<String> colors = List.of("WHITE", "RED", "BLUE", "GREEN", "PURPLE", "YELLOW");
         for (String color : colors) {
@@ -2313,23 +1977,6 @@ class OfficialCardSmokeCoverageIntegrationTest extends AbstractPostgresIntegrati
         );
     }
 
-    private Long loadFirstCenterCardInstanceId(Long matchId, Long userId) {
-        return jdbcTemplate.query(
-            """
-            SELECT match_card_id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CENTER'
-            ORDER BY id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("match_card_id") : null,
-            matchId,
-            userId
-        );
-    }
-
     private Long loadFirstCollabCardInstanceId(Long matchId, Long userId) {
         return jdbcTemplate.query(
             """
@@ -2339,28 +1986,6 @@ class OfficialCardSmokeCoverageIntegrationTest extends AbstractPostgresIntegrati
               AND owner_user_id = ?
               AND zone = 'COLLAB'
             ORDER BY id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("match_card_id") : null,
-            matchId,
-            userId
-        );
-    }
-
-    private Long loadFirstStageCardInstanceId(Long matchId, Long userId) {
-        return jdbcTemplate.query(
-            """
-            SELECT match_card_id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('CENTER', 'COLLAB', 'BACK')
-            ORDER BY CASE zone
-                       WHEN 'CENTER' THEN 0
-                       WHEN 'COLLAB' THEN 1
-                       ELSE 2
-                     END,
-                     id
             LIMIT 1
             """,
             rs -> rs.next() ? rs.getLong("match_card_id") : null,
@@ -2386,33 +2011,6 @@ class OfficialCardSmokeCoverageIntegrationTest extends AbstractPostgresIntegrati
             zone
         );
     }
-
-    private String findMemberCardIdByLevel(String levelType) {
-        return jdbcTemplate.queryForObject(
-            """
-            SELECT m.card_id
-            FROM member_cards m
-            WHERE m.level_type = ?
-            ORDER BY m.card_id
-            LIMIT 1
-            """,
-            String.class,
-            levelType
-        );
-    }
-
-    private int countZone(Long matchId, Long userId, String zone) {
-        Integer value = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM match_cards WHERE match_id = ? AND owner_user_id = ? AND zone = ?",
-            Integer.class,
-            matchId,
-            userId,
-            zone
-        );
-        return value == null ? 0 : value;
-    }
-
-    private record StartedMatchContext(Long matchId, Long hostId, Long guestId) {}
 
     private record SupportSmokeCard(
         String cardId,
