@@ -1,0 +1,37 @@
+{
+  "rules": [
+    {
+      "id": "support-non-attachable-effect-engine-smoke",
+      "description": "Runs every official non-attachable SUPPORT card through MatchEffectService.applySupportEffect on a stable board and fails on unsupported effect types. This is broad smoke coverage, not per-card rules proof.",
+      "cardType": "SUPPORT",
+      "sourcesAny": ["SUPPORT_CARD"],
+      "excludeTagsAny": ["MASCOT_SUPPORT", "TOOL_SUPPORT", "FAN_SUPPORT"]
+    },
+    {
+      "id": "oshi-skill-effect-engine-smoke",
+      "description": "Runs every official OSHI skill row through MatchEffectService.applySupportEffect on a stable board and fails on unsupported effect types. This covers skill parser/engine compatibility, not full timing legality.",
+      "cardType": "OSHI",
+      "sourcesAny": ["OSHI_SKILL"]
+    },
+    {
+      "id": "support-attachable-play-smoke",
+      "description": "Plays every official attachable SUPPORT card, including Mascot, Tool, and Fan, from hand through MatchActionService.playSupport and verifies the card attaches to a Holomem.",
+      "cardType": "SUPPORT",
+      "sourcesAny": ["SUPPORT_CARD"],
+      "tagsAny": ["MASCOT_SUPPORT", "TOOL_SUPPORT", "FAN_SUPPORT"]
+    },
+    {
+      "id": "member-primary-art-attack-smoke",
+      "description": "Runs every official MEMBER card through the normal MatchActionService.attackArt path using its primary damage art on a stable board. This covers primary art attack compatibility, not every alternate art row.",
+      "cardType": "MEMBER",
+      "sourcesAny": ["MEMBER_ART"]
+    },
+    {
+      "id": "member-passive-gift-effect-smoke",
+      "description": "Runs every official MEMBER card with Gift text through MatchEffectService.applyStoredGiftTriggeredEffect to smoke-test Gift parser/executor compatibility.",
+      "cardType": "MEMBER",
+      "sourcesAny": ["PASSIVE_TEXT"],
+      "tagsAny": ["PASSIVE_GIFT"]
+    }
+  ]
+}

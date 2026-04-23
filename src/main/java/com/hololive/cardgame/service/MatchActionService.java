@@ -85,6 +85,7 @@ public class MatchActionService {
     private final MatchEffectService matchEffectService;
     private final MatchEventHookService matchEventHookService;
     private final GameActionExecutor gameActionExecutor;
+    private final DiceService diceService;
     private final SecureRandom random = new SecureRandom();
 
     /**
@@ -99,7 +100,8 @@ public class MatchActionService {
         ObjectMapper objectMapper,
         MatchEffectService matchEffectService,
         MatchEventHookService matchEventHookService,
-        GameActionExecutor gameActionExecutor
+        GameActionExecutor gameActionExecutor,
+        DiceService diceService
     ) {
         this.matchRepository = matchRepository;
         this.matchPlayerRepository = matchPlayerRepository;
@@ -109,6 +111,7 @@ public class MatchActionService {
         this.matchEffectService = matchEffectService;
         this.matchEventHookService = matchEventHookService;
         this.gameActionExecutor = gameActionExecutor;
+        this.diceService = diceService;
     }
 
     /**
@@ -2495,8 +2498,9 @@ public class MatchActionService {
 
         Map<String, Object> attacker = jdbcTemplate.query(
             """
-            SELECT h.id, h.zone, h.is_rested, h.card_id, h.current_level
+            SELECT h.id, h.zone, h.is_rested, h.card_id, h.current_level, m.main_color
             FROM match_holomems h
+            JOIN member_cards m ON m.card_id = h.card_id
             WHERE h.match_id = ?
               AND h.owner_user_id = ?
               AND h.match_card_id = ?
@@ -2511,6 +2515,7 @@ public class MatchActionService {
                 row.put("is_rested", rs.getObject("is_rested"));
                 row.put("card_id", rs.getString("card_id"));
                 row.put("current_level", rs.getString("current_level"));
+                row.put("main_color", rs.getString("main_color"));
                 return row;
             },
             matchId,
@@ -2612,6 +2617,7 @@ public class MatchActionService {
         boolean hasOpponentHolomem = opponentHolomemCount != null && opponentHolomemCount > 0;
         TargetHolomem targetHolomem = null;
         Map<String, Object> defenderSelfDownedHolderSnapshot = null;
+        List<Map<String, Object>> defenderSelfDownedFanSupportSnapshots = List.of();
         boolean passiveGiftTargetRestrictionToCollab = false;
         boolean passiveGiftTargetRestrictionApplied = false;
         if (hasOpponentHolomem) {
@@ -2634,6 +2640,11 @@ public class MatchActionService {
                 passiveGiftTargetRestrictionApplied = true;
             }
             defenderSelfDownedHolderSnapshot = matchEffectService.loadGiftHolderSnapshot(
+                matchId,
+                context.opponentUserId,
+                targetHolomem.holomemId()
+            );
+            defenderSelfDownedFanSupportSnapshots = loadSelfDownedFanSupportSnapshots(
                 matchId,
                 context.opponentUserId,
                 targetHolomem.holomemId()
@@ -2672,6 +2683,13 @@ public class MatchActionService {
                 normalizeLevel(asString(attacker.get("current_level")))
             )
             : 0;
+        int attachedSupportIncomingDamageReduction = hasOpponentHolomem && targetHolomem != null
+            ? matchEffectService.resolveAttachedSupportIncomingDamageReduction(
+                matchId,
+                targetHolomem.holomemId(),
+                targetHolomem.zone()
+            )
+            : 0;
         if (targetHolomem != null) {
             passiveGiftArtBonus = matchEffectService.resolvePassiveGiftArtBonus(
                 matchId,
@@ -2680,7 +2698,9 @@ public class MatchActionService {
                 targetHolomem.zone()
             );
         }
-        int incomingDamageReduction = turnIncomingDamageReduction + passiveGiftIncomingDamageReduction;
+        int incomingDamageReduction = turnIncomingDamageReduction
+            + passiveGiftIncomingDamageReduction
+            + attachedSupportIncomingDamageReduction;
         int totalDamage = Math.max(
             baseDamage + attachedSupportArtBonus + artTextDamageBonus + holoxRevealArtBonus + passiveGiftArtBonus
                 + turnArtDamageModifier + criticalBonus - incomingDamageReduction,
@@ -2741,6 +2761,33 @@ public class MatchActionService {
             artSummary.put("lifeReduced", true);
             artSummary.put("lostLifeCardInstanceId", lostLifeCardInstanceId);
         }
+        Map<String, Object> officialCardArtExtraSummary = applyOfficialCardArtExtraEffects(
+            matchId,
+            userId,
+            context.opponentUserId,
+            asLong(attacker.get("id")),
+            attackerCardId,
+            asString(art.get("name"))
+        );
+        List<Map<String, Object>> officialCardArtExtraEffects = extractExecutedEffectSummaries(officialCardArtExtraSummary);
+        Map<String, Object> officialOshiArtReactiveSummary = applyOfficialOshiArtReactiveEffects(
+            matchId,
+            userId,
+            context.opponentUserId,
+            context.turnNumber,
+            asLong(attacker.get("id")),
+            effectiveTargetCardInstanceId,
+            asString(attacker.get("main_color")),
+            targetHolomem,
+            artSummary,
+            officialCardArtExtraSummary
+        );
+        List<Map<String, Object>> officialOshiArtReactiveEffects = extractExecutedEffectSummaries(officialOshiArtReactiveSummary);
+        Map<String, Object> attackSummaryForTriggeredChecks = mergeEffectSummaryForChecks(
+            artSummary,
+            mergeEffectLists(officialCardArtExtraEffects, officialOshiArtReactiveEffects)
+        );
+        Map<String, Object> officialOshiSelfDownedSummary = Map.of();
         List<Map<String, Object>> giftTriggeredEffects = new ArrayList<>();
         giftTriggeredEffects.addAll(
             matchEffectService.previewGiftTriggeredEffectsOnArt(
@@ -2752,7 +2799,7 @@ public class MatchActionService {
                 asString(art.get("name"))
             )
         );
-        if (hasOpponentHolomem && hasHolomemDowned(artSummary)) {
+        if (hasOpponentHolomem && hasHolomemDowned(attackSummaryForTriggeredChecks)) {
             giftTriggeredEffects.addAll(
                 matchEffectService.previewGiftTriggeredEffectsOnDownedOpponent(
                     matchId,
@@ -2763,7 +2810,7 @@ public class MatchActionService {
                 )
             );
         }
-        Map<String, Object> artDownTriggeredEffectSummary = hasOpponentHolomem && hasHolomemDowned(artSummary)
+        Map<String, Object> artDownTriggeredEffectSummary = hasOpponentHolomem && hasHolomemDowned(attackSummaryForTriggeredChecks)
             ? matchEffectService.applyArtDownTriggeredEffects(
                 matchId,
                 userId,
@@ -2781,7 +2828,16 @@ public class MatchActionService {
         List<Map<String, Object>> defenderGiftTriggeredEffects = new ArrayList<>();
         String downedTargetCardId = targetHolomem == null ? null : targetHolomem.cardId();
         String downedTargetZone = targetHolomem == null ? null : targetHolomem.zone();
-        if (hasOpponentHolomem && hasHolomemDowned(artSummary)) {
+        if (hasOpponentHolomem && hasHolomemDowned(attackSummaryForTriggeredChecks)) {
+            officialOshiSelfDownedSummary = applyOfficialOshiSelfDownedEffects(
+                matchId,
+                context.opponentUserId,
+                userId,
+                context.turnNumber,
+                targetHolomem,
+                defenderSelfDownedHolderSnapshot,
+                artSummary
+            );
             defenderGiftTriggeredEffects.addAll(
                 matchEffectService.previewGiftTriggeredEffectsOnSelfDowned(
                     matchId,
@@ -2799,6 +2855,14 @@ public class MatchActionService {
                     effectiveTargetCardInstanceId,
                     downedTargetZone,
                     context.turnNumber
+                )
+            );
+            defenderGiftTriggeredEffects.addAll(
+                previewHbp01124FanTriggeredEffectsOnSelfDowned(
+                    effectiveTargetCardInstanceId,
+                    downedTargetZone,
+                    defenderSelfDownedHolderSnapshot,
+                    defenderSelfDownedFanSupportSnapshots
                 )
             );
         }
@@ -2907,10 +2971,20 @@ public class MatchActionService {
         payload.put("criticalApplied", criticalApplied);
         payload.put("turnIncomingDamageReduction", turnIncomingDamageReduction);
         payload.put("passiveGiftIncomingDamageReduction", passiveGiftIncomingDamageReduction);
+        payload.put("attachedSupportIncomingDamageReduction", attachedSupportIncomingDamageReduction);
         payload.put("incomingDamageReduction", incomingDamageReduction);
         payload.put("defenderDamageReceivedGift", defenderDamageReceivedGiftSummary);
         payload.put("artTotalDamage", totalDamage);
         payload.put("effect", artSummary);
+        if (!officialCardArtExtraSummary.isEmpty()) {
+            payload.put("officialCardArtExtra", officialCardArtExtraSummary);
+        }
+        if (!officialOshiArtReactiveSummary.isEmpty()) {
+            payload.put("officialOshiArtReactive", officialOshiArtReactiveSummary);
+        }
+        if (!officialOshiSelfDownedSummary.isEmpty()) {
+            payload.put("officialOshiSelfDowned", officialOshiSelfDownedSummary);
+        }
         payload.put("artDownTriggeredEffects", artDownTriggeredEffectSummary);
         payload.put("postTriggerEffects", postTriggerEffectSummary);
         payload.put("defenderGiftEffects", defenderGiftEffectSummary);
@@ -2930,6 +3004,9 @@ public class MatchActionService {
             context.turnNumber
         );
         List<Map<String, Object>> additionalEffectSummaries = new ArrayList<>();
+        additionalEffectSummaries.addAll(officialCardArtExtraEffects);
+        additionalEffectSummaries.addAll(officialOshiArtReactiveEffects);
+        additionalEffectSummaries.addAll(extractExecutedEffectSummaries(officialOshiSelfDownedSummary));
         additionalEffectSummaries.add(artDownTriggeredEffectSummary);
         if (!hbp02040LifeLoss.isEmpty()) {
             additionalEffectSummaries.add(hbp02040LifeLoss);
@@ -2951,6 +3028,1021 @@ public class MatchActionService {
             matchRepository.saveAndFlush(context.match);
         }
         enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummaryForChecks, context.turnNumber);
+    }
+
+    private Map<String, Object> applyOfficialCardArtExtraEffects(
+        Long matchId,
+        Long userId,
+        Long opponentUserId,
+        Long attackerHolomemId,
+        String attackerCardId,
+        String artName
+    ) {
+        if (matchId == null || userId == null || opponentUserId == null || attackerHolomemId == null || !StringUtils.hasText(attackerCardId)) {
+            return Map.of();
+        }
+        if ("HBP01-087".equals(attackerCardId) && StringUtils.hasText(artName) && artName.contains("雨のマントラ")) {
+            return applyHbp01087ArtRainMantra(matchId, userId, opponentUserId, attackerHolomemId);
+        }
+        if ("HBP01-088".equals(attackerCardId) && StringUtils.hasText(artName) && artName.contains("ムーン ムーン ムーナだよ")) {
+            return applyHbp01088ArtMoonMoonMoona(matchId, userId, opponentUserId);
+        }
+        return Map.of();
+    }
+
+    private Map<String, Object> applyHbp01087ArtRainMantra(
+        Long matchId,
+        Long userId,
+        Long opponentUserId,
+        Long attackerHolomemId
+    ) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("cardId", "HBP01-087");
+        summary.put("effectType", "ART_EXTRA_EFFECT");
+        summary.put("artName", "雨のマントラ");
+        Map<String, Object> archivedCheerSummary = archiveOneAttachedCheerForArtExtra(matchId, userId, attackerHolomemId);
+        summary.put("archiveAttachedCheer", archivedCheerSummary);
+        if (!toBoolean(archivedCheerSummary.get("applied"))) {
+            summary.put("applied", false);
+            summary.put("reason", "NO_ATTACHED_CHEER_TO_ARCHIVE");
+            summary.put("executedEffects", List.of());
+            return summary;
+        }
+        List<Long> opponentBackTargets = loadOpponentBackHolomemCardInstanceIds(matchId, opponentUserId);
+        summary.put("targetCount", opponentBackTargets.size());
+        if (opponentBackTargets.isEmpty()) {
+            summary.put("applied", false);
+            summary.put("reason", "NO_OPPONENT_BACK_HOLOMEM");
+            summary.put("executedEffects", List.of());
+            return summary;
+        }
+        List<Map<String, Object>> executed = new ArrayList<>();
+        String effectJson = toJson(Map.of(
+            "type", "DAMAGE",
+            "value", 20,
+            "rawText", "相手のバックホロメン全員に特殊ダメージ20を与える（ダウンしても相手のライフは減らない）。",
+            "downDoesNotReduceLife", true
+        ));
+        for (Long targetCardInstanceId : opponentBackTargets) {
+            Map<String, Object> effectSummary = matchEffectService.applySupportEffect(
+                matchId,
+                userId,
+                "DAMAGE",
+                effectJson,
+                "ENEMY",
+                List.of(),
+                targetCardInstanceId
+            );
+            executed.add(effectSummary);
+        }
+        summary.put("applied", !executed.isEmpty());
+        summary.put("executedEffects", executed);
+        return summary;
+    }
+
+    private Map<String, Object> applyHbp01088ArtMoonMoonMoona(
+        Long matchId,
+        Long userId,
+        Long opponentUserId
+    ) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("cardId", "HBP01-088");
+        summary.put("effectType", "ART_EXTRA_EFFECT");
+        summary.put("artName", "ムーン ムーン ムーナだよ！");
+        int diceRoll = diceService.rollD6();
+        boolean even = diceRoll % 2 == 0;
+        summary.put("diceRoll", diceRoll);
+        summary.put("diceEven", even);
+        if (!even) {
+            summary.put("applied", false);
+            summary.put("reason", "DICE_ODD");
+            summary.put("executedEffects", List.of());
+            return summary;
+        }
+        List<Long> opponentBackTargets = loadOpponentBackHolomemCardInstanceIds(matchId, opponentUserId);
+        summary.put("candidateTargetCount", opponentBackTargets.size());
+        if (opponentBackTargets.isEmpty()) {
+            summary.put("applied", false);
+            summary.put("reason", "NO_OPPONENT_BACK_HOLOMEM");
+            summary.put("executedEffects", List.of());
+            return summary;
+        }
+        Long targetCardInstanceId = opponentBackTargets.get(0);
+        String effectJson = toJson(Map.of(
+            "type", "DAMAGE",
+            "value", 20,
+            "rawText", "偶数の時、相手のバックホロメン1人に特殊ダメージ20を与える（ダウンしても相手のライフは減らない）。",
+            "downDoesNotReduceLife", true
+        ));
+        Map<String, Object> effectSummary = matchEffectService.applySupportEffect(
+            matchId,
+            userId,
+            "DAMAGE",
+            effectJson,
+            "ENEMY",
+            List.of(),
+            targetCardInstanceId
+        );
+        summary.put("selectedTargetCardInstanceId", targetCardInstanceId);
+        summary.put("applied", true);
+        summary.put("executedEffects", List.of(effectSummary));
+        return summary;
+    }
+
+    private List<Map<String, Object>> loadSelfDownedFanSupportSnapshots(
+        Long matchId,
+        Long ownerUserId,
+        Long holderHolomemId
+    ) {
+        if (matchId == null || ownerUserId == null || holderHolomemId == null) {
+            return List.of();
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT hs.match_card_id AS support_card_instance_id,
+                   hs.support_card_id,
+                   COALESCE(sc.effect_json ->> 'rawText', '') AS raw_text
+            FROM match_holomem_supports hs
+            JOIN support_cards sc ON sc.card_id = hs.support_card_id
+            JOIN match_cards mc ON mc.id = hs.match_card_id
+            WHERE hs.match_holomem_id = ?
+              AND hs.support_type = 'FAN'
+              AND hs.support_card_id = 'HBP01-124'
+              AND mc.match_id = ?
+              AND mc.owner_user_id = ?
+            ORDER BY hs.id
+            """,
+            (rs, rowNum) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("supportCardInstanceId", rs.getLong("support_card_instance_id"));
+                row.put("supportCardId", rs.getString("support_card_id"));
+                row.put("rawText", rs.getString("raw_text"));
+                return row;
+            },
+            holderHolomemId,
+            matchId,
+            ownerUserId
+        );
+    }
+
+    private List<Map<String, Object>> previewHbp01124FanTriggeredEffectsOnSelfDowned(
+        Long downedCardInstanceId,
+        String downedStageZone,
+        Map<String, Object> holderSnapshot,
+        List<Map<String, Object>> fanSupportSnapshots
+    ) {
+        if (holderSnapshot == null || holderSnapshot.isEmpty() || fanSupportSnapshots == null || fanSupportSnapshots.isEmpty()) {
+            return List.of();
+        }
+        Long holderHolomemId = asLong(holderSnapshot.get("holomem_id"));
+        List<Long> attachedCheerCardInstanceIds = toLongList(holderSnapshot.get("attached_cheer_card_instance_ids"));
+        List<String> attachedCheerCardIds = toStringList(holderSnapshot.get("attached_cheer_card_ids"));
+        List<Long> stackCardInstanceIds = toLongList(holderSnapshot.get("stack_card_instance_ids"));
+        List<String> stackCardIds = toStringList(holderSnapshot.get("stack_card_ids"));
+        List<Map<String, Object>> previews = new ArrayList<>();
+        for (Map<String, Object> supportSnapshot : fanSupportSnapshots) {
+            Long supportCardInstanceId = asLong(supportSnapshot.get("supportCardInstanceId"));
+            String supportCardId = asString(supportSnapshot.get("supportCardId"));
+            String rawText = asString(supportSnapshot.get("rawText"));
+            if ("HBP01-124".equals(supportCardId)) {
+                rawText = "相手のターンで、このファンが付いているホロメンがダウンした時、このファンが付いているホロメンのエール1枚を、自分の他のホロメンに付け替える。";
+            }
+            if (supportCardInstanceId == null || supportCardInstanceId <= 0 || !StringUtils.hasText(rawText)) {
+                continue;
+            }
+            Map<String, Object> preview = new LinkedHashMap<>();
+            preview.put("triggerType", "SELF_DOWNED");
+            preview.put("giftHolderHolomemId", holderHolomemId);
+            preview.put("giftHolderCardInstanceId", supportCardInstanceId);
+            preview.put("giftHolderCardId", supportCardId);
+            preview.put("giftHolderZone", normalizeZone(downedStageZone));
+            preview.put("sourceCardInstanceId", downedCardInstanceId);
+            preview.put("triggerTargetCardInstanceId", downedCardInstanceId);
+            preview.put("rawText", rawText);
+            preview.put("requestedEffects", List.of("REATTACH"));
+            preview.put("executedEffects", List.of());
+            preview.put("unsupportedEffects", List.of());
+            preview.put("skippedEffects", List.of());
+            preview.put("giftHolderAttachedCheerCardInstanceIds", attachedCheerCardInstanceIds);
+            preview.put("giftHolderAttachedCheerCardIds", attachedCheerCardIds);
+            preview.put("giftHolderStackCardInstanceIds", stackCardInstanceIds);
+            preview.put("giftHolderStackCardIds", stackCardIds);
+            previews.add(preview);
+        }
+        return previews;
+    }
+
+    private Map<String, Object> archiveOneAttachedCheerForArtExtra(
+        Long matchId,
+        Long userId,
+        Long attackerHolomemId
+    ) {
+        Map<String, Object> attachedCheer = jdbcTemplate.query(
+            """
+            SELECT mhc.id AS cheer_row_id,
+                   mhc.match_card_id,
+                   mhc.cheer_card_id
+            FROM match_holomem_cheers mhc
+            WHERE mhc.match_holomem_id = ?
+            ORDER BY mhc.id
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("cheer_row_id", rs.getLong("cheer_row_id"));
+                row.put("match_card_id", rs.getLong("match_card_id"));
+                row.put("cheer_card_id", rs.getString("cheer_card_id"));
+                return row;
+            },
+            attackerHolomemId
+        );
+        Map<String, Object> summary = new LinkedHashMap<>();
+        if (attachedCheer == null) {
+            summary.put("applied", false);
+            summary.put("reason", "NO_ATTACHED_CHEER");
+            return summary;
+        }
+        Long cheerRowId = asLong(attachedCheer.get("cheer_row_id"));
+        Long cheerCardInstanceId = asLong(attachedCheer.get("match_card_id"));
+        String cheerCardId = asString(attachedCheer.get("cheer_card_id"));
+        if (cheerRowId == null || !StringUtils.hasText(cheerCardId)) {
+            summary.put("applied", false);
+            summary.put("reason", "INVALID_ATTACHED_CHEER");
+            return summary;
+        }
+        int deleted = jdbcTemplate.update(
+            "DELETE FROM match_holomem_cheers WHERE id = ? AND match_holomem_id = ?",
+            cheerRowId,
+            attackerHolomemId
+        );
+        if (deleted != 1) {
+            summary.put("applied", false);
+            summary.put("reason", "DELETE_ATTACHED_CHEER_FAILED");
+            return summary;
+        }
+        Long archivedCardInstanceId = archiveStageCheerCard(matchId, userId, cheerCardInstanceId, cheerCardId);
+        summary.put("applied", archivedCardInstanceId != null);
+        summary.put("cheerCardId", cheerCardId);
+        summary.put("archivedCardInstanceId", archivedCardInstanceId);
+        if (archivedCardInstanceId == null) {
+            summary.put("reason", "ARCHIVE_ATTACHED_CHEER_FAILED");
+        }
+        return summary;
+    }
+
+    private List<Long> loadOpponentBackHolomemCardInstanceIds(Long matchId, Long opponentUserId) {
+        if (matchId == null || opponentUserId == null) {
+            return List.of();
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT match_card_id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'BACK'
+            ORDER BY id
+            """,
+            (rs, rowNum) -> rs.getLong("match_card_id"),
+            matchId,
+            opponentUserId
+        );
+    }
+
+    private List<Map<String, Object>> extractExecutedEffectSummaries(Map<String, Object> effectSummary) {
+        if (effectSummary == null || effectSummary.isEmpty()) {
+            return List.of();
+        }
+        Object executed = effectSummary.get("executedEffects");
+        if (!(executed instanceof List<?> list) || list.isEmpty()) {
+            return List.of();
+        }
+        List<Map<String, Object>> summaries = new ArrayList<>();
+        for (Object effect : list) {
+            if (effect instanceof Map<?, ?> effectMap) {
+                Map<String, Object> casted = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> entry : effectMap.entrySet()) {
+                    if (entry.getKey() == null) {
+                        continue;
+                    }
+                    casted.put(entry.getKey().toString(), entry.getValue());
+                }
+                summaries.add(casted);
+            }
+        }
+        return summaries;
+    }
+
+    private List<Map<String, Object>> mergeEffectLists(
+        List<Map<String, Object>> first,
+        List<Map<String, Object>> second
+    ) {
+        if ((first == null || first.isEmpty()) && (second == null || second.isEmpty())) {
+            return List.of();
+        }
+        List<Map<String, Object>> merged = new ArrayList<>();
+        if (first != null) {
+            merged.addAll(first);
+        }
+        if (second != null) {
+            merged.addAll(second);
+        }
+        return merged;
+    }
+
+    private Map<String, Object> applyOfficialOshiArtReactiveEffects(
+        Long matchId,
+        Long userId,
+        Long opponentUserId,
+        int turnNumber,
+        Long attackerHolomemId,
+        Long targetCardInstanceId,
+        String attackerMainColor,
+        TargetHolomem targetHolomem,
+        Map<String, Object> artSummary,
+        Map<String, Object> officialCardArtExtraSummary
+    ) {
+        String oshiCardId = loadPlayerOshiCardId(matchId, userId);
+        if (!StringUtils.hasText(oshiCardId)) {
+            return Map.of();
+        }
+        List<Map<String, Object>> executed = new ArrayList<>();
+        if ("HBP01-007".equals(oshiCardId)) {
+            Map<String, Object> hbp01007 = applyHbp01007OshiBackDamageTrigger(
+                matchId,
+                userId,
+                opponentUserId,
+                turnNumber,
+                targetCardInstanceId,
+                attackerMainColor,
+                targetHolomem,
+                artSummary
+            );
+            if (!hbp01007.isEmpty()) {
+                executed.add(hbp01007);
+            }
+        }
+        if ("HBP01-008".equals(oshiCardId)) {
+            Map<String, Object> hbp01008 = applyHbp01008OshiArchiveCheerTrigger(
+                matchId,
+                userId,
+                opponentUserId,
+                turnNumber,
+                attackerMainColor,
+                officialCardArtExtraSummary
+            );
+            if (!hbp01008.isEmpty()) {
+                executed.add(hbp01008);
+            }
+        }
+        if (executed.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", "OSHI_REACTIVE_ART_EFFECTS");
+        summary.put("oshiCardId", oshiCardId);
+        summary.put("executedEffects", executed);
+        summary.put("applied", true);
+        return summary;
+    }
+
+    private Map<String, Object> applyHbp01007OshiBackDamageTrigger(
+        Long matchId,
+        Long userId,
+        Long opponentUserId,
+        int turnNumber,
+        Long targetCardInstanceId,
+        String attackerMainColor,
+        TargetHolomem targetHolomem,
+        Map<String, Object> artSummary
+    ) {
+        if (!"BLUE".equals(normalizeZone(attackerMainColor)) || targetHolomem == null || !"BACK".equals(targetHolomem.zone())) {
+            return Map.of();
+        }
+        if (asInt(artSummary == null ? null : artSummary.get("damageApplied")) <= 0) {
+            return Map.of();
+        }
+        if (toBoolean(artSummary == null ? null : artSummary.get("downed"))) {
+            return Map.of();
+        }
+        if (!canUseOshiSkill(matchId, userId, "NORMAL", 2)) {
+            return Map.of();
+        }
+        Map<String, Object> holopowerPayment = consumeHolopowerCostToArchive(matchId, userId, 2);
+        markOshiSkillUsed(matchId, userId, "NORMAL");
+        String effectJson = toJson(Map.of(
+            "type", "DAMAGE",
+            "value", 50,
+            "rawText", "この推しホロメンか自分の青ホロメンが相手のバックホロメンにダメージを与えた時、その相手のバックホロメン1人に特殊ダメージ50を与える（ダウンしても相手のライフは減らない）。",
+            "downDoesNotReduceLife", true
+        ));
+        Map<String, Object> damage = matchEffectService.applySupportEffect(
+            matchId,
+            userId,
+            "DAMAGE",
+            effectJson,
+            "ENEMY",
+            List.of(),
+            targetCardInstanceId
+        );
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", "OSHI_SKILL_TRIGGER");
+        summary.put("oshiCardId", "HBP01-007");
+        summary.put("skillType", "NORMAL");
+        summary.put("skillName", "ほうき星");
+        summary.put("triggerType", "DEAL_BACK_DAMAGE");
+        summary.put("holopowerCost", 2);
+        summary.put("holopowerPayment", holopowerPayment);
+        summary.put("targetCardInstanceId", targetCardInstanceId);
+        summary.put("executedEffects", List.of(damage));
+        summary.put("applied", true);
+        return summary;
+    }
+
+    private Map<String, Object> applyHbp01008OshiArchiveCheerTrigger(
+        Long matchId,
+        Long userId,
+        Long opponentUserId,
+        int turnNumber,
+        String attackerMainColor,
+        Map<String, Object> officialCardArtExtraSummary
+    ) {
+        if (!"BLUE".equals(normalizeZone(attackerMainColor))) {
+            return Map.of();
+        }
+        Object archiveAttachedCheer = officialCardArtExtraSummary == null ? null : officialCardArtExtraSummary.get("archiveAttachedCheer");
+        if (!(archiveAttachedCheer instanceof Map<?, ?> archiveMap) || !toBoolean(archiveMap.get("applied"))) {
+            return Map.of();
+        }
+        if (!canUseOshiSkill(matchId, userId, "NORMAL", 1)) {
+            return Map.of();
+        }
+        Long targetCardInstanceId = loadFirstOpponentHolomemCardInstanceId(matchId, opponentUserId);
+        if (targetCardInstanceId == null) {
+            return Map.of();
+        }
+        Map<String, Object> holopowerPayment = consumeHolopowerCostToArchive(matchId, userId, 1);
+        markOshiSkillUsed(matchId, userId, "NORMAL");
+        String effectJson = toJson(Map.of(
+            "type", "DAMAGE",
+            "value", 20,
+            "rawText", "自分の青ホロメンの能力でエールをアーカイブした時、相手のホロメン1人に特殊ダメージ20を与える（ダウンしても相手のライフは減らない）。",
+            "downDoesNotReduceLife", true
+        ));
+        Map<String, Object> damage = matchEffectService.applySupportEffect(
+            matchId,
+            userId,
+            "DAMAGE",
+            effectJson,
+            "ENEMY",
+            List.of(),
+            targetCardInstanceId
+        );
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", "OSHI_SKILL_TRIGGER");
+        summary.put("oshiCardId", "HBP01-008");
+        summary.put("skillType", "NORMAL");
+        summary.put("skillName", "レイン・シャーマニズム");
+        summary.put("triggerType", "ARCHIVE_CHEER_BY_BLUE_ABILITY");
+        summary.put("holopowerCost", 1);
+        summary.put("holopowerPayment", holopowerPayment);
+        summary.put("targetCardInstanceId", targetCardInstanceId);
+        summary.put("executedEffects", List.of(damage));
+        summary.put("applied", true);
+        return summary;
+    }
+
+    private Map<String, Object> applyOfficialOshiSelfDownedEffects(
+        Long matchId,
+        Long defenderUserId,
+        Long attackerUserId,
+        int turnNumber,
+        TargetHolomem downedTarget,
+        Map<String, Object> holderSnapshot,
+        Map<String, Object> artSummary
+    ) {
+        String oshiCardId = loadPlayerOshiCardId(matchId, defenderUserId);
+        if (!StringUtils.hasText(oshiCardId) || downedTarget == null || holderSnapshot == null || holderSnapshot.isEmpty()) {
+            return Map.of();
+        }
+        List<Map<String, Object>> executed = new ArrayList<>();
+        if ("HBP01-004".equals(oshiCardId)) {
+            Map<String, Object> hbp01004 = applyHbp01004OshiSelfDownedReattach(
+                matchId,
+                defenderUserId,
+                attackerUserId,
+                holderSnapshot
+            );
+            if (!hbp01004.isEmpty()) {
+                executed.add(hbp01004);
+            }
+        }
+        if ("HBP01-006".equals(oshiCardId)) {
+            Map<String, Object> hbp01006 = applyHbp01006OshiSelfDownedReturnStack(
+                matchId,
+                defenderUserId,
+                attackerUserId,
+                downedTarget,
+                holderSnapshot,
+                artSummary
+            );
+            if (!hbp01006.isEmpty()) {
+                executed.add(hbp01006);
+            }
+        }
+        if (executed.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", "OSHI_REACTIVE_SELF_DOWNED_EFFECTS");
+        summary.put("oshiCardId", oshiCardId);
+        summary.put("executedEffects", executed);
+        summary.put("applied", true);
+        return summary;
+    }
+
+    private Map<String, Object> applyHbp01004OshiSelfDownedReattach(
+        Long matchId,
+        Long defenderUserId,
+        Long attackerUserId,
+        Map<String, Object> holderSnapshot
+    ) {
+        if (Objects.equals(defenderUserId, attackerUserId) || !canUseOshiSkill(matchId, defenderUserId, "NORMAL", 2)) {
+            return Map.of();
+        }
+        Long downedHolomemId = asLong(holderSnapshot.get("holomem_id"));
+        Long targetHolomemId = loadFirstOwnOtherHolomemId(matchId, defenderUserId, downedHolomemId);
+        if (targetHolomemId == null) {
+            return Map.of();
+        }
+        List<Long> movableGreenCheerIds = filterCheerCardInstanceIdsByColor(
+            matchId,
+            defenderUserId,
+            toLongList(holderSnapshot.get("attached_cheer_card_instance_ids")),
+            "GREEN"
+        );
+        if (movableGreenCheerIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> holopowerPayment = consumeHolopowerCostToArchive(matchId, defenderUserId, 2);
+        markOshiSkillUsed(matchId, defenderUserId, "NORMAL");
+        List<String> movedCheerCardIds = new ArrayList<>();
+        List<Long> movedCheerRowIds = new ArrayList<>();
+        for (Long cheerCardInstanceId : movableGreenCheerIds) {
+            String cheerCardId = moveCheerCardInstanceToHolomem(matchId, defenderUserId, cheerCardInstanceId, targetHolomemId);
+            if (StringUtils.hasText(cheerCardId)) {
+                movedCheerCardIds.add(cheerCardId);
+                Long rowId = loadAttachedCheerRowId(targetHolomemId, cheerCardInstanceId);
+                if (rowId != null) {
+                    movedCheerRowIds.add(rowId);
+                }
+            }
+        }
+        if (movedCheerCardIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> reattach = new LinkedHashMap<>();
+        reattach.put("effectType", "REATTACH");
+        reattach.put("moveRequested", movableGreenCheerIds.size());
+        reattach.put("moveApplied", movedCheerCardIds.size());
+        reattach.put("targetHolomemId", targetHolomemId);
+        reattach.put("movedCheerCardIds", movedCheerCardIds);
+        reattach.put("movedCheerRowIds", movedCheerRowIds);
+        reattach.put("sourceMode", "DOWNED_GREEN_CHEER");
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", "OSHI_SKILL_TRIGGER");
+        summary.put("oshiCardId", "HBP01-004");
+        summary.put("skillType", "NORMAL");
+        summary.put("skillName", "野兎たち～");
+        summary.put("triggerType", "SELF_DOWNED");
+        summary.put("holopowerCost", 2);
+        summary.put("holopowerPayment", holopowerPayment);
+        summary.put("executedEffects", List.of(reattach));
+        summary.put("applied", true);
+        return summary;
+    }
+
+    private Map<String, Object> applyHbp01006OshiSelfDownedReturnStack(
+        Long matchId,
+        Long defenderUserId,
+        Long attackerUserId,
+        TargetHolomem downedTarget,
+        Map<String, Object> holderSnapshot,
+        Map<String, Object> artSummary
+    ) {
+        if (
+            Objects.equals(defenderUserId, attackerUserId)
+                || downedTarget == null
+                || !"RED".equals(normalizeZone(downedTarget.mainColor()))
+                || !canUseOshiSkill(matchId, defenderUserId, "SP", 2)
+        ) {
+            return Map.of();
+        }
+        List<Long> stackCardInstanceIds = toLongList(holderSnapshot.get("stack_card_instance_ids"));
+        if (stackCardInstanceIds.isEmpty()) {
+            Long matchCardInstanceId = asLong(holderSnapshot.get("match_card_id"));
+            if (matchCardInstanceId != null && matchCardInstanceId > 0) {
+                stackCardInstanceIds = List.of(matchCardInstanceId);
+            }
+        }
+        if (stackCardInstanceIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> holopowerPayment = consumeHolopowerCostToArchive(matchId, defenderUserId, 2);
+        markOshiSkillUsed(matchId, defenderUserId, "SP");
+        Long restoredLifeCardInstanceId = restoreLostLifeFromArtSummary(matchId, defenderUserId, artSummary);
+        List<Long> returnedStackCardInstanceIds = moveArchivedCardsToHand(matchId, defenderUserId, stackCardInstanceIds);
+
+        Map<String, Object> returnToHand = new LinkedHashMap<>();
+        returnToHand.put("effectType", "RETURN_TO_HAND");
+        returnToHand.put("moveRequested", stackCardInstanceIds.size());
+        returnToHand.put("moveApplied", returnedStackCardInstanceIds.size());
+        returnToHand.put("movedCardInstanceIds", returnedStackCardInstanceIds);
+        returnToHand.put("sourceMode", "DOWNED_HOLOMEM_STACK");
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("effectType", "OSHI_SKILL_TRIGGER");
+        summary.put("oshiCardId", "HBP01-006");
+        summary.put("skillType", "SP");
+        summary.put("skillName", "Rise from the ashes");
+        summary.put("triggerType", "SELF_DOWNED");
+        summary.put("holopowerCost", 2);
+        summary.put("holopowerPayment", holopowerPayment);
+        summary.put("restoredLifeCardInstanceId", restoredLifeCardInstanceId);
+        summary.put("lifeLossModifier", restoredLifeCardInstanceId == null ? 0 : -1);
+        summary.put("executedEffects", List.of(returnToHand));
+        summary.put("applied", true);
+        return summary;
+    }
+
+    private String loadPlayerOshiCardId(Long matchId, Long userId) {
+        if (matchId == null || userId == null) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT oshi_card_id
+            FROM match_players
+            WHERE match_id = ?
+              AND user_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("oshi_card_id") : null,
+            matchId,
+            userId
+        );
+    }
+
+    private boolean canUseOshiSkill(Long matchId, Long userId, String skillType, int holopowerCost) {
+        if (matchId == null || userId == null || !StringUtils.hasText(skillType)) {
+            return false;
+        }
+        Map<String, Object> row = jdbcTemplate.query(
+            """
+            SELECT skill_used_this_turn,
+                   sp_skill_used
+            FROM match_players
+            WHERE match_id = ?
+              AND user_id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("skill_used_this_turn", rs.getBoolean("skill_used_this_turn"));
+                result.put("sp_skill_used", rs.getBoolean("sp_skill_used"));
+                return result;
+            },
+            matchId,
+            userId
+        );
+        if (row == null) {
+            return false;
+        }
+        if (toBoolean(row.get("skill_used_this_turn"))) {
+            return false;
+        }
+        if ("SP".equals(normalizeZone(skillType)) && toBoolean(row.get("sp_skill_used"))) {
+            return false;
+        }
+        Integer holopowerCount = jdbcTemplate.query(
+            """
+            SELECT COUNT(*)
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HOLOPOWER'
+            """,
+            rs -> rs.next() ? rs.getInt(1) : 0,
+            matchId,
+            userId
+        );
+        return holopowerCount != null && holopowerCount >= Math.max(holopowerCost, 0);
+    }
+
+    private void markOshiSkillUsed(Long matchId, Long userId, String skillType) {
+        if (matchId == null || userId == null) {
+            return;
+        }
+        boolean sp = "SP".equals(normalizeZone(skillType));
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET skill_used_this_turn = TRUE,
+                sp_skill_used = CASE WHEN ? THEN TRUE ELSE sp_skill_used END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            sp,
+            matchId,
+            userId
+        );
+    }
+
+    private Long loadFirstOpponentHolomemCardInstanceId(Long matchId, Long opponentUserId) {
+        if (matchId == null || opponentUserId == null) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT match_card_id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone IN ('CENTER', 'COLLAB', 'BACK')
+            ORDER BY CASE zone WHEN 'CENTER' THEN 1 WHEN 'COLLAB' THEN 2 WHEN 'BACK' THEN 3 ELSE 9 END, id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("match_card_id") : null,
+            matchId,
+            opponentUserId
+        );
+    }
+
+    private Long loadFirstOwnOtherHolomemId(Long matchId, Long ownerUserId, Long excludedHolomemId) {
+        if (matchId == null || ownerUserId == null) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone IN ('CENTER', 'COLLAB', 'BACK')
+              AND (? IS NULL OR id <> ?)
+            ORDER BY CASE zone WHEN 'CENTER' THEN 1 WHEN 'COLLAB' THEN 2 WHEN 'BACK' THEN 3 ELSE 9 END, id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            ownerUserId,
+            excludedHolomemId,
+            excludedHolomemId
+        );
+    }
+
+    private List<Long> filterCheerCardInstanceIdsByColor(
+        Long matchId,
+        Long ownerUserId,
+        List<Long> cheerCardInstanceIds,
+        String color
+    ) {
+        if (matchId == null || ownerUserId == null || cheerCardInstanceIds == null || cheerCardInstanceIds.isEmpty()) {
+            return List.of();
+        }
+        String normalizedColor = normalizeZone(color);
+        List<Long> matched = new ArrayList<>();
+        for (Long cheerCardInstanceId : cheerCardInstanceIds) {
+            if (cheerCardInstanceId == null || cheerCardInstanceId <= 0) {
+                continue;
+            }
+            String cardColor = jdbcTemplate.query(
+                """
+                SELECT cc.color
+                FROM match_cards mc
+                JOIN cheer_cards cc ON cc.card_id = mc.card_id
+                WHERE mc.id = ?
+                  AND mc.match_id = ?
+                  AND mc.owner_user_id = ?
+                LIMIT 1
+                """,
+                rs -> rs.next() ? rs.getString("color") : null,
+                cheerCardInstanceId,
+                matchId,
+                ownerUserId
+            );
+            if (normalizedColor.equals(normalizeZone(cardColor))) {
+                matched.add(cheerCardInstanceId);
+            }
+        }
+        return matched;
+    }
+
+    private String moveCheerCardInstanceToHolomem(
+        Long matchId,
+        Long ownerUserId,
+        Long cheerCardInstanceId,
+        Long targetHolomemId
+    ) {
+        if (matchId == null || ownerUserId == null || cheerCardInstanceId == null || targetHolomemId == null) {
+            return null;
+        }
+        String cheerCardId = jdbcTemplate.query(
+            """
+            SELECT card_id
+            FROM match_cards
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+              AND zone IN ('ARCHIVE', 'STAGE')
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("card_id") : null,
+            cheerCardInstanceId,
+            matchId,
+            ownerUserId
+        );
+        if (!StringUtils.hasText(cheerCardId)) {
+            return null;
+        }
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomem_cheers c
+            USING match_holomems h
+            WHERE c.match_holomem_id = h.id
+              AND c.match_card_id = ?
+              AND h.match_id = ?
+              AND h.owner_user_id = ?
+            """,
+            cheerCardInstanceId,
+            matchId,
+            ownerUserId
+        );
+        int moved = jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'STAGE',
+                order_index = NULL,
+                is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+              AND zone IN ('ARCHIVE', 'STAGE')
+            """,
+            cheerCardInstanceId,
+            matchId,
+            ownerUserId
+        );
+        if (moved != 1) {
+            return null;
+        }
+        jdbcTemplate.update(
+            """
+            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+            VALUES (?, ?, ?, FALSE)
+            """,
+            targetHolomemId,
+            cheerCardInstanceId,
+            cheerCardId
+        );
+        return cheerCardId;
+    }
+
+    private Long loadAttachedCheerRowId(Long targetHolomemId, Long cheerCardInstanceId) {
+        if (targetHolomemId == null || cheerCardInstanceId == null) {
+            return null;
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_holomem_cheers
+            WHERE match_holomem_id = ?
+              AND match_card_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            targetHolomemId,
+            cheerCardInstanceId
+        );
+    }
+
+    private Long restoreLostLifeFromArtSummary(Long matchId, Long ownerUserId, Map<String, Object> artSummary) {
+        if (matchId == null || ownerUserId == null || artSummary == null || artSummary.isEmpty()) {
+            return null;
+        }
+        Long lostLifeCardInstanceId = asLong(artSummary.get("lostLifeCardInstanceId"));
+        if (lostLifeCardInstanceId == null || lostLifeCardInstanceId <= 0) {
+            List<Long> ids = toLongList(artSummary.get("lostLifeCardInstanceIds"));
+            if (!ids.isEmpty()) {
+                lostLifeCardInstanceId = ids.get(0);
+            }
+        }
+        if (lostLifeCardInstanceId == null || lostLifeCardInstanceId <= 0) {
+            return null;
+        }
+        Integer nextLifeOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(MIN(order_index), 1) - 1
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'LIFE'
+            """,
+            Integer.class,
+            matchId,
+            ownerUserId
+        );
+        int restored = jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET zone = 'LIFE',
+                order_index = ?,
+                is_face_down = TRUE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'ARCHIVE'
+            """,
+            nextLifeOrder == null ? 0 : nextLifeOrder,
+            lostLifeCardInstanceId,
+            matchId,
+            ownerUserId
+        );
+        if (restored != 1) {
+            return null;
+        }
+        jdbcTemplate.update(
+            """
+            UPDATE match_players
+            SET current_life = COALESCE(current_life, 0) + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND user_id = ?
+            """,
+            matchId,
+            ownerUserId
+        );
+        artSummary.put("lifeReduced", false);
+        artSummary.put("lostLifeCardInstanceId", null);
+        artSummary.put("lostLifeCardInstanceIds", List.of());
+        return lostLifeCardInstanceId;
+    }
+
+    private List<Long> moveArchivedCardsToHand(Long matchId, Long ownerUserId, List<Long> cardInstanceIds) {
+        if (matchId == null || ownerUserId == null || cardInstanceIds == null || cardInstanceIds.isEmpty()) {
+            return List.of();
+        }
+        Integer nextHandOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(MAX(order_index), 0) + 1
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'HAND'
+            """,
+            Integer.class,
+            matchId,
+            ownerUserId
+        );
+        int order = nextHandOrder == null ? 1 : nextHandOrder;
+        List<Long> moved = new ArrayList<>();
+        for (Long cardInstanceId : cardInstanceIds) {
+            if (cardInstanceId == null || cardInstanceId <= 0) {
+                continue;
+            }
+            int updated = jdbcTemplate.update(
+                """
+                UPDATE match_cards
+                SET zone = 'HAND',
+                    order_index = ?,
+                    is_face_down = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'ARCHIVE'
+                """,
+                order++,
+                cardInstanceId,
+                matchId,
+                ownerUserId
+            );
+            if (updated == 1) {
+                moved.add(cardInstanceId);
+            }
+        }
+        return moved;
     }
 
     /**
@@ -6258,7 +7350,9 @@ public class MatchActionService {
                 sourceCardInstanceId = defaultSourceCardInstanceId;
             }
             Map<String, Object> summary = null;
-            if (!selectionMatched) {
+            if (isHbp01124StoredTrigger(effectiveTrigger)) {
+                summary = applyHbp01124StoredTriggerEffect(matchId, userId, effectiveTrigger);
+            } else if (!selectionMatched) {
                 summary = matchEffectService.applySingleGiftTriggeredEffect(
                     matchId,
                     userId,
@@ -6319,6 +7413,168 @@ public class MatchActionService {
         result.put("partiallyResolved", !aggregatedSkippedEffects.isEmpty() || !aggregatedUnsupportedEffects.isEmpty());
         result.put("applied", !triggeredGifts.isEmpty());
         return result;
+    }
+
+    private boolean isHbp01124StoredTrigger(Map<String, Object> trigger) {
+        if (trigger == null || trigger.isEmpty()) {
+            return false;
+        }
+        return "HBP01-124".equals(asString(trigger.get("giftHolderCardId")))
+            && "SELF_DOWNED".equals(normalizeZone(trigger.get("triggerType")));
+    }
+
+    private Map<String, Object> applyHbp01124StoredTriggerEffect(
+        Long matchId,
+        Long userId,
+        Map<String, Object> trigger
+    ) {
+        if (matchId == null || userId == null || trigger == null || trigger.isEmpty()) {
+            return Map.of();
+        }
+        Long holderHolomemId = asLong(trigger.get("giftHolderHolomemId"));
+        if (holderHolomemId == null || holderHolomemId <= 0) {
+            return Map.of();
+        }
+        Long targetHolomemId = jdbcTemplate.query(
+            """
+            SELECT h.id
+            FROM match_holomems h
+            WHERE h.match_id = ?
+              AND h.owner_user_id = ?
+              AND h.zone IN ('CENTER', 'COLLAB', 'BACK')
+              AND h.id <> ?
+            ORDER BY CASE h.zone WHEN 'CENTER' THEN 1 WHEN 'COLLAB' THEN 2 WHEN 'BACK' THEN 3 ELSE 9 END, h.id
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            userId,
+            holderHolomemId
+        );
+        List<Long> preferredCheerCardInstanceIds = toLongList(trigger.get("giftHolderAttachedCheerCardInstanceIds"));
+        String movedCheerCardId = null;
+        Long movedCheerRowId = null;
+        if (targetHolomemId != null) {
+            for (Long cheerCardInstanceId : preferredCheerCardInstanceIds) {
+                if (cheerCardInstanceId == null || cheerCardInstanceId <= 0) {
+                    continue;
+                }
+                Map<String, Object> cheerCard = jdbcTemplate.query(
+                    """
+                    SELECT id, card_id, zone
+                    FROM match_cards
+                    WHERE id = ?
+                      AND match_id = ?
+                      AND owner_user_id = ?
+                    LIMIT 1
+                    """,
+                    rs -> {
+                        if (!rs.next()) {
+                            return null;
+                        }
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        row.put("id", rs.getLong("id"));
+                        row.put("card_id", rs.getString("card_id"));
+                        row.put("zone", rs.getString("zone"));
+                        return row;
+                    },
+                    cheerCardInstanceId,
+                    matchId,
+                    userId
+                );
+                if (cheerCard == null) {
+                    continue;
+                }
+                String zone = normalizeZone(cheerCard.get("zone"));
+                String cheerCardId = asString(cheerCard.get("card_id"));
+                if (!StringUtils.hasText(cheerCardId) || (!"ARCHIVE".equals(zone) && !"STAGE".equals(zone))) {
+                    continue;
+                }
+                if ("STAGE".equals(zone)) {
+                    jdbcTemplate.update(
+                        """
+                        DELETE FROM match_holomem_cheers c
+                        USING match_holomems h
+                        WHERE c.match_holomem_id = h.id
+                          AND c.match_card_id = ?
+                          AND h.match_id = ?
+                          AND h.owner_user_id = ?
+                        """,
+                        cheerCardInstanceId,
+                        matchId,
+                        userId
+                    );
+                } else {
+                    int movedToStage = jdbcTemplate.update(
+                        """
+                        UPDATE match_cards
+                        SET zone = 'STAGE',
+                            order_index = NULL,
+                            is_face_down = FALSE,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                          AND match_id = ?
+                          AND owner_user_id = ?
+                          AND zone = 'ARCHIVE'
+                        """,
+                        cheerCardInstanceId,
+                        matchId,
+                        userId
+                    );
+                    if (movedToStage != 1) {
+                        continue;
+                    }
+                }
+                movedCheerRowId = jdbcTemplate.query(
+                    """
+                    INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
+                    VALUES (?, ?, ?, FALSE)
+                    RETURNING id
+                    """,
+                    rs -> rs.next() ? rs.getLong(1) : null,
+                    targetHolomemId,
+                    cheerCardInstanceId,
+                    cheerCardId
+                );
+                movedCheerCardId = cheerCardId;
+                break;
+            }
+        }
+
+        Map<String, Object> reattach = new LinkedHashMap<>();
+        reattach.put("effectType", "REATTACH");
+        reattach.put("moveRequested", 1);
+        reattach.put("moveApplied", movedCheerCardId == null ? 0 : 1);
+        reattach.put("targetHolomemId", targetHolomemId);
+        reattach.put("targetHolomemCardInstanceId", targetHolomemId == null
+            ? null
+            : jdbcTemplate.query(
+                "SELECT match_card_id FROM match_holomems WHERE id = ?",
+                rs -> rs.next() ? rs.getLong(1) : null,
+                targetHolomemId
+            ));
+        reattach.put("movedCheerCardIds", movedCheerCardId == null ? List.of() : List.of(movedCheerCardId));
+        reattach.put("movedCheerRowIds", movedCheerRowId == null ? List.of() : List.of(movedCheerRowId));
+        reattach.put("sourceMode", "HOLDER_CHEER");
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("triggerType", asString(trigger.get("triggerType")));
+        summary.put("giftHolderHolomemId", holderHolomemId);
+        summary.put("giftHolderCardInstanceId", asLong(trigger.get("giftHolderCardInstanceId")));
+        summary.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
+        summary.put("giftHolderZone", normalizeZone(trigger.get("giftHolderZone")));
+        summary.put("sourceCardInstanceId", asLong(trigger.get("sourceCardInstanceId")));
+        summary.put("triggerTargetCardInstanceId", asLong(trigger.get("triggerTargetCardInstanceId")));
+        summary.put("rawText", asString(trigger.get("rawText")));
+        summary.put("requestedEffects", List.of("REATTACH"));
+        summary.put("executedEffects", List.of(reattach));
+        summary.put("unsupportedEffects", List.of());
+        summary.put("skippedEffects", movedCheerCardId == null ? List.of(Map.of(
+            "effectType", "REATTACH",
+            "applied", false,
+            "reason", "NO_MOVABLE_HOLDER_CHEER_OR_TARGET"
+        )) : List.of());
+        return summary;
     }
 
     private void collectTriggeredEffectSummary(
