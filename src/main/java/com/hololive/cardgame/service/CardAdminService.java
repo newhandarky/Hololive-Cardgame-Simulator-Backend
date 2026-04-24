@@ -18,6 +18,7 @@ public class CardAdminService {
     private final JdbcTemplate jdbcTemplate;
     private final CardRepository cardRepository;
     private final CardEffectValidator cardEffectValidator;
+    private final CardAdminAccessService cardAdminAccessService;
 
     /**
      * 卡片後台管理服務，負責新增各類卡片與子表資料。
@@ -25,18 +26,25 @@ public class CardAdminService {
     public CardAdminService(
         JdbcTemplate jdbcTemplate,
         CardRepository cardRepository,
-        CardEffectValidator cardEffectValidator
+        CardEffectValidator cardEffectValidator,
+        CardAdminAccessService cardAdminAccessService
     ) {
         this.jdbcTemplate = jdbcTemplate;
         this.cardRepository = cardRepository;
         this.cardEffectValidator = cardEffectValidator;
+        this.cardAdminAccessService = cardAdminAccessService;
     }
 
     @Transactional
     /**
      * 建立卡片主檔並依 cardType 寫入對應子表。
      */
-    public Card createCard(AdminCreateCardRequest request) {
+    public Card createCard(Long actorUserId, AdminCreateCardRequest request) {
+        cardAdminAccessService.assertAllowed(actorUserId);
+        if (request == null) {
+            throw new IllegalArgumentException("request 不可為空");
+        }
+
         String cardId = normalize(request.getCardId());
         String cardType = normalize(request.getCardType());
         String name = trimOrNull(request.getName());

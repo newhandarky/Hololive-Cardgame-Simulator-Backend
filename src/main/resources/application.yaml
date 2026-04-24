@@ -29,3 +29,5 @@ server:
   port: ${PORT:8080}
   error:
     include-message: always
+
+# card-admin 白名單可直接用環境變數設定，例如 CARD_ADMIN_ALLOWED_USER_IDS=1,2,3
