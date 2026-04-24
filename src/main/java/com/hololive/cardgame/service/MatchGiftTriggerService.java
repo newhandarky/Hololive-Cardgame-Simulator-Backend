@@ -82,14 +82,15 @@ public class MatchGiftTriggerService {
         Long attackTargetCardInstanceId,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "ART_USED",
-            attackerCardInstanceId,
-            attackTargetCardInstanceId,
-            turnNumber,
-            true
+        return executeGiftTrigger(
+            giftTriggerRequest(
+                matchId,
+                userId,
+                "ART_USED",
+                attackerCardInstanceId,
+                attackTargetCardInstanceId,
+                turnNumber
+            )
         );
     }
 
@@ -118,15 +119,17 @@ public class MatchGiftTriggerService {
         int turnNumber,
         String attackerArtName
     ) {
-        return applyGiftTriggeredEffectsByTriggerWithSourceArt(
-            matchId,
-            userId,
-            "ART_USED",
-            attackerCardInstanceId,
-            attackTargetCardInstanceId,
-            turnNumber,
-            false,
-            attackerArtName
+        return previewGiftTrigger(
+            giftTriggerRequest(
+                matchId,
+                userId,
+                "ART_USED",
+                attackerCardInstanceId,
+                attackTargetCardInstanceId,
+                turnNumber,
+                null,
+                attackerArtName
+            )
         );
     }
 
@@ -137,14 +140,15 @@ public class MatchGiftTriggerService {
         Long downedTargetCardInstanceId,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "OPPONENT_DOWNED",
-            attackerCardInstanceId,
-            downedTargetCardInstanceId,
-            turnNumber,
-            true
+        return executeGiftTrigger(
+            giftTriggerRequest(
+                matchId,
+                userId,
+                "OPPONENT_DOWNED",
+                attackerCardInstanceId,
+                downedTargetCardInstanceId,
+                turnNumber
+            )
         );
     }
 
@@ -155,14 +159,15 @@ public class MatchGiftTriggerService {
         Long downedTargetCardInstanceId,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "OPPONENT_DOWNED",
-            attackerCardInstanceId,
-            downedTargetCardInstanceId,
-            turnNumber,
-            false
+        return previewGiftTrigger(
+            giftTriggerRequest(
+                matchId,
+                userId,
+                "OPPONENT_DOWNED",
+                attackerCardInstanceId,
+                downedTargetCardInstanceId,
+                turnNumber
+            )
         );
     }
 
@@ -173,15 +178,17 @@ public class MatchGiftTriggerService {
         String downedStageZone,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "SELF_DOWNED",
-            downedCardInstanceId,
-            downedCardInstanceId,
-            turnNumber,
-            false,
-            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone, null)
+        return previewGiftTrigger(
+            giftTriggerRequest(
+                matchId,
+                userId,
+                "SELF_DOWNED",
+                downedCardInstanceId,
+                downedCardInstanceId,
+                turnNumber,
+                downedStageZone,
+                null
+            )
         );
     }
 
@@ -209,7 +216,18 @@ public class MatchGiftTriggerService {
             downedCardInstanceId,
             downedCardInstanceId,
             "SELF_DOWNED",
-            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone, null),
+            resolveSourceContext(
+                giftTriggerRequest(
+                    matchId,
+                    userId,
+                    "SELF_DOWNED",
+                    downedCardInstanceId,
+                    downedCardInstanceId,
+                    turnNumber,
+                    downedStageZone,
+                    null
+                )
+            ),
             holderSnapshot,
             false
         );
@@ -223,15 +241,17 @@ public class MatchGiftTriggerService {
         String downedStageZone,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "ALLY_DOWNED",
-            downedCardInstanceId,
-            downedCardInstanceId,
-            turnNumber,
-            false,
-            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone, null)
+        return previewGiftTrigger(
+            giftTriggerRequest(
+                matchId,
+                userId,
+                "ALLY_DOWNED",
+                downedCardInstanceId,
+                downedCardInstanceId,
+                turnNumber,
+                downedStageZone,
+                null
+            )
         );
     }
 
@@ -242,15 +262,17 @@ public class MatchGiftTriggerService {
         String enteredStageZone,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "STAGE_ENTER",
-            enteredCardInstanceId,
-            enteredCardInstanceId,
-            turnNumber,
-            false,
-            loadGiftTriggerSourceContext(matchId, enteredCardInstanceId, enteredStageZone, null)
+        return previewGiftTrigger(
+            giftTriggerRequest(
+                matchId,
+                userId,
+                "STAGE_ENTER",
+                enteredCardInstanceId,
+                enteredCardInstanceId,
+                turnNumber,
+                enteredStageZone,
+                null
+            )
         );
     }
 
@@ -260,15 +282,17 @@ public class MatchGiftTriggerService {
         Long collabCardInstanceId,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "COLLAB",
-            collabCardInstanceId,
-            collabCardInstanceId,
-            turnNumber,
-            false,
-            loadGiftTriggerSourceContext(matchId, collabCardInstanceId, "COLLAB", null)
+        return previewGiftTrigger(
+            giftTriggerRequest(
+                matchId,
+                userId,
+                "COLLAB",
+                collabCardInstanceId,
+                collabCardInstanceId,
+                turnNumber,
+                "COLLAB",
+                null
+            )
         );
     }
 
@@ -278,15 +302,17 @@ public class MatchGiftTriggerService {
         Long movedToBackCardInstanceId,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "BATON_TOUCH_BACK",
-            movedToBackCardInstanceId,
-            movedToBackCardInstanceId,
-            turnNumber,
-            false,
-            loadGiftTriggerSourceContext(matchId, movedToBackCardInstanceId, "BACK", null)
+        return previewGiftTrigger(
+            giftTriggerRequest(
+                matchId,
+                userId,
+                "BATON_TOUCH_BACK",
+                movedToBackCardInstanceId,
+                movedToBackCardInstanceId,
+                turnNumber,
+                "BACK",
+                null
+            )
         );
     }
 
@@ -295,15 +321,8 @@ public class MatchGiftTriggerService {
         Long userId,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "PERFORMANCE_START_SELF",
-            null,
-            null,
-            turnNumber,
-            false,
-            null
+        return previewGiftTrigger(
+            giftTriggerRequest(matchId, userId, "PERFORMANCE_START_SELF", null, null, turnNumber)
         );
     }
 
@@ -312,15 +331,8 @@ public class MatchGiftTriggerService {
         Long userId,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "MAIN_STEP_SELF",
-            null,
-            null,
-            turnNumber,
-            false,
-            null
+        return previewGiftTrigger(
+            giftTriggerRequest(matchId, userId, "MAIN_STEP_SELF", null, null, turnNumber)
         );
     }
 
@@ -329,15 +341,8 @@ public class MatchGiftTriggerService {
         Long userId,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "PERFORMANCE_START_OPPONENT",
-            null,
-            null,
-            turnNumber,
-            false,
-            null
+        return previewGiftTrigger(
+            giftTriggerRequest(matchId, userId, "PERFORMANCE_START_OPPONENT", null, null, turnNumber)
         );
     }
 
@@ -346,15 +351,8 @@ public class MatchGiftTriggerService {
         Long userId,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "PERFORMANCE_END_SELF",
-            null,
-            null,
-            turnNumber,
-            false,
-            null
+        return previewGiftTrigger(
+            giftTriggerRequest(matchId, userId, "PERFORMANCE_END_SELF", null, null, turnNumber)
         );
     }
 
@@ -363,15 +361,8 @@ public class MatchGiftTriggerService {
         Long userId,
         int turnNumber
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "PERFORMANCE_END_OPPONENT",
-            null,
-            null,
-            turnNumber,
-            false,
-            null
+        return previewGiftTrigger(
+            giftTriggerRequest(matchId, userId, "PERFORMANCE_END_OPPONENT", null, null, turnNumber)
         );
     }
 
@@ -394,18 +385,26 @@ public class MatchGiftTriggerService {
         ) {
             return null;
         }
-        String normalizedTriggerType = normalizeGiftTriggerType(triggerType);
+        GiftTriggerRequest request = giftTriggerRequest(
+            matchId,
+            userId,
+            triggerType,
+            sourceCardInstanceId,
+            triggerTargetCardInstanceId,
+            turnNumber
+        );
+        String normalizedTriggerType = normalizeGiftTriggerType(request.triggerType());
         Map<String, Object> holder = giftTriggerOrchestrationService.loadGiftHolder(matchId, userId, giftHolderHolomemId);
         if (holder == null) {
             return null;
         }
-        MatchGiftTriggerSourceContext sourceContext = loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null, null);
+        MatchGiftTriggerSourceContext sourceContext = resolveSourceContext(request);
         return buildGiftTriggerSummary(
-            matchId,
-            userId,
-            turnNumber,
-            sourceCardInstanceId,
-            triggerTargetCardInstanceId,
+            request.matchId(),
+            request.userId(),
+            request.turnNumber(),
+            request.sourceCardInstanceId(),
+            request.triggerTargetCardInstanceId(),
             normalizedTriggerType,
             sourceContext,
             holder,
@@ -464,86 +463,100 @@ public class MatchGiftTriggerService {
         return giftTriggerContextService.loadGiftHolderSnapshot(matchId, userId, giftHolderHolomemId);
     }
 
-    private List<Map<String, Object>> applyGiftTriggeredEffectsByTrigger(
-        Long matchId,
-        Long userId,
-        String triggerType,
-        Long sourceCardInstanceId,
-        Long triggerTargetCardInstanceId,
-        int turnNumber,
-        boolean executeEffects
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            triggerType,
-            sourceCardInstanceId,
-            triggerTargetCardInstanceId,
-            turnNumber,
-            executeEffects,
-            loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null, null)
-        );
+    private List<Map<String, Object>> executeGiftTrigger(GiftTriggerRequest request) {
+        return applyGiftTriggeredEffectsByTrigger(request, true, resolveSourceContext(request));
     }
 
-    private List<Map<String, Object>> applyGiftTriggeredEffectsByTriggerWithSourceArt(
-        Long matchId,
-        Long userId,
-        String triggerType,
-        Long sourceCardInstanceId,
-        Long triggerTargetCardInstanceId,
-        int turnNumber,
-        boolean executeEffects,
-        String sourceArtName
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            triggerType,
-            sourceCardInstanceId,
-            triggerTargetCardInstanceId,
-            turnNumber,
-            executeEffects,
-            loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null, sourceArtName)
-        );
+    private List<Map<String, Object>> previewGiftTrigger(GiftTriggerRequest request) {
+        return applyGiftTriggeredEffectsByTrigger(request, false, resolveSourceContext(request));
     }
 
     private List<Map<String, Object>> applyGiftTriggeredEffectsByTrigger(
-        Long matchId,
-        Long userId,
-        String triggerType,
-        Long sourceCardInstanceId,
-        Long triggerTargetCardInstanceId,
-        int turnNumber,
+        GiftTriggerRequest request,
         boolean executeEffects,
         MatchGiftTriggerSourceContext sourceContext
     ) {
-        if (matchId == null || userId == null || turnNumber <= 0) {
+        if (request.matchId() == null || request.userId() == null || request.turnNumber() <= 0) {
             return List.of();
         }
-        String normalizedTriggerType = normalizeGiftTriggerType(triggerType);
+        String normalizedTriggerType = normalizeGiftTriggerType(request.triggerType());
         return giftTriggerOrchestrationService.buildTriggeredSummaries(
-            matchId,
-            userId,
-            sourceCardInstanceId,
+            request.matchId(),
+            request.userId(),
+            request.sourceCardInstanceId(),
             normalizedTriggerType,
             sourceContext,
             (resolvedMatchId, effectiveSourceCardInstanceId, holder) -> loadGiftTriggerSourceContext(
                 resolvedMatchId,
                 effectiveSourceCardInstanceId,
                 asText(holder.get("zone")),
-                null
+                request.sourceArtName()
             ),
             (holder, effectiveSourceCardInstanceId, effectiveSourceContext, resolvedTriggerType) -> buildGiftTriggerSummary(
-                matchId,
-                userId,
-                turnNumber,
+                request.matchId(),
+                request.userId(),
+                request.turnNumber(),
                 effectiveSourceCardInstanceId,
-                triggerTargetCardInstanceId,
+                request.triggerTargetCardInstanceId(),
                 resolvedTriggerType,
                 effectiveSourceContext,
                 holder,
                 executeEffects
             )
+        );
+    }
+
+    private MatchGiftTriggerSourceContext resolveSourceContext(GiftTriggerRequest request) {
+        if (request == null) {
+            return null;
+        }
+        return loadGiftTriggerSourceContext(
+            request.matchId(),
+            request.sourceCardInstanceId(),
+            request.fallbackStageZone(),
+            request.sourceArtName()
+        );
+    }
+
+    private GiftTriggerRequest giftTriggerRequest(
+        Long matchId,
+        Long userId,
+        String triggerType,
+        Long sourceCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        int turnNumber
+    ) {
+        return giftTriggerRequest(
+            matchId,
+            userId,
+            triggerType,
+            sourceCardInstanceId,
+            triggerTargetCardInstanceId,
+            turnNumber,
+            null,
+            null
+        );
+    }
+
+    private GiftTriggerRequest giftTriggerRequest(
+        Long matchId,
+        Long userId,
+        String triggerType,
+        Long sourceCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        int turnNumber,
+        String fallbackStageZone,
+        String sourceArtName
+    ) {
+        return new GiftTriggerRequest(
+            matchId,
+            userId,
+            triggerType,
+            sourceCardInstanceId,
+            triggerTargetCardInstanceId,
+            turnNumber,
+            fallbackStageZone,
+            sourceArtName
         );
     }
 
@@ -678,4 +691,15 @@ public class MatchGiftTriggerService {
             default -> "";
         };
     }
+
+    private record GiftTriggerRequest(
+        Long matchId,
+        Long userId,
+        String triggerType,
+        Long sourceCardInstanceId,
+        Long triggerTargetCardInstanceId,
+        int turnNumber,
+        String fallbackStageZone,
+        String sourceArtName
+    ) {}
 }
