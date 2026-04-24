@@ -191,6 +191,118 @@ public class MatchTurnLifecycleService {
         );
     }
 
+    public void confirmTurnStartDecision(MatchEntity match, Long userId, int turnNumber, Long decisionId) {
+        completeInteractionDecision(
+            match,
+            userId,
+            turnNumber,
+            decisionId,
+            INTERACTION_TYPE_TURN_START,
+            INTERACTION_TYPE_TURN_START,
+            MatchPhase.DRAW,
+            null
+        );
+    }
+
+    public void confirmLiveStartDecision(MatchEntity match, Long userId, int turnNumber, Long decisionId) {
+        if (match == null || match.getId() == null || userId == null || decisionId == null || decisionId <= 0) {
+            throw new IllegalArgumentException("LIVE_START 決策結算流程缺少必要參數");
+        }
+        Long matchId = match.getId();
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id IN (?, ?)
+              AND zone IN ('CENTER', 'BACK')
+            """,
+            matchId,
+            match.getPlayerAId(),
+            match.getPlayerBId()
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id IN (?, ?)
+              AND zone = 'STAGE'
+              AND id IN (
+                SELECT match_card_id
+                FROM match_holomems
+                WHERE match_id = ?
+                  AND owner_user_id IN (?, ?)
+                  AND zone IN ('CENTER', 'BACK')
+              )
+            """,
+            matchId,
+            match.getPlayerAId(),
+            match.getPlayerBId(),
+            matchId,
+            match.getPlayerAId(),
+            match.getPlayerBId()
+        );
+
+        match.setCurrentTurnPlayerId(match.getPlayerAId());
+        completeInteractionDecision(
+            match,
+            userId,
+            turnNumber,
+            decisionId,
+            INTERACTION_TYPE_LIVE_START,
+            INTERACTION_TYPE_LIVE_START,
+            MatchPhase.MAIN,
+            null
+        );
+
+        Long turnStartInteractionId = createTurnStartPendingInteraction(matchId, match.getPlayerAId(), turnNumber);
+        if (turnStartInteractionId == null) {
+            return;
+        }
+        Map<String, Object> interactionPayload = new LinkedHashMap<>();
+        interactionPayload.put("interactionId", turnStartInteractionId);
+        interactionPayload.put("interactionType", INTERACTION_TYPE_TURN_START);
+        interactionPayload.put("sourceActionType", INTERACTION_TYPE_TURN_START);
+        appendAction(
+            match,
+            match.getPlayerAId(),
+            "INTERACTION_PENDING",
+            toJson(interactionPayload),
+            turnNumber
+        );
+    }
+
+    public void confirmDrawRevealDecision(
+        MatchEntity match,
+        Long userId,
+        int turnNumber,
+        Long decisionId,
+        MatchPhase nextPhase,
+        Long drawnCardInstanceId,
+        String drawnCardId,
+        Map<String, Object> additionalPayload
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("drawnCardInstanceId", drawnCardInstanceId);
+        payload.put("drawnCardId", drawnCardId);
+        if (additionalPayload != null && !additionalPayload.isEmpty()) {
+            payload.putAll(additionalPayload);
+        }
+        completeInteractionDecision(
+            match,
+            userId,
+            turnNumber,
+            decisionId,
+            INTERACTION_TYPE_DRAW_REVEAL,
+            ACTION_TYPE_DRAW_TURN,
+            nextPhase,
+            payload
+        );
+    }
+
     public void advancePhase(
         MatchEntity match,
         Long userId,
@@ -210,6 +322,47 @@ public class MatchTurnLifecycleService {
             userId,
             ACTION_TYPE_ADVANCE_PHASE,
             toJson(payload == null ? Map.of() : payload),
+            turnNumber
+        );
+    }
+
+    private void completeInteractionDecision(
+        MatchEntity match,
+        Long userId,
+        int turnNumber,
+        Long decisionId,
+        String interactionType,
+        String sourceActionType,
+        MatchPhase nextPhase,
+        Map<String, Object> additionalPayload
+    ) {
+        if (
+            match == null ||
+            userId == null ||
+            decisionId == null ||
+            decisionId <= 0 ||
+            nextPhase == null ||
+            !StringUtils.hasText(interactionType) ||
+            !StringUtils.hasText(sourceActionType)
+        ) {
+            throw new IllegalArgumentException("互動決策結算流程缺少必要參數");
+        }
+        match.setCurrentPhase(nextPhase.name());
+        match.setUpdatedAt(LocalDateTime.now());
+        matchRepository.saveAndFlush(match);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("decisionId", decisionId);
+        payload.put("interactionType", interactionType);
+        payload.put("sourceActionType", sourceActionType);
+        if (additionalPayload != null && !additionalPayload.isEmpty()) {
+            payload.putAll(additionalPayload);
+        }
+        appendAction(
+            match,
+            userId,
+            "INTERACTION_CONFIRMED",
+            toJson(payload),
             turnNumber
         );
     }

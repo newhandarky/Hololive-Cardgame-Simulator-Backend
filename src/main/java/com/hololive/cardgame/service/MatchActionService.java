@@ -1229,21 +1229,11 @@ public class MatchActionService {
     ) {
         markDecisionResolved(pending.decisionId());
         returnCollabToBackAsRested(matchId, userId);
-
-        context.match.setCurrentPhase(MatchPhase.DRAW.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
-
-        Map<String, Object> confirmedPayload = new LinkedHashMap<>();
-        confirmedPayload.put("decisionId", pending.decisionId());
-        confirmedPayload.put("interactionType", INTERACTION_TYPE_TURN_START);
-        confirmedPayload.put("sourceActionType", INTERACTION_TYPE_TURN_START);
-        appendAction(
+        matchTurnLifecycleService.confirmTurnStartDecision(
             context.match,
             userId,
-            "INTERACTION_CONFIRMED",
-            toJson(confirmedPayload),
-            context.turnNumber
+            context.turnNumber,
+            pending.decisionId()
         );
     }
 
@@ -1254,74 +1244,11 @@ public class MatchActionService {
         PendingDecision pending
     ) {
         markDecisionResolved(pending.decisionId());
-        jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET is_face_down = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE match_id = ?
-              AND owner_user_id IN (?, ?)
-              AND zone IN ('CENTER', 'BACK')
-            """,
-            matchId,
-            context.match.getPlayerAId(),
-            context.match.getPlayerBId()
-        );
-        jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET is_face_down = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE match_id = ?
-              AND owner_user_id IN (?, ?)
-              AND zone = 'STAGE'
-              AND id IN (
-                SELECT match_card_id
-                FROM match_holomems
-                WHERE match_id = ?
-                  AND owner_user_id IN (?, ?)
-                  AND zone IN ('CENTER', 'BACK')
-              )
-            """,
-            matchId,
-            context.match.getPlayerAId(),
-            context.match.getPlayerBId(),
-            matchId,
-            context.match.getPlayerAId(),
-            context.match.getPlayerBId()
-        );
-
-        context.match.setCurrentTurnPlayerId(context.match.getPlayerAId());
-        context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
-
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("decisionId", pending.decisionId());
-        payload.put("interactionType", INTERACTION_TYPE_LIVE_START);
-        payload.put("sourceActionType", INTERACTION_TYPE_LIVE_START);
-        appendAction(
+        matchTurnLifecycleService.confirmLiveStartDecision(
             context.match,
             userId,
-            "INTERACTION_CONFIRMED",
-            toJson(payload),
-            context.turnNumber
-        );
-
-        Long turnStartInteractionId = createTurnStartPendingInteraction(matchId, context.match.getPlayerAId(), context.turnNumber);
-        if (turnStartInteractionId == null) {
-            return;
-        }
-        Map<String, Object> interactionPayload = new LinkedHashMap<>();
-        interactionPayload.put("interactionId", turnStartInteractionId);
-        interactionPayload.put("interactionType", INTERACTION_TYPE_TURN_START);
-        interactionPayload.put("sourceActionType", INTERACTION_TYPE_TURN_START);
-        appendAction(
-            context.match,
-            context.match.getPlayerAId(),
-            "INTERACTION_PENDING",
-            toJson(interactionPayload),
-            context.turnNumber
+            context.turnNumber,
+            pending.decisionId()
         );
     }
 
@@ -1333,16 +1260,7 @@ public class MatchActionService {
     ) {
         markDecisionResolved(pending.decisionId());
         boolean requiresTurnCheer = canPerformTurnCheerAction(matchId, userId);
-        context.match.setCurrentPhase(requiresTurnCheer ? MatchPhase.CHEER.name() : MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
-
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("decisionId", pending.decisionId());
-        payload.put("interactionType", INTERACTION_TYPE_DRAW_REVEAL);
-        payload.put("sourceActionType", "DRAW_TURN");
-        payload.put("drawnCardInstanceId", pending.sourceCardInstanceId());
-        payload.put("drawnCardId", pending.sourceCardId());
         if (!requiresTurnCheer) {
             List<Map<String, Object>> mainStepGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnMainStep(
                 matchId,
@@ -1363,12 +1281,15 @@ public class MatchActionService {
                 putFollowupDecisionPayload(payload, mainStepGiftDecision);
             }
         }
-        appendAction(
+        matchTurnLifecycleService.confirmDrawRevealDecision(
             context.match,
             userId,
-            "INTERACTION_CONFIRMED",
-            toJson(payload),
-            context.turnNumber
+            context.turnNumber,
+            pending.decisionId(),
+            requiresTurnCheer ? MatchPhase.CHEER : MatchPhase.MAIN,
+            pending.sourceCardInstanceId(),
+            pending.sourceCardId(),
+            payload
         );
     }
 
