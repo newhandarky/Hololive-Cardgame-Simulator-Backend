@@ -3,6 +3,7 @@ package com.hololive.cardgame.controller;
 import com.hololive.cardgame.dto.AdminCreateCardRequest;
 import com.hololive.cardgame.dto.CardResponse;
 import com.hololive.cardgame.entity.Card;
+import com.hololive.cardgame.service.AuthUserResolver;
 import com.hololive.cardgame.service.CardAdminService;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -17,12 +18,14 @@ import org.springframework.web.server.ResponseStatusException;
 public class CardAdminController {
 
     private final CardAdminService cardAdminService;
+    private final AuthUserResolver authUserResolver;
 
     /**
      * 卡片後台 API 控制器。
      */
-    public CardAdminController(CardAdminService cardAdminService) {
+    public CardAdminController(CardAdminService cardAdminService, AuthUserResolver authUserResolver) {
         this.cardAdminService = cardAdminService;
+        this.authUserResolver = authUserResolver;
     }
 
     @PostMapping("/cards")
@@ -32,7 +35,8 @@ public class CardAdminController {
      */
     public CardResponse createCard(@RequestBody AdminCreateCardRequest request) {
         try {
-            Card card = cardAdminService.createCard(request);
+            Long actorUserId = authUserResolver.currentUserId();
+            Card card = cardAdminService.createCard(actorUserId, request);
             return CardResponse.from(card);
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());

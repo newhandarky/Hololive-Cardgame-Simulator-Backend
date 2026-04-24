@@ -3,6 +3,8 @@ package com.hololive.cardgame.error;
 import org.springframework.http.HttpStatus;
 
 public enum GameErrorCode {
+    UNAUTHORIZED(HttpStatus.UNAUTHORIZED),
+    FORBIDDEN(HttpStatus.FORBIDDEN),
     BAD_REQUEST(HttpStatus.BAD_REQUEST),
     NOT_FOUND(HttpStatus.NOT_FOUND),
     CONFLICT(HttpStatus.CONFLICT),

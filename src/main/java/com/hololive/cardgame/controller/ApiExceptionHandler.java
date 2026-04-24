@@ -40,6 +40,8 @@ public class ApiExceptionHandler {
             status = HttpStatus.INTERNAL_SERVER_ERROR;
         }
         GameErrorCode fallbackCode = switch (status) {
+            case UNAUTHORIZED -> GameErrorCode.UNAUTHORIZED;
+            case FORBIDDEN -> GameErrorCode.FORBIDDEN;
             case BAD_REQUEST -> GameErrorCode.BAD_REQUEST;
             case NOT_FOUND -> GameErrorCode.NOT_FOUND;
             case CONFLICT -> GameErrorCode.CONFLICT;
