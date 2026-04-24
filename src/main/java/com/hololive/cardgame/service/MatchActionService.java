@@ -87,6 +87,7 @@ public class MatchActionService {
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
     private final MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService;
+    private final MatchTurnLifecycleService matchTurnLifecycleService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final MatchTriggeredGiftResolutionService matchTriggeredGiftResolutionService;
@@ -111,6 +112,7 @@ public class MatchActionService {
         MatchEffectCombatModifierService matchEffectCombatModifierService,
         MatchTriggeredCombatEffectService matchTriggeredCombatEffectService,
         MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService,
+        MatchTurnLifecycleService matchTurnLifecycleService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
         MatchTriggeredGiftResolutionService matchTriggeredGiftResolutionService,
@@ -129,6 +131,7 @@ public class MatchActionService {
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
         this.matchTurnEffectMaintenanceService = matchTurnEffectMaintenanceService;
+        this.matchTurnLifecycleService = matchTurnLifecycleService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.matchTriggeredGiftResolutionService = matchTriggeredGiftResolutionService;
@@ -1581,48 +1584,21 @@ public class MatchActionService {
         if (context.blockedByPendingInteraction()) {
             return;
         }
-        if (hasDrawTurnAction(matchId, userId, context.turnNumber)) {
-            throw new GameRuleException(GameErrorCode.TURN_DRAW_ALREADY_USED, "這回合你已經抽過卡了");
-        }
+        validateDrawTurnAvailable(matchId, userId, context.turnNumber);
 
-        Long drawnCardInstanceId = drawTopDeckCardToHand(matchId, userId);
-        if (drawnCardInstanceId == null) {
-            finishMatchByDefeat(context.match, userId, "DRAW_DECK_OUT", context.turnNumber);
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
+        DrawTurnResult result = executeDrawTurn(matchId, userId, context);
+        if (result.deckOut()) {
             return;
         }
 
-        Map<String, Object> drawPayload = new LinkedHashMap<>();
-        drawPayload.put("drawCount", 1);
-        drawPayload.put("drawnCardInstanceIds", List.of(drawnCardInstanceId));
-        appendAction(
+        appendDrawTurnAction(context.match, userId, context.turnNumber, result.drawnCardInstanceId());
+        matchTurnLifecycleService.beginDrawTurn(
             context.match,
             userId,
-            ACTION_TYPE_DRAW_TURN,
-            toJson(drawPayload),
-            context.turnNumber
+            context.turnNumber,
+            result.drawnCardInstanceId(),
+            result.drawInteractionId()
         );
-
-        context.match.setCurrentPhase(MatchPhase.DRAW.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
-
-        Long drawInteractionId = createDrawRevealPendingInteraction(matchId, userId, drawnCardInstanceId);
-        if (drawInteractionId != null) {
-            Map<String, Object> interactionPayload = new LinkedHashMap<>();
-            interactionPayload.put("interactionId", drawInteractionId);
-            interactionPayload.put("interactionType", INTERACTION_TYPE_DRAW_REVEAL);
-            interactionPayload.put("sourceActionType", ACTION_TYPE_DRAW_TURN);
-            interactionPayload.put("drawnCardInstanceId", drawnCardInstanceId);
-            appendAction(
-                context.match,
-                userId,
-                "INTERACTION_PENDING",
-                toJson(interactionPayload),
-                context.turnNumber
-            );
-        }
     }
 
     /**
@@ -1635,28 +1611,56 @@ public class MatchActionService {
         if (context.blockedByPendingInteraction()) {
             return;
         }
-        if (hasTurnCheerAction(matchId, userId, context.turnNumber)) {
-            throw new GameRuleException(GameErrorCode.TURN_CHEER_ALREADY_USED, "這回合你已經發送過吶喊了");
+        validateTurnCheerAvailable(matchId, userId, context.turnNumber);
+
+        Long interactionId = prepareTurnCheerInteraction(matchId, userId);
+        matchTurnLifecycleService.beginTurnCheer(context.match, userId, context.turnNumber, interactionId);
+    }
+
+    private void validateDrawTurnAvailable(Long matchId, Long userId, int turnNumber) {
+        if (hasDrawTurnAction(matchId, userId, turnNumber)) {
+            throw new GameRuleException(GameErrorCode.TURN_DRAW_ALREADY_USED, "這回合你已經抽過卡了");
+        }
+    }
+
+    private DrawTurnResult executeDrawTurn(Long matchId, Long userId, ActionContext context) {
+        Long drawnCardInstanceId = drawTopDeckCardToHand(matchId, userId);
+        if (drawnCardInstanceId == null) {
+            finishMatchByDefeat(context.match, userId, "DRAW_DECK_OUT", context.turnNumber);
+            touchUpdatedAt(context.match);
+            matchRepository.saveAndFlush(context.match);
+            return DrawTurnResult.deckOut();
         }
 
+        Long drawInteractionId = createDrawRevealPendingInteraction(matchId, userId, drawnCardInstanceId);
+        return DrawTurnResult.drawn(drawnCardInstanceId, drawInteractionId);
+    }
+
+    private void appendDrawTurnAction(MatchEntity match, Long userId, int turnNumber, Long drawnCardInstanceId) {
+        Map<String, Object> drawPayload = new LinkedHashMap<>();
+        drawPayload.put("drawCount", 1);
+        drawPayload.put("drawnCardInstanceIds", List.of(drawnCardInstanceId));
+        appendAction(
+            match,
+            userId,
+            ACTION_TYPE_DRAW_TURN,
+            toJson(drawPayload),
+            turnNumber
+        );
+    }
+
+    private void validateTurnCheerAvailable(Long matchId, Long userId, int turnNumber) {
+        if (hasTurnCheerAction(matchId, userId, turnNumber)) {
+            throw new GameRuleException(GameErrorCode.TURN_CHEER_ALREADY_USED, "這回合你已經發送過吶喊了");
+        }
+    }
+
+    private Long prepareTurnCheerInteraction(Long matchId, Long userId) {
         Long interactionId = createTurnSendCheerPendingInteraction(matchId, userId);
         if (interactionId == null) {
             throw new IllegalStateException("目前無法發送吶喊：請確認你有可用吶喊卡且場上有 Holomem");
         }
-        Map<String, Object> interactionPayload = new LinkedHashMap<>();
-        interactionPayload.put("interactionId", interactionId);
-        interactionPayload.put("interactionType", INTERACTION_TYPE_SEND_CHEER);
-        interactionPayload.put("sourceActionType", ACTION_TYPE_TURN_CHEER);
-        context.match.setCurrentPhase(MatchPhase.CHEER.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
-        appendAction(
-            context.match,
-            userId,
-            "INTERACTION_PENDING",
-            toJson(interactionPayload),
-            context.turnNumber
-        );
+        return interactionId;
     }
 
     /**
@@ -1675,166 +1679,211 @@ public class MatchActionService {
             return;
         }
         if (context.phase == MatchPhase.MAIN) {
-            List<String> missingActions = new ArrayList<>();
-            if (!hasDrawTurnAction(matchId, userId, context.turnNumber)) {
-                missingActions.add("抽卡");
-            }
-            if (canPerformTurnCheerAction(matchId, userId) && !hasTurnCheerAction(matchId, userId, context.turnNumber)) {
-                missingActions.add("發送吶喊");
-            }
-            if (!missingActions.isEmpty()) {
-                throw new GameRuleException(
-                    GameErrorCode.TURN_ACTIONS_INCOMPLETE,
-                    "回合尚未完成：" + String.join("、", missingActions) + "。請先完成後再進入下一階段"
-                );
-            }
+            validateRequiredTurnActionsCompleted(matchId, userId, context.turnNumber, "請先完成後再進入下一階段");
         }
 
-        MatchPhase nextPhase = switch (context.phase) {
+        MatchPhase nextPhase = resolveNextAdvancePhase(context, userId);
+
+        AdvancePhaseFollowup followup = prepareAdvancePhaseFollowup(matchId, userId, context, nextPhase);
+        Map<String, Object> payload = buildAdvancePhasePayload(context.phase, nextPhase, followup);
+        matchTurnLifecycleService.advancePhase(
+            context.match,
+            userId,
+            context.turnNumber,
+            nextPhase,
+            payload
+        );
+    }
+
+    private void validateRequiredTurnActionsCompleted(Long matchId, Long userId, int turnNumber, String suffixMessage) {
+        List<String> missingActions = new ArrayList<>();
+        if (!hasDrawTurnAction(matchId, userId, turnNumber)) {
+            missingActions.add("抽卡");
+        }
+        if (canPerformTurnCheerAction(matchId, userId) && !hasTurnCheerAction(matchId, userId, turnNumber)) {
+            missingActions.add("發送吶喊");
+        }
+        if (!missingActions.isEmpty()) {
+            throw new GameRuleException(
+                GameErrorCode.TURN_ACTIONS_INCOMPLETE,
+                "回合尚未完成：" + String.join("、", missingActions) + "。" + suffixMessage
+            );
+        }
+    }
+
+    private MatchPhase resolveNextAdvancePhase(ActionContext context, Long userId) {
+        return switch (context.phase) {
             case MAIN -> isFirstPlayerFirstTurn(context.match, userId, context.turnNumber) ? MatchPhase.END : MatchPhase.PERFORMANCE;
             case PERFORMANCE -> MatchPhase.END;
             default -> throw new IllegalStateException("目前 phase 不支援推進：" + context.phase);
         };
+    }
 
-        context.match.setCurrentPhase(nextPhase.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
-
-        List<Map<String, Object>> performanceStartGiftEffects = List.of();
-        List<Map<String, Object>> opponentPerformanceStartGiftEffects = List.of();
-        FollowupInteractionDecision performanceStartGiftDecision = null;
-        FollowupInteractionDecision opponentPerformanceStartGiftDecision = null;
-        List<Map<String, Object>> performanceEndGiftEffects = List.of();
-        List<Map<String, Object>> opponentPerformanceEndGiftEffects = List.of();
-        FollowupInteractionDecision performanceEndGiftDecision = null;
-        FollowupInteractionDecision opponentPerformanceEndGiftDecision = null;
+    private AdvancePhaseFollowup prepareAdvancePhaseFollowup(
+        Long matchId,
+        Long userId,
+        ActionContext context,
+        MatchPhase nextPhase
+    ) {
         if (context.phase == MatchPhase.MAIN && nextPhase == MatchPhase.PERFORMANCE) {
-            matchGiftTriggerService.recordPerformancePhaseSnapshot(matchId, userId, userId, context.turnNumber);
-            if (context.opponentUserId != null) {
-                matchGiftTriggerService.recordPerformancePhaseSnapshot(
-                    matchId,
-                    userId,
-                    context.opponentUserId,
-                    context.turnNumber
-                );
-            }
-            performanceStartGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnPerformanceStart(
+            return preparePerformanceStartAdvancePhaseFollowup(matchId, userId, context);
+        }
+        if (context.phase == MatchPhase.PERFORMANCE && nextPhase == MatchPhase.END) {
+            return preparePerformanceEndAdvancePhaseFollowup(matchId, userId, context);
+        }
+        return AdvancePhaseFollowup.empty();
+    }
+
+    private AdvancePhaseFollowup preparePerformanceStartAdvancePhaseFollowup(
+        Long matchId,
+        Long userId,
+        ActionContext context
+    ) {
+        matchGiftTriggerService.recordPerformancePhaseSnapshot(matchId, userId, userId, context.turnNumber);
+        if (context.opponentUserId != null) {
+            matchGiftTriggerService.recordPerformancePhaseSnapshot(
                 matchId,
                 userId,
+                context.opponentUserId,
                 context.turnNumber
             );
-            if (!performanceStartGiftEffects.isEmpty()) {
-                performanceStartGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
-                    matchId,
-                    userId,
-                    null,
-                    null,
-                    buildGiftTriggerInteractionCards(matchId, userId, null, null, performanceStartGiftEffects),
-                    performanceStartGiftEffects,
-                    context.turnNumber
-                );
-            }
-            if (context.opponentUserId != null) {
-                opponentPerformanceStartGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOpponentPerformanceStart(
-                    matchId,
-                    context.opponentUserId,
-                    context.turnNumber
-                );
-                if (!opponentPerformanceStartGiftEffects.isEmpty()) {
-                    opponentPerformanceStartGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
-                        matchId,
-                        context.opponentUserId,
-                        null,
-                        null,
-                        buildGiftTriggerInteractionCards(
-                            matchId,
-                            context.opponentUserId,
-                            null,
-                            null,
-                            opponentPerformanceStartGiftEffects
-                        ),
-                        opponentPerformanceStartGiftEffects,
-                        context.turnNumber
-                    );
-                }
-            }
-        } else if (context.phase == MatchPhase.PERFORMANCE && nextPhase == MatchPhase.END) {
-            performanceEndGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnPerformanceEnd(
-                matchId,
-                userId,
-                context.turnNumber
-            );
-            if (!performanceEndGiftEffects.isEmpty()) {
-                performanceEndGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
-                    matchId,
-                    userId,
-                    null,
-                    null,
-                    buildGiftTriggerInteractionCards(matchId, userId, null, null, performanceEndGiftEffects),
-                    performanceEndGiftEffects,
-                    context.turnNumber
-                );
-            }
-            if (context.opponentUserId != null) {
-                opponentPerformanceEndGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOpponentPerformanceEnd(
-                    matchId,
-                    context.opponentUserId,
-                    context.turnNumber
-                );
-                if (!opponentPerformanceEndGiftEffects.isEmpty()) {
-                    opponentPerformanceEndGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
-                        matchId,
-                        context.opponentUserId,
-                        null,
-                        null,
-                        buildGiftTriggerInteractionCards(
-                            matchId,
-                            context.opponentUserId,
-                            null,
-                            null,
-                            opponentPerformanceEndGiftEffects
-                        ),
-                        opponentPerformanceEndGiftEffects,
-                        context.turnNumber
-                    );
-                }
-            }
         }
 
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("fromPhase", context.phase.name());
-        payload.put("toPhase", nextPhase.name());
-        payload.put("firstPlayerFirstTurnSkip", context.phase == MatchPhase.MAIN && nextPhase == MatchPhase.END);
-        if (context.phase == MatchPhase.MAIN && nextPhase == MatchPhase.PERFORMANCE) {
-            payload.put("performanceStartGiftEffects", buildGiftTriggeredEffectDeferredSummary(performanceStartGiftEffects));
-            payload.put(
-                "opponentPerformanceStartGiftEffects",
-                buildGiftTriggeredEffectDeferredSummary(opponentPerformanceStartGiftEffects)
-            );
-            putFollowupDecisionPayload(payload, performanceStartGiftDecision);
-            if (opponentPerformanceStartGiftDecision != null) {
-                payload.put("opponentPendingInteractionDecisionId", opponentPerformanceStartGiftDecision.decisionId());
-                payload.put("opponentPendingInteractionDecisionType", opponentPerformanceStartGiftDecision.decisionType());
-            }
-        } else if (context.phase == MatchPhase.PERFORMANCE && nextPhase == MatchPhase.END) {
-            payload.put("performanceEndGiftEffects", buildGiftTriggeredEffectDeferredSummary(performanceEndGiftEffects));
-            payload.put(
-                "opponentPerformanceEndGiftEffects",
-                buildGiftTriggeredEffectDeferredSummary(opponentPerformanceEndGiftEffects)
-            );
-            putFollowupDecisionPayload(payload, performanceEndGiftDecision);
-            if (opponentPerformanceEndGiftDecision != null) {
-                payload.put("opponentPendingInteractionDecisionId", opponentPerformanceEndGiftDecision.decisionId());
-                payload.put("opponentPendingInteractionDecisionType", opponentPerformanceEndGiftDecision.decisionType());
-            }
-        }
-        appendAction(
-            context.match,
+        List<Map<String, Object>> ownGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnPerformanceStart(
+            matchId,
             userId,
-            "ADVANCE_PHASE",
-            toJson(payload),
             context.turnNumber
         );
+        FollowupInteractionDecision ownDecision = createDeferredGiftTriggerDecision(
+            matchId,
+            userId,
+            context.turnNumber,
+            ownGiftEffects
+        );
+
+        List<Map<String, Object>> opponentGiftEffects = List.of();
+        FollowupInteractionDecision opponentDecision = null;
+        if (context.opponentUserId != null) {
+            opponentGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOpponentPerformanceStart(
+                matchId,
+                context.opponentUserId,
+                context.turnNumber
+            );
+            opponentDecision = createDeferredGiftTriggerDecision(
+                matchId,
+                context.opponentUserId,
+                context.turnNumber,
+                opponentGiftEffects
+            );
+        }
+        return new AdvancePhaseFollowup(
+            ownGiftEffects,
+            opponentGiftEffects,
+            ownDecision,
+            opponentDecision,
+            true
+        );
+    }
+
+    private AdvancePhaseFollowup preparePerformanceEndAdvancePhaseFollowup(
+        Long matchId,
+        Long userId,
+        ActionContext context
+    ) {
+        List<Map<String, Object>> ownGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnPerformanceEnd(
+            matchId,
+            userId,
+            context.turnNumber
+        );
+        FollowupInteractionDecision ownDecision = createDeferredGiftTriggerDecision(
+            matchId,
+            userId,
+            context.turnNumber,
+            ownGiftEffects
+        );
+
+        List<Map<String, Object>> opponentGiftEffects = List.of();
+        FollowupInteractionDecision opponentDecision = null;
+        if (context.opponentUserId != null) {
+            opponentGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOpponentPerformanceEnd(
+                matchId,
+                context.opponentUserId,
+                context.turnNumber
+            );
+            opponentDecision = createDeferredGiftTriggerDecision(
+                matchId,
+                context.opponentUserId,
+                context.turnNumber,
+                opponentGiftEffects
+            );
+        }
+        return new AdvancePhaseFollowup(
+            ownGiftEffects,
+            opponentGiftEffects,
+            ownDecision,
+            opponentDecision,
+            false
+        );
+    }
+
+    private FollowupInteractionDecision createDeferredGiftTriggerDecision(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        List<Map<String, Object>> giftEffects
+    ) {
+        if (giftEffects == null || giftEffects.isEmpty()) {
+            return null;
+        }
+        return createGiftTriggeredEffectConfirmPendingInteraction(
+            matchId,
+            userId,
+            null,
+            null,
+            buildGiftTriggerInteractionCards(matchId, userId, null, null, giftEffects),
+            giftEffects,
+            turnNumber
+        );
+    }
+
+    private Map<String, Object> buildAdvancePhasePayload(
+        MatchPhase currentPhase,
+        MatchPhase nextPhase,
+        AdvancePhaseFollowup followup
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("fromPhase", currentPhase.name());
+        payload.put("toPhase", nextPhase.name());
+        payload.put("firstPlayerFirstTurnSkip", currentPhase == MatchPhase.MAIN && nextPhase == MatchPhase.END);
+        if (followup != null && currentPhase == MatchPhase.MAIN && nextPhase == MatchPhase.PERFORMANCE) {
+            payload.put("performanceStartGiftEffects", buildGiftTriggeredEffectDeferredSummary(followup.ownGiftEffects()));
+            payload.put(
+                "opponentPerformanceStartGiftEffects",
+                buildGiftTriggeredEffectDeferredSummary(followup.opponentGiftEffects())
+            );
+            putFollowupDecisionPayload(payload, followup.ownDecision());
+            putOpponentFollowupDecisionPayload(payload, followup.opponentDecision());
+        } else if (followup != null && currentPhase == MatchPhase.PERFORMANCE && nextPhase == MatchPhase.END) {
+            payload.put("performanceEndGiftEffects", buildGiftTriggeredEffectDeferredSummary(followup.ownGiftEffects()));
+            payload.put(
+                "opponentPerformanceEndGiftEffects",
+                buildGiftTriggeredEffectDeferredSummary(followup.opponentGiftEffects())
+            );
+            putFollowupDecisionPayload(payload, followup.ownDecision());
+            putOpponentFollowupDecisionPayload(payload, followup.opponentDecision());
+        }
+        return payload;
+    }
+
+    private void putOpponentFollowupDecisionPayload(
+        Map<String, Object> payload,
+        FollowupInteractionDecision followupDecision
+    ) {
+        if (payload == null || followupDecision == null) {
+            return;
+        }
+        payload.put("opponentPendingInteractionDecisionId", followupDecision.decisionId());
+        payload.put("opponentPendingInteractionDecisionType", followupDecision.decisionType());
     }
 
     /**
@@ -1844,51 +1893,17 @@ public class MatchActionService {
         Long matchId = context.match.getId();
         MatchPlayerEntity openingPlayer = matchPlayerRepository.findByMatchIdAndUserId(matchId, userId)
             .orElseThrow(() -> new IllegalArgumentException("你不在此房間中"));
+        validateOpeningSetupAvailable(openingPlayer);
+
+        matchTurnLifecycleService.completeOpeningSetup(context.match, userId, context.turnNumber);
+    }
+
+    private void validateOpeningSetupAvailable(MatchPlayerEntity openingPlayer) {
+        if (openingPlayer == null) {
+            throw new IllegalArgumentException("找不到開場設置玩家");
+        }
         if (!openingPlayer.isMulliganDone()) {
             throw new IllegalStateException("請先完成起手調度");
-        }
-        if (!hasOpeningCenterPlaced(matchId, userId)) {
-            throw new IllegalStateException("請先放置開場 CENTER Holomem");
-        }
-        if (hasOpeningSetupFinished(matchId, userId)) {
-            throw new IllegalStateException("你已完成開場設置");
-        }
-
-        appendAction(
-            context.match,
-            userId,
-            "OPENING_SETUP_DONE",
-            toJson(Map.of("userId", userId)),
-            context.turnNumber
-        );
-
-        Long nextUserId = resolveNextOpeningSetupUser(context.match, userId);
-        if (nextUserId != null) {
-            context.match.setCurrentTurnPlayerId(nextUserId);
-            context.match.setCurrentPhase(MatchPhase.RESET.name());
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-            return;
-        }
-
-        context.match.setCurrentTurnPlayerId(context.match.getPlayerAId());
-        context.match.setCurrentPhase(MatchPhase.RESET.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
-
-        Long liveStartInteractionId = createLiveStartPendingInteraction(matchId, context.match.getPlayerAId(), context.turnNumber);
-        if (liveStartInteractionId != null) {
-            Map<String, Object> interactionPayload = new LinkedHashMap<>();
-            interactionPayload.put("interactionId", liveStartInteractionId);
-            interactionPayload.put("interactionType", INTERACTION_TYPE_LIVE_START);
-            interactionPayload.put("sourceActionType", INTERACTION_TYPE_LIVE_START);
-            appendAction(
-                context.match,
-                context.match.getPlayerAId(),
-                "INTERACTION_PENDING",
-                toJson(interactionPayload),
-                context.turnNumber
-            );
         }
     }
 
@@ -4636,115 +4651,24 @@ public class MatchActionService {
             );
         }
         int clearedEffectCount = matchTurnEffectMaintenanceService.clearExpiredTurnEffects(matchId, context.turnNumber);
-        int resetRestedCount = resetRestedHolomemsForTurnStart(
+        int resetRestedCount = matchTurnLifecycleService.resetRestedHolomemsForTurnStart(
             matchId,
             context.opponentUserId,
             context.turnNumber
         );
-        Map<String, Object> centerReplenishSummary = resolveEndTurnCenterReplenishCycle(matchId, userId);
-        if (
-            !"active".equalsIgnoreCase(asString(context.match.getStatus())) ||
-            !LobbyMatchStatus.STARTED.name().equalsIgnoreCase(asString(context.match.getLobbyStatus()))
-        ) {
-            throw new IllegalStateException("END_TURN 結算流程異常：對戰已非進行中狀態");
-        }
-        jdbcTemplate.update(
-            """
-            UPDATE match_players
-            SET skill_used_this_turn = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE match_id = ?
-              AND user_id = ?
-            """,
-            matchId,
-            context.opponentUserId
-        );
-
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("fromUserId", userId);
-        payload.put("toUserId", context.opponentUserId);
-        payload.put("clearedExpiredTurnEffects", clearedEffectCount);
-        payload.put("resetRestedCount", resetRestedCount);
-        payload.put("centerReplenish", centerReplenishSummary);
-
-        int nextTurnNumber = context.turnNumber + 1;
-        payload.put("nextTurnNumber", nextTurnNumber);
-
-        appendAction(
-            context.match,
-            userId,
-            "END_TURN",
-            toJson(payload),
-            context.turnNumber
-        );
-
-        context.match.setCurrentTurnPlayerId(context.opponentUserId);
-        context.match.setTurnNumber(nextTurnNumber);
-        context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
-
-        Long interactionId = createTurnStartPendingInteraction(matchId, context.opponentUserId, nextTurnNumber);
-        if (interactionId != null) {
-            Map<String, Object> interactionPayload = new LinkedHashMap<>();
-            interactionPayload.put("interactionId", interactionId);
-            interactionPayload.put("interactionType", INTERACTION_TYPE_TURN_START);
-            interactionPayload.put("sourceActionType", INTERACTION_TYPE_TURN_START);
-            appendAction(
-                context.match,
-                context.opponentUserId,
-                "INTERACTION_PENDING",
-                toJson(interactionPayload),
-                nextTurnNumber
-            );
-        }
-    }
-
-    /**
-     * 回合開始重置對手休息狀態（受 UNREST 鎖定者不重置）。
-     */
-    private int resetRestedHolomemsForTurnStart(Long matchId, Long userId, int currentTurn) {
-        if (matchId == null || userId == null || currentTurn <= 0) {
-            return 0;
-        }
-        List<Map<String, Object>> restedRows = jdbcTemplate.queryForList(
-            """
-            SELECT id, zone
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND is_rested = TRUE
-            """,
+        Map<String, Object> centerReplenishSummary = matchTurnLifecycleService.resolveEndTurnCenterReplenishCycle(
             matchId,
             userId
         );
-        int resetCount = 0;
-        for (Map<String, Object> row : restedRows) {
-            Long holomemId = asLong(row.get("id"));
-            String zone = asString(row.get("zone"));
-            if (holomemId == null) {
-                continue;
-            }
-            if (isStageActionLocked(matchId, userId, currentTurn, "UNREST", zone, holomemId)) {
-                continue;
-            }
-            int updated = jdbcTemplate.update(
-                """
-                UPDATE match_holomems
-                SET is_rested = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND is_rested = TRUE
-                """,
-                holomemId,
-                matchId,
-                userId
-            );
-            resetCount += updated;
-        }
-        return resetCount;
+        matchTurnLifecycleService.completeEndTurn(
+            context.match,
+            userId,
+            context.opponentUserId,
+            context.turnNumber,
+            clearedEffectCount,
+            resetRestedCount,
+            centerReplenishSummary
+        );
     }
 
     /**
@@ -4825,49 +4749,6 @@ public class MatchActionService {
     }
 
     /**
-     * 建立 LIVE_START 互動，要求玩家確認開場完成。
-     */
-    private Long createLiveStartPendingInteraction(Long matchId, Long userId, int turnNumber) {
-        if (matchId == null || userId == null || userId <= 0) {
-            return null;
-        }
-        if (hasAnyPendingDecision(matchId, userId)) {
-            return null;
-        }
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("interactionType", INTERACTION_TYPE_LIVE_START);
-        context.put("title", "LIVE START!!");
-        context.put("message", "雙方開場舞台已設置完成，確認後翻開 CENTER 與 BACK 並開始對戰。");
-        context.put("turnNumber", turnNumber);
-        return jdbcTemplate.query(
-            """
-            INSERT INTO match_pending_decisions (
-                match_id,
-                user_id,
-                decision_type,
-                source_action_type,
-                source_card_instance_id,
-                source_card_id,
-                effect_type,
-                min_select,
-                max_select,
-                status,
-                context_json
-            ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 1, 1, ?, CAST(? AS jsonb))
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            INTERACTION_TYPE_LIVE_START,
-            INTERACTION_TYPE_LIVE_START,
-            INTERACTION_TYPE_LIVE_START,
-            PENDING_STATUS,
-            toJson(context)
-        );
-    }
-
-    /**
      * 推導下一位需放置開場 CENTER 的玩家（A 優先、再 B）。
      */
     private Long resolveNextOpeningCenterUser(MatchEntity match) {
@@ -4886,24 +4767,6 @@ public class MatchActionService {
     }
 
     /**
-     * 推導下一位需完成開場設置的玩家。
-     */
-    private Long resolveNextOpeningSetupUser(MatchEntity match, Long currentUserId) {
-        if (match == null || currentUserId == null) {
-            return null;
-        }
-        Long playerAId = match.getPlayerAId();
-        Long playerBId = match.getPlayerBId();
-        if (currentUserId.equals(playerAId) && playerBId != null && !hasOpeningSetupFinished(match.getId(), playerBId)) {
-            return playerBId;
-        }
-        if (currentUserId.equals(playerBId) && playerAId != null && !hasOpeningSetupFinished(match.getId(), playerAId)) {
-            return playerAId;
-        }
-        return null;
-    }
-
-    /**
      * 判斷玩家是否已放置開場 CENTER Holomem。
      */
     private boolean hasOpeningCenterPlaced(Long matchId, Long userId) {
@@ -4914,25 +4777,6 @@ public class MatchActionService {
             WHERE match_id = ?
               AND owner_user_id = ?
               AND zone = 'CENTER'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        return count != null && count > 0;
-    }
-
-    /**
-     * 判斷玩家是否已完成開場設置確認。
-     */
-    private boolean hasOpeningSetupFinished(Long matchId, Long userId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_actions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND action_type = 'OPENING_SETUP_DONE'
             """,
             Integer.class,
             matchId,
@@ -4964,160 +4808,6 @@ public class MatchActionService {
             ACTION_TYPE_DRAW_TURN
         );
         return count != null && count > 0;
-    }
-
-    /**
-     * END_TURN 前中心補位循環：當 CENTER 空缺時，嘗試由 BACK 自動補上。
-     */
-    private Map<String, Object> resolveEndTurnCenterReplenishCycle(Long matchId, Long userId) {
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("applied", false);
-        if (matchId == null || userId == null) {
-            summary.put("reason", "INVALID_ARGUMENTS");
-            summary.put("settled", false);
-            summary.put("iterations", List.of());
-            return summary;
-        }
-        List<Map<String, Object>> iterations = new ArrayList<>();
-        boolean settled = false;
-        boolean appliedAny = false;
-        String reason = "CENTER_EXISTS";
-        final int maxIterations = 8;
-        for (int i = 0; i < maxIterations; i++) {
-            if (hasCenterHolomem(matchId, userId)) {
-                settled = true;
-                reason = "CENTER_EXISTS";
-                break;
-            }
-            Map<String, Object> step = autoReplenishCenterFromBackOnce(matchId, userId);
-            iterations.add(step);
-            if (toBoolean(step.get("applied"))) {
-                appliedAny = true;
-            }
-            if (!toBoolean(step.get("applied"))) {
-                reason = asString(step.get("reason"));
-                settled = false;
-                break;
-            }
-            reason = asString(step.get("reason"));
-        }
-        if (hasCenterHolomem(matchId, userId)) {
-            settled = true;
-            if (!appliedAny) {
-                reason = "CENTER_EXISTS";
-            }
-        }
-        summary.put("applied", appliedAny);
-        summary.put("reason", reason);
-        summary.put("settled", settled);
-        summary.put("iterationCount", iterations.size());
-        summary.put("iterations", iterations);
-        return summary;
-    }
-
-    /**
-     * 執行一次 BACK -> CENTER 自動補位，並回傳本次步驟摘要。
-     */
-    private Map<String, Object> autoReplenishCenterFromBackOnce(Long matchId, Long userId) {
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("applied", false);
-        if (matchId == null || userId == null) {
-            summary.put("reason", "INVALID_ARGUMENTS");
-            return summary;
-        }
-        Integer centerCount = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CENTER'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        if (centerCount != null && centerCount > 0) {
-            summary.put("reason", "CENTER_EXISTS");
-            return summary;
-        }
-        Map<String, Object> preferredBack = jdbcTemplate.query(
-            """
-            SELECT id, match_card_id, card_id, is_rested
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'BACK'
-            ORDER BY CASE WHEN is_rested = FALSE THEN 0 ELSE 1 END, id
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", rs.getLong("id"));
-                row.put("match_card_id", rs.getLong("match_card_id"));
-                row.put("card_id", rs.getString("card_id"));
-                row.put("is_rested", rs.getObject("is_rested"));
-                return row;
-            },
-            matchId,
-            userId
-        );
-        if (preferredBack == null) {
-            summary.put("reason", "NO_BACK_HOLOMEM");
-            return summary;
-        }
-        Long holomemId = asLong(preferredBack.get("id"));
-        if (holomemId == null) {
-            summary.put("reason", "BACK_HOLOMEM_INVALID");
-            return summary;
-        }
-        int moved = jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET zone = 'CENTER',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'BACK'
-            """,
-            holomemId,
-            matchId,
-            userId
-        );
-        if (moved != 1) {
-            summary.put("reason", "MOVE_FAILED");
-            return summary;
-        }
-        summary.put("applied", true);
-        summary.put("reason", "CENTER_REPLENISHED");
-        summary.put("targetHolomemId", holomemId);
-        summary.put("targetHolomemCardInstanceId", asLong(preferredBack.get("match_card_id")));
-        summary.put("targetCardId", asString(preferredBack.get("card_id")));
-        summary.put("fromRested", toBoolean(preferredBack.get("is_rested")));
-        return summary;
-    }
-
-    /**
-     * 判斷我方是否存在 CENTER Holomem。
-     */
-    private boolean hasCenterHolomem(Long matchId, Long userId) {
-        Integer centerCount = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CENTER'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        return centerCount != null && centerCount > 0;
     }
 
     /**
@@ -9806,6 +9496,20 @@ public class MatchActionService {
         Long opponentUserId,
         boolean blockedByPendingInteraction
     ) {
+    }
+
+    private record DrawTurnResult(
+        Long drawnCardInstanceId,
+        Long drawInteractionId,
+        boolean deckOut
+    ) {
+        private static DrawTurnResult drawn(Long drawnCardInstanceId, Long drawInteractionId) {
+            return new DrawTurnResult(drawnCardInstanceId, drawInteractionId, false);
+        }
+
+        private static DrawTurnResult deckOut() {
+            return new DrawTurnResult(null, null, true);
+        }
     }
 
     private record ArtCritical(String color, int bonus) {
