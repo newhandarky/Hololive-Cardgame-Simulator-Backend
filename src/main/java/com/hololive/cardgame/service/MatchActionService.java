@@ -88,6 +88,7 @@ public class MatchActionService {
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
     private final MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService;
     private final MatchTurnLifecycleService matchTurnLifecycleService;
+    private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final MatchTriggeredGiftResolutionService matchTriggeredGiftResolutionService;
@@ -113,6 +114,7 @@ public class MatchActionService {
         MatchTriggeredCombatEffectService matchTriggeredCombatEffectService,
         MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService,
         MatchTurnLifecycleService matchTurnLifecycleService,
+        MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
         MatchTriggeredGiftResolutionService matchTriggeredGiftResolutionService,
@@ -132,6 +134,7 @@ public class MatchActionService {
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
         this.matchTurnEffectMaintenanceService = matchTurnEffectMaintenanceService;
         this.matchTurnLifecycleService = matchTurnLifecycleService;
+        this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.matchTriggeredGiftResolutionService = matchTriggeredGiftResolutionService;
@@ -1629,7 +1632,7 @@ public class MatchActionService {
             finishMatchByDefeat(context.match, userId, "DRAW_DECK_OUT", context.turnNumber);
             touchUpdatedAt(context.match);
             matchRepository.saveAndFlush(context.match);
-            return DrawTurnResult.deckOut();
+            return DrawTurnResult.deckedOut();
         }
 
         Long drawInteractionId = createDrawRevealPendingInteraction(matchId, userId, drawnCardInstanceId);
@@ -1684,8 +1687,10 @@ public class MatchActionService {
 
         MatchPhase nextPhase = resolveNextAdvancePhase(context, userId);
 
-        AdvancePhaseFollowup followup = prepareAdvancePhaseFollowup(matchId, userId, context, nextPhase);
-        Map<String, Object> payload = buildAdvancePhasePayload(context.phase, nextPhase, followup);
+        MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition transition =
+            matchPhaseAdvanceGiftTransitionService.resolveAdvancePhaseTransition(context.phase, nextPhase);
+        AdvancePhaseFollowup followup = prepareAdvancePhaseFollowup(matchId, userId, context, transition);
+        Map<String, Object> payload = buildAdvancePhasePayload(context.phase, nextPhase, followup, transition);
         matchTurnLifecycleService.advancePhase(
             context.match,
             userId,
@@ -1723,97 +1728,51 @@ public class MatchActionService {
         Long matchId,
         Long userId,
         ActionContext context,
-        MatchPhase nextPhase
+        MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition transition
     ) {
-        if (context.phase == MatchPhase.MAIN && nextPhase == MatchPhase.PERFORMANCE) {
-            return preparePerformanceStartAdvancePhaseFollowup(matchId, userId, context);
+        if (transition == null) {
+            return AdvancePhaseFollowup.empty();
         }
-        if (context.phase == MatchPhase.PERFORMANCE && nextPhase == MatchPhase.END) {
-            return preparePerformanceEndAdvancePhaseFollowup(matchId, userId, context);
-        }
-        return AdvancePhaseFollowup.empty();
-    }
-
-    private AdvancePhaseFollowup preparePerformanceStartAdvancePhaseFollowup(
-        Long matchId,
-        Long userId,
-        ActionContext context
-    ) {
-        matchGiftTriggerService.recordPerformancePhaseSnapshot(matchId, userId, userId, context.turnNumber);
-        if (context.opponentUserId != null) {
-            matchGiftTriggerService.recordPerformancePhaseSnapshot(
+        return createAdvancePhaseFollowup(
+            matchId,
+            userId,
+            context.opponentUserId,
+            context.turnNumber,
+            matchPhaseAdvanceGiftTransitionService.prepareAdvancePhaseTransition(
+                transition,
                 matchId,
                 userId,
                 context.opponentUserId,
                 context.turnNumber
-            );
-        }
-
-        List<Map<String, Object>> ownGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnPerformanceStart(
-            matchId,
-            userId,
-            context.turnNumber
-        );
-        FollowupInteractionDecision ownDecision = createDeferredGiftTriggerDecision(
-            matchId,
-            userId,
-            context.turnNumber,
-            ownGiftEffects
-        );
-
-        List<Map<String, Object>> opponentGiftEffects = List.of();
-        FollowupInteractionDecision opponentDecision = null;
-        if (context.opponentUserId != null) {
-            opponentGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOpponentPerformanceStart(
-                matchId,
-                context.opponentUserId,
-                context.turnNumber
-            );
-            opponentDecision = createDeferredGiftTriggerDecision(
-                matchId,
-                context.opponentUserId,
-                context.turnNumber,
-                opponentGiftEffects
-            );
-        }
-        return new AdvancePhaseFollowup(
-            ownGiftEffects,
-            opponentGiftEffects,
-            ownDecision,
-            opponentDecision,
-            true
+            )
         );
     }
 
-    private AdvancePhaseFollowup preparePerformanceEndAdvancePhaseFollowup(
+    private AdvancePhaseFollowup createAdvancePhaseFollowup(
         Long matchId,
         Long userId,
-        ActionContext context
+        Long opponentUserId,
+        int turnNumber,
+        MatchPhaseAdvanceGiftTransitionService.GiftTransitionPreview transitionPreview
     ) {
-        List<Map<String, Object>> ownGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnPerformanceEnd(
-            matchId,
-            userId,
-            context.turnNumber
-        );
+        if (transitionPreview == null) {
+            return AdvancePhaseFollowup.empty();
+        }
+        List<Map<String, Object>> ownGiftEffects = transitionPreview.ownGiftEffects();
         FollowupInteractionDecision ownDecision = createDeferredGiftTriggerDecision(
             matchId,
             userId,
-            context.turnNumber,
+            turnNumber,
             ownGiftEffects
         );
 
-        List<Map<String, Object>> opponentGiftEffects = List.of();
+        List<Map<String, Object>> opponentGiftEffects = transitionPreview.opponentGiftEffects();
         FollowupInteractionDecision opponentDecision = null;
-        if (context.opponentUserId != null) {
-            opponentGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOpponentPerformanceEnd(
-                matchId,
-                context.opponentUserId,
-                context.turnNumber
-            );
+        if (opponentUserId != null) {
             opponentDecision = createDeferredGiftTriggerDecision(
                 matchId,
-                context.opponentUserId,
-                context.turnNumber,
+                opponentUserId,
+                turnNumber,
                 opponentGiftEffects
             );
         }
@@ -1821,8 +1780,7 @@ public class MatchActionService {
             ownGiftEffects,
             opponentGiftEffects,
             ownDecision,
-            opponentDecision,
-            false
+            opponentDecision
         );
     }
 
@@ -1849,24 +1807,18 @@ public class MatchActionService {
     private Map<String, Object> buildAdvancePhasePayload(
         MatchPhase currentPhase,
         MatchPhase nextPhase,
-        AdvancePhaseFollowup followup
+        AdvancePhaseFollowup followup,
+        MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition transition
     ) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("fromPhase", currentPhase.name());
         payload.put("toPhase", nextPhase.name());
         payload.put("firstPlayerFirstTurnSkip", currentPhase == MatchPhase.MAIN && nextPhase == MatchPhase.END);
-        if (followup != null && currentPhase == MatchPhase.MAIN && nextPhase == MatchPhase.PERFORMANCE) {
-            payload.put("performanceStartGiftEffects", buildGiftTriggeredEffectDeferredSummary(followup.ownGiftEffects()));
-            payload.put(
-                "opponentPerformanceStartGiftEffects",
-                buildGiftTriggeredEffectDeferredSummary(followup.opponentGiftEffects())
-            );
-            putFollowupDecisionPayload(payload, followup.ownDecision());
-            putOpponentFollowupDecisionPayload(payload, followup.opponentDecision());
-        } else if (followup != null && currentPhase == MatchPhase.PERFORMANCE && nextPhase == MatchPhase.END) {
-            payload.put("performanceEndGiftEffects", buildGiftTriggeredEffectDeferredSummary(followup.ownGiftEffects()));
-            payload.put(
-                "opponentPerformanceEndGiftEffects",
+        if (followup != null && transition != null) {
+            matchPhaseAdvanceGiftTransitionService.putAdvancePhaseGiftEffectPayload(
+                payload,
+                transition,
+                buildGiftTriggeredEffectDeferredSummary(followup.ownGiftEffects()),
                 buildGiftTriggeredEffectDeferredSummary(followup.opponentGiftEffects())
             );
             putFollowupDecisionPayload(payload, followup.ownDecision());
@@ -9507,7 +9459,7 @@ public class MatchActionService {
             return new DrawTurnResult(drawnCardInstanceId, drawInteractionId, false);
         }
 
-        private static DrawTurnResult deckOut() {
+        private static DrawTurnResult deckedOut() {
             return new DrawTurnResult(null, null, true);
         }
     }
@@ -9565,6 +9517,17 @@ public class MatchActionService {
         Long decisionId,
         String decisionType
     ) {
+    }
+
+    private record AdvancePhaseFollowup(
+        List<Map<String, Object>> ownGiftEffects,
+        List<Map<String, Object>> opponentGiftEffects,
+        FollowupInteractionDecision ownDecision,
+        FollowupInteractionDecision opponentDecision
+    ) {
+        private static AdvancePhaseFollowup empty() {
+            return new AdvancePhaseFollowup(List.of(), List.of(), null, null);
+        }
     }
 
     private record FollowupInteractionContext(
