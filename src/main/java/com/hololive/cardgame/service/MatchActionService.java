@@ -83,6 +83,14 @@ public class MatchActionService {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final MatchEffectService matchEffectService;
+    private final MatchEffectDamageService matchEffectDamageService;
+    private final MatchEffectCombatModifierService matchEffectCombatModifierService;
+    private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
+    private final MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService;
+    private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
+    private final MatchGiftTriggerService matchGiftTriggerService;
+    private final MatchTriggeredGiftResolutionService matchTriggeredGiftResolutionService;
+    private final MatchTriggeredEffectResolutionService matchTriggeredEffectResolutionService;
     private final MatchEventHookService matchEventHookService;
     private final GameActionExecutor gameActionExecutor;
     private final DiceService diceService;
@@ -99,6 +107,14 @@ public class MatchActionService {
         JdbcTemplate jdbcTemplate,
         ObjectMapper objectMapper,
         MatchEffectService matchEffectService,
+        MatchEffectDamageService matchEffectDamageService,
+        MatchEffectCombatModifierService matchEffectCombatModifierService,
+        MatchTriggeredCombatEffectService matchTriggeredCombatEffectService,
+        MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService,
+        MatchTriggeredCardEffectService matchTriggeredCardEffectService,
+        MatchGiftTriggerService matchGiftTriggerService,
+        MatchTriggeredGiftResolutionService matchTriggeredGiftResolutionService,
+        MatchTriggeredEffectResolutionService matchTriggeredEffectResolutionService,
         MatchEventHookService matchEventHookService,
         GameActionExecutor gameActionExecutor,
         DiceService diceService
@@ -109,6 +125,14 @@ public class MatchActionService {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.matchEffectService = matchEffectService;
+        this.matchEffectDamageService = matchEffectDamageService;
+        this.matchEffectCombatModifierService = matchEffectCombatModifierService;
+        this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
+        this.matchTurnEffectMaintenanceService = matchTurnEffectMaintenanceService;
+        this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
+        this.matchGiftTriggerService = matchGiftTriggerService;
+        this.matchTriggeredGiftResolutionService = matchTriggeredGiftResolutionService;
+        this.matchTriggeredEffectResolutionService = matchTriggeredEffectResolutionService;
         this.matchEventHookService = matchEventHookService;
         this.gameActionExecutor = gameActionExecutor;
         this.diceService = diceService;
@@ -269,7 +293,7 @@ public class MatchActionService {
             );
         List<Map<String, Object>> giftTriggeredEffects = openingReset
             ? List.of()
-            : matchEffectService.previewGiftTriggeredEffectsOnStageEnter(
+            : matchGiftTriggerService.previewGiftTriggeredEffectsOnStageEnter(
                 matchId,
                 userId,
                 cardInstanceId,
@@ -459,7 +483,7 @@ public class MatchActionService {
         }
 
         int stackDepth = countHolomemStackDepth(target.holomemId());
-        Map<String, Object> passiveGiftSummary = matchEffectService.applyPassiveGiftExtraBloomAllowanceOnBloom(
+        Map<String, Object> passiveGiftSummary = matchTriggeredCardEffectService.applyPassiveGiftExtraBloomAllowanceOnBloom(
             matchId,
             userId,
             target.holomemId(),
@@ -467,7 +491,7 @@ public class MatchActionService {
             bloomCardId
         );
         String sourceLevelType = target.topLevelType();
-        MatchEffectService.TriggeredEffectPreview bloomPreview = matchEffectService.previewBloomTriggeredEffect(
+        MatchEffectService.TriggeredEffectPreview bloomPreview = matchTriggeredCardEffectService.previewBloomTriggeredEffect(
             matchId,
             userId,
             bloomCardId,
@@ -834,17 +858,7 @@ public class MatchActionService {
             toJson(payload),
             context.turnNumber
         );
-        if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, effectSummary)) {
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-        } else if (hasLifeReduced(effectSummary) && evaluateLifeDefeat(context.match, userId, context.turnNumber)) {
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-        } else if (hasHolomemDowned(effectSummary) && evaluateNoHolomemDefeat(context.match, userId, context.turnNumber)) {
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-        }
-        enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummary, context.turnNumber);
+        finalizeResolvedEffect(context, matchId, userId, effectSummary);
     }
 
     /**
@@ -866,212 +880,87 @@ public class MatchActionService {
         }
         String decisionType = normalizeZone(pending.decisionType());
         if (INTERACTION_TYPE_TURN_START.equals(decisionType)) {
-            markDecisionResolved(pending.decisionId());
-            returnCollabToBackAsRested(matchId, userId);
-
-            context.match.setCurrentPhase(MatchPhase.DRAW.name());
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-
-            Map<String, Object> confirmedPayload = new LinkedHashMap<>();
-            confirmedPayload.put("decisionId", pending.decisionId());
-            confirmedPayload.put("interactionType", INTERACTION_TYPE_TURN_START);
-            confirmedPayload.put("sourceActionType", INTERACTION_TYPE_TURN_START);
-            appendAction(
-                context.match,
-                userId,
-                "INTERACTION_CONFIRMED",
-                toJson(confirmedPayload),
-                context.turnNumber
-            );
+            resolveTurnStartDecision(context, matchId, userId, pending);
             return;
         }
         if (INTERACTION_TYPE_LIVE_START.equals(decisionType)) {
-            markDecisionResolved(pending.decisionId());
-            jdbcTemplate.update(
-                """
-                UPDATE match_holomems
-                SET is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE match_id = ?
-                  AND owner_user_id IN (?, ?)
-                  AND zone IN ('CENTER', 'BACK')
-                """,
-                matchId,
-                context.match.getPlayerAId(),
-                context.match.getPlayerBId()
-            );
-            jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE match_id = ?
-                  AND owner_user_id IN (?, ?)
-                  AND zone = 'STAGE'
-                  AND id IN (
-                    SELECT match_card_id
-                    FROM match_holomems
-                    WHERE match_id = ?
-                      AND owner_user_id IN (?, ?)
-                      AND zone IN ('CENTER', 'BACK')
-                  )
-                """,
-                matchId,
-                context.match.getPlayerAId(),
-                context.match.getPlayerBId(),
-                matchId,
-                context.match.getPlayerAId(),
-                context.match.getPlayerBId()
-            );
-
-            context.match.setCurrentTurnPlayerId(context.match.getPlayerAId());
-            context.match.setCurrentPhase(MatchPhase.MAIN.name());
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("decisionId", pending.decisionId());
-            payload.put("interactionType", INTERACTION_TYPE_LIVE_START);
-            payload.put("sourceActionType", INTERACTION_TYPE_LIVE_START);
-            appendAction(
-                context.match,
-                userId,
-                "INTERACTION_CONFIRMED",
-                toJson(payload),
-                context.turnNumber
-            );
-
-            Long turnStartInteractionId = createTurnStartPendingInteraction(matchId, context.match.getPlayerAId(), context.turnNumber);
-            if (turnStartInteractionId != null) {
-                Map<String, Object> interactionPayload = new LinkedHashMap<>();
-                interactionPayload.put("interactionId", turnStartInteractionId);
-                interactionPayload.put("interactionType", INTERACTION_TYPE_TURN_START);
-                interactionPayload.put("sourceActionType", INTERACTION_TYPE_TURN_START);
-                appendAction(
-                    context.match,
-                    context.match.getPlayerAId(),
-                    "INTERACTION_PENDING",
-                    toJson(interactionPayload),
-                    context.turnNumber
-                );
-            }
+            resolveLiveStartDecision(context, matchId, userId, pending);
             return;
         }
         if (INTERACTION_TYPE_DRAW_REVEAL.equals(decisionType)) {
-            markDecisionResolved(pending.decisionId());
-            boolean requiresTurnCheer = canPerformTurnCheerAction(matchId, userId);
-            context.match.setCurrentPhase(requiresTurnCheer ? MatchPhase.CHEER.name() : MatchPhase.MAIN.name());
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("decisionId", pending.decisionId());
-            payload.put("interactionType", INTERACTION_TYPE_DRAW_REVEAL);
-            payload.put("sourceActionType", "DRAW_TURN");
-            payload.put("drawnCardInstanceId", pending.sourceCardInstanceId());
-            payload.put("drawnCardId", pending.sourceCardId());
-            if (!requiresTurnCheer) {
-                List<Map<String, Object>> mainStepGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOwnMainStep(
-                    matchId,
-                    userId,
-                    context.turnNumber
-                );
-                payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
-                if (!mainStepGiftEffects.isEmpty()) {
-                    FollowupInteractionDecision mainStepGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
-                        matchId,
-                        userId,
-                        null,
-                        null,
-                        buildGiftTriggerInteractionCards(matchId, userId, null, null, mainStepGiftEffects),
-                        mainStepGiftEffects,
-                        context.turnNumber
-                    );
-                    putFollowupDecisionPayload(payload, mainStepGiftDecision);
-                }
-            }
-            appendAction(
-                context.match,
-                userId,
-                "INTERACTION_CONFIRMED",
-                toJson(payload),
-                context.turnNumber
-            );
+            resolveDrawRevealDecision(context, matchId, userId, pending);
             return;
         }
         if (INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM.equals(decisionType)) {
-            boolean confirmed = request == null || request.getConfirmed() == null || request.getConfirmed();
-            markDecisionResolved(pending.decisionId());
-
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("decisionId", pending.decisionId());
-            payload.put("interactionType", INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
-            payload.put("sourceActionType", pending.sourceActionType());
-            payload.put("confirmed", confirmed);
-
-            if (confirmed) {
-                List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
-                    request == null ? null : request.getSelectedCardInstanceIds()
-                );
-                if (pending.maxSelect() > 0) {
-                    if (selectedCardInstanceIds.size() < pending.minSelect()) {
-                        throw new IllegalArgumentException("選擇卡片數量不足，至少需要 " + pending.minSelect() + " 張");
-                    }
-                    if (selectedCardInstanceIds.size() > pending.maxSelect()) {
-                        throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
-                    }
-                    validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
-                    payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
-                }
-                Map<String, Object> effectSummary = applyTriggeredEffectAfterConfirm(
-                    matchId,
-                    userId,
-                    pending,
-                    context.turnNumber,
-                    selectedCardInstanceIds
-                );
-                appendGiftTriggerActionsIfPresent(context.match, userId, context.turnNumber, effectSummary);
-                payload.put("effect", effectSummary);
-                FollowupInteractionDecision followupDecision = createFollowupInteractionPendingDecisionIfNeeded(
-                    matchId,
-                    userId,
-                    pending.sourceActionType(),
-                    pending.sourceCardInstanceId(),
-                    pending.sourceCardId(),
-                    pending.effectType(),
-                    effectSummary
-                );
-                putFollowupDecisionPayload(payload, followupDecision);
-                if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, effectSummary)) {
-                    touchUpdatedAt(context.match);
-                    matchRepository.saveAndFlush(context.match);
-                } else if (hasLifeReduced(effectSummary) && evaluateLifeDefeat(context.match, userId, context.turnNumber)) {
-                    touchUpdatedAt(context.match);
-                    matchRepository.saveAndFlush(context.match);
-                } else if (hasHolomemDowned(effectSummary) && evaluateNoHolomemDefeat(context.match, userId, context.turnNumber)) {
-                    touchUpdatedAt(context.match);
-                    matchRepository.saveAndFlush(context.match);
-                }
-                enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummary, context.turnNumber);
-            }
-
-            appendAction(
-                context.match,
-                userId,
-                confirmed ? "TRIGGER_EFFECT_EXECUTED" : "TRIGGER_EFFECT_SKIPPED",
-                toJson(payload),
-                context.turnNumber
-            );
+            resolveTriggerEffectConfirmDecision(context, matchId, userId, pending, request);
             return;
         }
         if (INTERACTION_TYPE_SEND_CHEER.equals(decisionType)) {
-            List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
-                request == null ? null : request.getSelectedCardInstanceIds()
-            );
+            resolveSendCheerDecision(context, matchId, userId, pending, request);
+            return;
+        }
+        if (DECISION_TYPE_LOOK_TOP_DECK.equals(decisionType)) {
+            resolveLookTopDeckDecision(context, matchId, userId, pending, request);
+            return;
+        }
+        if (DECISION_TYPE_LOOK_OPPONENT_HAND.equals(decisionType) || DECISION_TYPE_LOOK_HOLOPOWER.equals(decisionType)) {
+            resolveLookZoneDecision(context, userId, pending, decisionType);
+            return;
+        }
+        if (DECISION_TYPE_REORDER_DECK_BOTTOM.equals(decisionType)) {
+            resolveReorderDeckBottomDecision(context, matchId, userId, pending, request);
+            return;
+        }
+        if (!SUPPORT_DECISION_TYPE_CARD_SELECTION.equals(decisionType)) {
+            throw new IllegalStateException("目前不支援此類型決策: " + decisionType);
+        }
+        resolveSupportCardSelectionDecision(context, matchId, userId, pending, request);
+    }
+
+    private void resolveTriggerEffectConfirmDecision(
+        ActionContext context,
+        Long matchId,
+        Long userId,
+        PendingDecision pending,
+        ResolveDecisionRequest request
+    ) {
+        boolean confirmed = request == null || request.getConfirmed() == null || request.getConfirmed();
+        markDecisionResolved(pending.decisionId());
+
+        touchUpdatedAt(context.match);
+        matchRepository.saveAndFlush(context.match);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("decisionId", pending.decisionId());
+        payload.put("interactionType", INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
+        payload.put("sourceActionType", pending.sourceActionType());
+        payload.put("confirmed", confirmed);
+
+        if (confirmed) {
+            applyConfirmedTriggerEffectResolution(context, matchId, userId, pending, request, payload);
+        }
+
+        appendAction(
+            context.match,
+            userId,
+            confirmed ? "TRIGGER_EFFECT_EXECUTED" : "TRIGGER_EFFECT_SKIPPED",
+            toJson(payload),
+            context.turnNumber
+        );
+    }
+
+    private void applyConfirmedTriggerEffectResolution(
+        ActionContext context,
+        Long matchId,
+        Long userId,
+        PendingDecision pending,
+        ResolveDecisionRequest request,
+        Map<String, Object> payload
+    ) {
+        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
+            request == null ? null : request.getSelectedCardInstanceIds()
+        );
+        if (pending.maxSelect() > 0) {
             if (selectedCardInstanceIds.size() < pending.minSelect()) {
                 throw new IllegalArgumentException("選擇卡片數量不足，至少需要 " + pending.minSelect() + " 張");
             }
@@ -1079,223 +968,158 @@ public class MatchActionService {
                 throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
             }
             validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
-            Long targetHolomemCardInstanceId = selectedCardInstanceIds.get(0);
-            Long targetHolomemId = jdbcTemplate.query(
-                """
-                SELECT id
-                FROM match_holomems
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND match_card_id = ?
-                LIMIT 1
-                """,
-                rs -> rs.next() ? rs.getLong("id") : null,
-                matchId,
-                userId,
-                targetHolomemCardInstanceId
-            );
-            if (targetHolomemId == null) {
-                throw new IllegalStateException("指定的 Holomem 不存在或已離場");
-            }
-            Long sourceCardInstanceId = pending.sourceCardInstanceId();
-            if (sourceCardInstanceId == null || sourceCardInstanceId <= 0) {
-                throw new IllegalStateException("待處理吶喊互動缺少來源卡");
-            }
-            Map<String, Object> sourceCard = loadOwnedCardInstance(matchId, userId, sourceCardInstanceId);
-            String sourceZone = normalizeZone(sourceCard.get("zone"));
-            if (!Set.of("CHEER_DECK", "ARCHIVE", "HAND").contains(sourceZone)) {
-                throw new IllegalStateException("來源 Cheer 已失效，請重新整理狀態");
-            }
-            String cheerCardId = asString(sourceCard.get("card_id"));
-            Integer cheerCount = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM cheer_cards WHERE card_id = ?",
-                Integer.class,
-                cheerCardId
-            );
-            if (cheerCount == null || cheerCount <= 0) {
-                throw new IllegalStateException("來源卡不是 Cheer 卡");
-            }
-            EffectContext effectContext = new EffectContext(
-                matchId,
-                userId,
-                context.turnNumber,
-                pending.sourceActionType(),
-                sourceCardInstanceId,
-                cheerCardId
-            );
-            SendCheerAction sendCheerAction = new SendCheerAction(
-                sourceCardInstanceId,
-                targetHolomemId,
-                pending.sourceActionType()
-            );
-            List<ActionResult> actionResults = gameActionExecutor.execute(effectContext, List.of(sendCheerAction));
-            if (actionResults.isEmpty() || !actionResults.get(0).success()) {
-                String reason = actionResults.isEmpty() ? "UNKNOWN" : asString(actionResults.get(0).details().get("reason"));
-                throw new IllegalStateException("發送吶喊失敗：" + reason);
-            }
-            markDecisionResolved(pending.decisionId());
-
-            context.match.setCurrentPhase(resolvePhaseAfterSendCheer(context.phase, pending.sourceActionType()).name());
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("decisionId", pending.decisionId());
-            payload.put("interactionType", INTERACTION_TYPE_SEND_CHEER);
-            payload.put("sourceActionType", pending.sourceActionType());
-            payload.put("sourceCardInstanceId", sourceCardInstanceId);
-            payload.put("sourceCardId", cheerCardId);
-            payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
-            if (ACTION_TYPE_TURN_CHEER.equals(pending.sourceActionType())) {
-                List<Map<String, Object>> mainStepGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOwnMainStep(
-                    matchId,
-                    userId,
-                    context.turnNumber
-                );
-                payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
-                if (!mainStepGiftEffects.isEmpty()) {
-                    FollowupInteractionDecision mainStepGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
-                        matchId,
-                        userId,
-                        null,
-                        null,
-                        buildGiftTriggerInteractionCards(matchId, userId, null, null, mainStepGiftEffects),
-                        mainStepGiftEffects,
-                        context.turnNumber
-                    );
-                    putFollowupDecisionPayload(payload, mainStepGiftDecision);
-                }
-            }
-            appendAction(
-                context.match,
-                userId,
-                "INTERACTION_CONFIRMED",
-                toJson(payload),
-                context.turnNumber
-            );
-            if (ACTION_TYPE_TURN_CHEER.equals(pending.sourceActionType())) {
-                Map<String, Object> turnCheerPayload = new LinkedHashMap<>();
-                turnCheerPayload.put("sourceCardInstanceId", sourceCardInstanceId);
-                turnCheerPayload.put("sourceCardId", cheerCardId);
-                turnCheerPayload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
-                appendAction(
-                    context.match,
-                    userId,
-                    ACTION_TYPE_TURN_CHEER,
-                    toJson(turnCheerPayload),
-                    context.turnNumber
-                );
-            }
-            return;
+            payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
         }
-        if (DECISION_TYPE_LOOK_TOP_DECK.equals(decisionType)) {
-            String requestedPlacement = normalizeDecisionPlacement(request == null ? null : request.getPlacement());
-            List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
-                request == null ? null : request.getSelectedCardInstanceIds()
-            );
-            if (requestedPlacement != null) {
-                if ("TOP".equals(requestedPlacement)) {
-                    Long lookedCardInstanceId = pending.candidateCardInstanceIds().isEmpty()
-                        ? null
-                        : pending.candidateCardInstanceIds().get(0);
-                    selectedCardInstanceIds = lookedCardInstanceId == null
-                        ? List.of()
-                        : List.of(lookedCardInstanceId);
-                } else if ("BOTTOM".equals(requestedPlacement)) {
-                    selectedCardInstanceIds = List.of();
-                } else {
-                    throw new IllegalArgumentException("placement 只支援 TOP 或 BOTTOM");
-                }
-            }
-            if (selectedCardInstanceIds.size() > pending.maxSelect()) {
-                throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
-            }
-            validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
-            Long lookedCardInstanceId = pending.candidateCardInstanceIds().isEmpty()
-                ? null
-                : pending.candidateCardInstanceIds().get(0);
-            boolean keepOnTop = lookedCardInstanceId != null && selectedCardInstanceIds.contains(lookedCardInstanceId);
-            if (lookedCardInstanceId != null && !keepOnTop) {
-                moveDeckCardToBottom(matchId, userId, lookedCardInstanceId);
-            }
-            markDecisionResolved(pending.decisionId());
+        Map<String, Object> effectSummary = applyTriggeredEffectAfterConfirm(
+            matchId,
+            userId,
+            pending,
+            context.turnNumber,
+            selectedCardInstanceIds
+        );
+        appendGiftTriggerActionsIfPresent(context.match, userId, context.turnNumber, effectSummary);
+        payload.put("effect", effectSummary);
+        FollowupInteractionDecision followupDecision = createFollowupInteractionPendingDecisionIfNeeded(
+            matchId,
+            userId,
+            pending.sourceActionType(),
+            pending.sourceCardInstanceId(),
+            pending.sourceCardId(),
+            pending.effectType(),
+            effectSummary
+        );
+        putFollowupDecisionPayload(payload, followupDecision);
+        finalizeResolvedEffect(context, matchId, userId, effectSummary);
+    }
 
-            context.match.setCurrentPhase(MatchPhase.MAIN.name());
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("decisionId", pending.decisionId());
-            payload.put("decisionType", DECISION_TYPE_LOOK_TOP_DECK);
-            payload.put("sourceActionType", pending.sourceActionType());
-            payload.put("lookedCardInstanceId", lookedCardInstanceId);
-            payload.put("placement", keepOnTop ? "TOP" : "BOTTOM");
-            appendAction(
-                context.match,
-                userId,
-                "INTERACTION_CONFIRMED",
-                toJson(payload),
-                context.turnNumber
-            );
-            return;
+    private void resolveLookTopDeckDecision(
+        ActionContext context,
+        Long matchId,
+        Long userId,
+        PendingDecision pending,
+        ResolveDecisionRequest request
+    ) {
+        String requestedPlacement = normalizeDecisionPlacement(request == null ? null : request.getPlacement());
+        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
+            request == null ? null : request.getSelectedCardInstanceIds()
+        );
+        if (requestedPlacement != null) {
+            if ("TOP".equals(requestedPlacement)) {
+                Long lookedCardInstanceId = pending.candidateCardInstanceIds().isEmpty()
+                    ? null
+                    : pending.candidateCardInstanceIds().get(0);
+                selectedCardInstanceIds = lookedCardInstanceId == null
+                    ? List.of()
+                    : List.of(lookedCardInstanceId);
+            } else if ("BOTTOM".equals(requestedPlacement)) {
+                selectedCardInstanceIds = List.of();
+            } else {
+                throw new IllegalArgumentException("placement 只支援 TOP 或 BOTTOM");
+            }
         }
-        if (DECISION_TYPE_LOOK_OPPONENT_HAND.equals(decisionType) || DECISION_TYPE_LOOK_HOLOPOWER.equals(decisionType)) {
-            markDecisionResolved(pending.decisionId());
-
-            context.match.setCurrentPhase(MatchPhase.MAIN.name());
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("decisionId", pending.decisionId());
-            payload.put("decisionType", decisionType);
-            payload.put("sourceActionType", pending.sourceActionType());
-            payload.put("lookedCardCount", pending.candidateCardInstanceIds().size());
-            appendAction(
-                context.match,
-                userId,
-                "INTERACTION_CONFIRMED",
-                toJson(payload),
-                context.turnNumber
-            );
-            return;
+        if (selectedCardInstanceIds.size() > pending.maxSelect()) {
+            throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
         }
-        if (DECISION_TYPE_REORDER_DECK_BOTTOM.equals(decisionType)) {
-            List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
-                request == null ? null : request.getSelectedCardInstanceIds()
-            );
-            List<Long> candidateCardInstanceIds = pending.candidateCardInstanceIds();
-            List<Long> orderedCardInstanceIds = selectedCardInstanceIds.isEmpty()
-                ? candidateCardInstanceIds
-                : selectedCardInstanceIds;
-            validateDeckBottomReorderSelection(orderedCardInstanceIds, candidateCardInstanceIds);
-            for (Long cardInstanceId : orderedCardInstanceIds) {
-                moveDeckCardToBottom(matchId, userId, cardInstanceId);
-            }
-
-            markDecisionResolved(pending.decisionId());
-            context.match.setCurrentPhase(MatchPhase.MAIN.name());
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("decisionId", pending.decisionId());
-            payload.put("decisionType", DECISION_TYPE_REORDER_DECK_BOTTOM);
-            payload.put("sourceActionType", pending.sourceActionType());
-            payload.put("orderedCardInstanceIds", orderedCardInstanceIds);
-            appendAction(
-                context.match,
-                userId,
-                "INTERACTION_CONFIRMED",
-                toJson(payload),
-                context.turnNumber
-            );
-            return;
+        validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
+        Long lookedCardInstanceId = pending.candidateCardInstanceIds().isEmpty()
+            ? null
+            : pending.candidateCardInstanceIds().get(0);
+        boolean keepOnTop = lookedCardInstanceId != null && selectedCardInstanceIds.contains(lookedCardInstanceId);
+        if (lookedCardInstanceId != null && !keepOnTop) {
+            moveDeckCardToBottom(matchId, userId, lookedCardInstanceId);
         }
-        if (!SUPPORT_DECISION_TYPE_CARD_SELECTION.equals(decisionType)) {
-            throw new IllegalStateException("目前不支援此類型決策: " + decisionType);
+        markDecisionResolved(pending.decisionId());
+
+        context.match.setCurrentPhase(MatchPhase.MAIN.name());
+        touchUpdatedAt(context.match);
+        matchRepository.saveAndFlush(context.match);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("decisionId", pending.decisionId());
+        payload.put("decisionType", DECISION_TYPE_LOOK_TOP_DECK);
+        payload.put("sourceActionType", pending.sourceActionType());
+        payload.put("lookedCardInstanceId", lookedCardInstanceId);
+        payload.put("placement", keepOnTop ? "TOP" : "BOTTOM");
+        appendAction(
+            context.match,
+            userId,
+            "INTERACTION_CONFIRMED",
+            toJson(payload),
+            context.turnNumber
+        );
+    }
+
+    private void resolveLookZoneDecision(
+        ActionContext context,
+        Long userId,
+        PendingDecision pending,
+        String decisionType
+    ) {
+        markDecisionResolved(pending.decisionId());
+
+        context.match.setCurrentPhase(MatchPhase.MAIN.name());
+        touchUpdatedAt(context.match);
+        matchRepository.saveAndFlush(context.match);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("decisionId", pending.decisionId());
+        payload.put("decisionType", decisionType);
+        payload.put("sourceActionType", pending.sourceActionType());
+        payload.put("lookedCardCount", pending.candidateCardInstanceIds().size());
+        appendAction(
+            context.match,
+            userId,
+            "INTERACTION_CONFIRMED",
+            toJson(payload),
+            context.turnNumber
+        );
+    }
+
+    private void resolveReorderDeckBottomDecision(
+        ActionContext context,
+        Long matchId,
+        Long userId,
+        PendingDecision pending,
+        ResolveDecisionRequest request
+    ) {
+        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
+            request == null ? null : request.getSelectedCardInstanceIds()
+        );
+        List<Long> candidateCardInstanceIds = pending.candidateCardInstanceIds();
+        List<Long> orderedCardInstanceIds = selectedCardInstanceIds.isEmpty()
+            ? candidateCardInstanceIds
+            : selectedCardInstanceIds;
+        validateDeckBottomReorderSelection(orderedCardInstanceIds, candidateCardInstanceIds);
+        for (Long cardInstanceId : orderedCardInstanceIds) {
+            moveDeckCardToBottom(matchId, userId, cardInstanceId);
         }
 
+        markDecisionResolved(pending.decisionId());
+        context.match.setCurrentPhase(MatchPhase.MAIN.name());
+        touchUpdatedAt(context.match);
+        matchRepository.saveAndFlush(context.match);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("decisionId", pending.decisionId());
+        payload.put("decisionType", DECISION_TYPE_REORDER_DECK_BOTTOM);
+        payload.put("sourceActionType", pending.sourceActionType());
+        payload.put("orderedCardInstanceIds", orderedCardInstanceIds);
+        appendAction(
+            context.match,
+            userId,
+            "INTERACTION_CONFIRMED",
+            toJson(payload),
+            context.turnNumber
+        );
+    }
+
+    private void resolveSupportCardSelectionDecision(
+        ActionContext context,
+        Long matchId,
+        Long userId,
+        PendingDecision pending,
+        ResolveDecisionRequest request
+    ) {
         List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
             request == null ? null : request.getSelectedCardInstanceIds()
         );
@@ -1369,6 +1193,15 @@ public class MatchActionService {
             toJson(payload),
             context.turnNumber
         );
+        finalizeResolvedEffect(context, matchId, userId, effectSummary);
+    }
+
+    private void finalizeResolvedEffect(
+        ActionContext context,
+        Long matchId,
+        Long userId,
+        Map<String, Object> effectSummary
+    ) {
         if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, effectSummary)) {
             touchUpdatedAt(context.match);
             matchRepository.saveAndFlush(context.match);
@@ -1380,6 +1213,284 @@ public class MatchActionService {
             matchRepository.saveAndFlush(context.match);
         }
         enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummary, context.turnNumber);
+    }
+
+    private void resolveTurnStartDecision(
+        ActionContext context,
+        Long matchId,
+        Long userId,
+        PendingDecision pending
+    ) {
+        markDecisionResolved(pending.decisionId());
+        returnCollabToBackAsRested(matchId, userId);
+
+        context.match.setCurrentPhase(MatchPhase.DRAW.name());
+        touchUpdatedAt(context.match);
+        matchRepository.saveAndFlush(context.match);
+
+        Map<String, Object> confirmedPayload = new LinkedHashMap<>();
+        confirmedPayload.put("decisionId", pending.decisionId());
+        confirmedPayload.put("interactionType", INTERACTION_TYPE_TURN_START);
+        confirmedPayload.put("sourceActionType", INTERACTION_TYPE_TURN_START);
+        appendAction(
+            context.match,
+            userId,
+            "INTERACTION_CONFIRMED",
+            toJson(confirmedPayload),
+            context.turnNumber
+        );
+    }
+
+    private void resolveLiveStartDecision(
+        ActionContext context,
+        Long matchId,
+        Long userId,
+        PendingDecision pending
+    ) {
+        markDecisionResolved(pending.decisionId());
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id IN (?, ?)
+              AND zone IN ('CENTER', 'BACK')
+            """,
+            matchId,
+            context.match.getPlayerAId(),
+            context.match.getPlayerBId()
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET is_face_down = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id IN (?, ?)
+              AND zone = 'STAGE'
+              AND id IN (
+                SELECT match_card_id
+                FROM match_holomems
+                WHERE match_id = ?
+                  AND owner_user_id IN (?, ?)
+                  AND zone IN ('CENTER', 'BACK')
+              )
+            """,
+            matchId,
+            context.match.getPlayerAId(),
+            context.match.getPlayerBId(),
+            matchId,
+            context.match.getPlayerAId(),
+            context.match.getPlayerBId()
+        );
+
+        context.match.setCurrentTurnPlayerId(context.match.getPlayerAId());
+        context.match.setCurrentPhase(MatchPhase.MAIN.name());
+        touchUpdatedAt(context.match);
+        matchRepository.saveAndFlush(context.match);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("decisionId", pending.decisionId());
+        payload.put("interactionType", INTERACTION_TYPE_LIVE_START);
+        payload.put("sourceActionType", INTERACTION_TYPE_LIVE_START);
+        appendAction(
+            context.match,
+            userId,
+            "INTERACTION_CONFIRMED",
+            toJson(payload),
+            context.turnNumber
+        );
+
+        Long turnStartInteractionId = createTurnStartPendingInteraction(matchId, context.match.getPlayerAId(), context.turnNumber);
+        if (turnStartInteractionId == null) {
+            return;
+        }
+        Map<String, Object> interactionPayload = new LinkedHashMap<>();
+        interactionPayload.put("interactionId", turnStartInteractionId);
+        interactionPayload.put("interactionType", INTERACTION_TYPE_TURN_START);
+        interactionPayload.put("sourceActionType", INTERACTION_TYPE_TURN_START);
+        appendAction(
+            context.match,
+            context.match.getPlayerAId(),
+            "INTERACTION_PENDING",
+            toJson(interactionPayload),
+            context.turnNumber
+        );
+    }
+
+    private void resolveDrawRevealDecision(
+        ActionContext context,
+        Long matchId,
+        Long userId,
+        PendingDecision pending
+    ) {
+        markDecisionResolved(pending.decisionId());
+        boolean requiresTurnCheer = canPerformTurnCheerAction(matchId, userId);
+        context.match.setCurrentPhase(requiresTurnCheer ? MatchPhase.CHEER.name() : MatchPhase.MAIN.name());
+        touchUpdatedAt(context.match);
+        matchRepository.saveAndFlush(context.match);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("decisionId", pending.decisionId());
+        payload.put("interactionType", INTERACTION_TYPE_DRAW_REVEAL);
+        payload.put("sourceActionType", "DRAW_TURN");
+        payload.put("drawnCardInstanceId", pending.sourceCardInstanceId());
+        payload.put("drawnCardId", pending.sourceCardId());
+        if (!requiresTurnCheer) {
+            List<Map<String, Object>> mainStepGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnMainStep(
+                matchId,
+                userId,
+                context.turnNumber
+            );
+            payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
+            if (!mainStepGiftEffects.isEmpty()) {
+                FollowupInteractionDecision mainStepGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                    matchId,
+                    userId,
+                    null,
+                    null,
+                    buildGiftTriggerInteractionCards(matchId, userId, null, null, mainStepGiftEffects),
+                    mainStepGiftEffects,
+                    context.turnNumber
+                );
+                putFollowupDecisionPayload(payload, mainStepGiftDecision);
+            }
+        }
+        appendAction(
+            context.match,
+            userId,
+            "INTERACTION_CONFIRMED",
+            toJson(payload),
+            context.turnNumber
+        );
+    }
+
+    private void resolveSendCheerDecision(
+        ActionContext context,
+        Long matchId,
+        Long userId,
+        PendingDecision pending,
+        ResolveDecisionRequest request
+    ) {
+        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
+            request == null ? null : request.getSelectedCardInstanceIds()
+        );
+        if (selectedCardInstanceIds.size() < pending.minSelect()) {
+            throw new IllegalArgumentException("選擇卡片數量不足，至少需要 " + pending.minSelect() + " 張");
+        }
+        if (selectedCardInstanceIds.size() > pending.maxSelect()) {
+            throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
+        }
+        validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
+        Long targetHolomemCardInstanceId = selectedCardInstanceIds.get(0);
+        Long targetHolomemId = jdbcTemplate.query(
+            """
+            SELECT id
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            userId,
+            targetHolomemCardInstanceId
+        );
+        if (targetHolomemId == null) {
+            throw new IllegalStateException("指定的 Holomem 不存在或已離場");
+        }
+        Long sourceCardInstanceId = pending.sourceCardInstanceId();
+        if (sourceCardInstanceId == null || sourceCardInstanceId <= 0) {
+            throw new IllegalStateException("待處理吶喊互動缺少來源卡");
+        }
+        Map<String, Object> sourceCard = loadOwnedCardInstance(matchId, userId, sourceCardInstanceId);
+        String sourceZone = normalizeZone(sourceCard.get("zone"));
+        if (!Set.of("CHEER_DECK", "ARCHIVE", "HAND").contains(sourceZone)) {
+            throw new IllegalStateException("來源 Cheer 已失效，請重新整理狀態");
+        }
+        String cheerCardId = asString(sourceCard.get("card_id"));
+        Integer cheerCount = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM cheer_cards WHERE card_id = ?",
+            Integer.class,
+            cheerCardId
+        );
+        if (cheerCount == null || cheerCount <= 0) {
+            throw new IllegalStateException("來源卡不是 Cheer 卡");
+        }
+        EffectContext effectContext = new EffectContext(
+            matchId,
+            userId,
+            context.turnNumber,
+            pending.sourceActionType(),
+            sourceCardInstanceId,
+            cheerCardId
+        );
+        SendCheerAction sendCheerAction = new SendCheerAction(
+            sourceCardInstanceId,
+            targetHolomemId,
+            pending.sourceActionType()
+        );
+        List<ActionResult> actionResults = gameActionExecutor.execute(effectContext, List.of(sendCheerAction));
+        if (actionResults.isEmpty() || !actionResults.get(0).success()) {
+            String reason = actionResults.isEmpty() ? "UNKNOWN" : asString(actionResults.get(0).details().get("reason"));
+            throw new IllegalStateException("發送吶喊失敗：" + reason);
+        }
+        markDecisionResolved(pending.decisionId());
+
+        context.match.setCurrentPhase(resolvePhaseAfterSendCheer(context.phase, pending.sourceActionType()).name());
+        touchUpdatedAt(context.match);
+        matchRepository.saveAndFlush(context.match);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("decisionId", pending.decisionId());
+        payload.put("interactionType", INTERACTION_TYPE_SEND_CHEER);
+        payload.put("sourceActionType", pending.sourceActionType());
+        payload.put("sourceCardInstanceId", sourceCardInstanceId);
+        payload.put("sourceCardId", cheerCardId);
+        payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
+        if (ACTION_TYPE_TURN_CHEER.equals(pending.sourceActionType())) {
+            List<Map<String, Object>> mainStepGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnMainStep(
+                matchId,
+                userId,
+                context.turnNumber
+            );
+            payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
+            if (!mainStepGiftEffects.isEmpty()) {
+                FollowupInteractionDecision mainStepGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                    matchId,
+                    userId,
+                    null,
+                    null,
+                    buildGiftTriggerInteractionCards(matchId, userId, null, null, mainStepGiftEffects),
+                    mainStepGiftEffects,
+                    context.turnNumber
+                );
+                putFollowupDecisionPayload(payload, mainStepGiftDecision);
+            }
+        }
+        appendAction(
+            context.match,
+            userId,
+            "INTERACTION_CONFIRMED",
+            toJson(payload),
+            context.turnNumber
+        );
+        if (!ACTION_TYPE_TURN_CHEER.equals(pending.sourceActionType())) {
+            return;
+        }
+        Map<String, Object> turnCheerPayload = new LinkedHashMap<>();
+        turnCheerPayload.put("sourceCardInstanceId", sourceCardInstanceId);
+        turnCheerPayload.put("sourceCardId", cheerCardId);
+        turnCheerPayload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
+        appendAction(
+            context.match,
+            userId,
+            ACTION_TYPE_TURN_CHEER,
+            toJson(turnCheerPayload),
+            context.turnNumber
+        );
     }
 
     /**
@@ -1598,11 +1709,16 @@ public class MatchActionService {
         FollowupInteractionDecision performanceEndGiftDecision = null;
         FollowupInteractionDecision opponentPerformanceEndGiftDecision = null;
         if (context.phase == MatchPhase.MAIN && nextPhase == MatchPhase.PERFORMANCE) {
-            matchEffectService.recordPerformancePhaseSnapshot(matchId, userId, userId, context.turnNumber);
+            matchGiftTriggerService.recordPerformancePhaseSnapshot(matchId, userId, userId, context.turnNumber);
             if (context.opponentUserId != null) {
-                matchEffectService.recordPerformancePhaseSnapshot(matchId, userId, context.opponentUserId, context.turnNumber);
+                matchGiftTriggerService.recordPerformancePhaseSnapshot(
+                    matchId,
+                    userId,
+                    context.opponentUserId,
+                    context.turnNumber
+                );
             }
-            performanceStartGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOwnPerformanceStart(
+            performanceStartGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnPerformanceStart(
                 matchId,
                 userId,
                 context.turnNumber
@@ -1619,7 +1735,7 @@ public class MatchActionService {
                 );
             }
             if (context.opponentUserId != null) {
-                opponentPerformanceStartGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOpponentPerformanceStart(
+                opponentPerformanceStartGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOpponentPerformanceStart(
                     matchId,
                     context.opponentUserId,
                     context.turnNumber
@@ -1643,7 +1759,7 @@ public class MatchActionService {
                 }
             }
         } else if (context.phase == MatchPhase.PERFORMANCE && nextPhase == MatchPhase.END) {
-            performanceEndGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOwnPerformanceEnd(
+            performanceEndGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnPerformanceEnd(
                 matchId,
                 userId,
                 context.turnNumber
@@ -1660,7 +1776,7 @@ public class MatchActionService {
                 );
             }
             if (context.opponentUserId != null) {
-                opponentPerformanceEndGiftEffects = matchEffectService.previewGiftTriggeredEffectsOnOpponentPerformanceEnd(
+                opponentPerformanceEndGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOpponentPerformanceEnd(
                     matchId,
                     context.opponentUserId,
                     context.turnNumber
@@ -1887,14 +2003,14 @@ public class MatchActionService {
         FollowupInteractionDecision collabTriggerConfirmDecision = null;
         if ("COLLAB".equals(targetZone)) {
             holopowerCardInstanceId = moveTopDeckCardToHolopower(matchId, userId);
-            collabPreview = matchEffectService.previewCollabTriggeredEffect(
+            collabPreview = matchTriggeredCardEffectService.previewCollabTriggeredEffect(
                 matchId,
                 userId,
                 asString(currentHolomem.get("card_id")),
                 cardInstanceId
             );
             collabEffectSummary = buildTriggeredEffectDeferredSummary("COLLAB", collabPreview);
-            collabGiftTriggeredEffects = matchEffectService.previewGiftTriggeredEffectsOnCollab(
+            collabGiftTriggeredEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnCollab(
                 matchId,
                 userId,
                 cardInstanceId,
@@ -2301,7 +2417,7 @@ public class MatchActionService {
             throw new IllegalStateException("バトンタッチ 移動失敗，請重新整理後重試");
         }
 
-        List<Map<String, Object>> batonTouchGiftTriggeredEffects = matchEffectService.previewGiftTriggeredEffectsOnBatonTouchBack(
+        List<Map<String, Object>> batonTouchGiftTriggeredEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnBatonTouchBack(
             matchId,
             userId,
             targetCenterHolomemCardInstanceId,
@@ -2541,13 +2657,13 @@ public class MatchActionService {
             throw new IllegalStateException("找不到可使用的藝能");
         }
         int baseDamage = resolveArtDamage(asString(art.get("effect_json_text")));
-        int attachedSupportArtBonus = matchEffectService.resolveAttachedSupportArtBonus(
+        int attachedSupportArtBonus = matchEffectCombatModifierService.resolveAttachedSupportArtBonus(
             matchId,
             asLong(attacker.get("id"))
         );
         // 藝能本身也可能帶有「依附著 Cheer 數量放大本次傷害」的文案。
         // 這類效果不是 stage 上另一張卡提供的 aura，而是本次藝能自己的條件，因此獨立計算。
-        int artTextDamageBonus = matchEffectService.resolveArtTextDamageBonus(
+        int artTextDamageBonus = matchEffectCombatModifierService.resolveArtTextDamageBonus(
             matchId,
             userId,
             context.turnNumber,
@@ -2581,7 +2697,8 @@ public class MatchActionService {
         // 常駐 Gift 的藝能加成可能依目標站位變化，先預設 0，待目標確定後再計算。
         int passiveGiftArtBonus = 0;
         Map<String, Integer> baseRequiredCheerCost = resolveArtCheerCost(asString(art.get("cost_cheer_json_text")));
-        Map<String, Integer> passiveGiftArtCostReduction = matchEffectService.resolvePassiveGiftArtCheerCostReduction(
+        Map<String, Integer> passiveGiftArtCostReduction =
+            matchEffectCombatModifierService.resolvePassiveGiftArtCheerCostReduction(
             matchId,
             userId,
             asLong(attacker.get("id")),
@@ -2639,7 +2756,7 @@ public class MatchActionService {
                 }
                 passiveGiftTargetRestrictionApplied = true;
             }
-            defenderSelfDownedHolderSnapshot = matchEffectService.loadGiftHolderSnapshot(
+            defenderSelfDownedHolderSnapshot = matchGiftTriggerService.loadGiftHolderSnapshot(
                 matchId,
                 context.opponentUserId,
                 targetHolomem.holomemId()
@@ -2676,7 +2793,7 @@ public class MatchActionService {
         // 例如 `HSD07-009` 這種「這張卡自己受傷 -10」不是 turn effect，
         // 因此要在這裡和 turn-based modifier 分開計算，避免兩種來源混成同一個 state 模型。
         int passiveGiftIncomingDamageReduction = hasOpponentHolomem && targetHolomem != null
-            ? matchEffectService.resolvePassiveGiftIncomingDamageReduction(
+            ? matchEffectCombatModifierService.resolvePassiveGiftIncomingDamageReduction(
                 matchId,
                 context.opponentUserId,
                 targetHolomem.holomemId(),
@@ -2684,14 +2801,14 @@ public class MatchActionService {
             )
             : 0;
         int attachedSupportIncomingDamageReduction = hasOpponentHolomem && targetHolomem != null
-            ? matchEffectService.resolveAttachedSupportIncomingDamageReduction(
+            ? matchEffectCombatModifierService.resolveAttachedSupportIncomingDamageReduction(
                 matchId,
                 targetHolomem.holomemId(),
                 targetHolomem.zone()
             )
             : 0;
         if (targetHolomem != null) {
-            passiveGiftArtBonus = matchEffectService.resolvePassiveGiftArtBonus(
+            passiveGiftArtBonus = matchEffectCombatModifierService.resolvePassiveGiftArtBonus(
                 matchId,
                 userId,
                 asLong(attacker.get("id")),
@@ -2711,7 +2828,7 @@ public class MatchActionService {
         }
         Map<String, Object> defenderDamageReceivedGiftSummary = null;
         if (hasOpponentHolomem && targetHolomem != null) {
-            defenderDamageReceivedGiftSummary = matchEffectService.resolveTriggeredGiftDamagePrevention(
+            defenderDamageReceivedGiftSummary = matchTriggeredCombatEffectService.resolveTriggeredGiftDamagePrevention(
                 matchId,
                 context.opponentUserId,
                 userId,
@@ -2738,7 +2855,13 @@ public class MatchActionService {
         Long lostLifeCardInstanceId = null;
         if (hasOpponentHolomem) {
             if (totalDamage > 0) {
-                artSummary = matchEffectService.applyArtDamage(matchId, userId, totalDamage, effectiveTargetCardInstanceId, true);
+                artSummary = matchEffectDamageService.applyArtDamage(
+                    matchId,
+                    userId,
+                    totalDamage,
+                    effectiveTargetCardInstanceId,
+                    true
+                );
                 lostLifeCardInstanceId = asLong(artSummary.get("lostLifeCardInstanceId"));
             } else {
                 artSummary = new LinkedHashMap<>();
@@ -2790,7 +2913,7 @@ public class MatchActionService {
         Map<String, Object> officialOshiSelfDownedSummary = Map.of();
         List<Map<String, Object>> giftTriggeredEffects = new ArrayList<>();
         giftTriggeredEffects.addAll(
-            matchEffectService.previewGiftTriggeredEffectsOnArt(
+            matchGiftTriggerService.previewGiftTriggeredEffectsOnArt(
                 matchId,
                 userId,
                 attackerCardInstanceId,
@@ -2801,7 +2924,7 @@ public class MatchActionService {
         );
         if (hasOpponentHolomem && hasHolomemDowned(attackSummaryForTriggeredChecks)) {
             giftTriggeredEffects.addAll(
-                matchEffectService.previewGiftTriggeredEffectsOnDownedOpponent(
+                matchGiftTriggerService.previewGiftTriggeredEffectsOnDownedOpponent(
                     matchId,
                     userId,
                     attackerCardInstanceId,
@@ -2811,7 +2934,7 @@ public class MatchActionService {
             );
         }
         Map<String, Object> artDownTriggeredEffectSummary = hasOpponentHolomem && hasHolomemDowned(attackSummaryForTriggeredChecks)
-            ? matchEffectService.applyArtDownTriggeredEffects(
+            ? matchTriggeredCombatEffectService.applyArtDownTriggeredEffects(
                 matchId,
                 userId,
                 attackerCardInstanceId,
@@ -2839,7 +2962,7 @@ public class MatchActionService {
                 artSummary
             );
             defenderGiftTriggeredEffects.addAll(
-                matchEffectService.previewGiftTriggeredEffectsOnSelfDowned(
+                matchGiftTriggerService.previewGiftTriggeredEffectsOnSelfDowned(
                     matchId,
                     context.opponentUserId,
                     effectiveTargetCardInstanceId,
@@ -2849,7 +2972,7 @@ public class MatchActionService {
                 )
             );
             defenderGiftTriggeredEffects.addAll(
-                matchEffectService.previewGiftTriggeredEffectsOnAllyDowned(
+                matchGiftTriggerService.previewGiftTriggeredEffectsOnAllyDowned(
                     matchId,
                     context.opponentUserId,
                     effectiveTargetCardInstanceId,
@@ -4512,7 +4635,7 @@ public class MatchActionService {
                 "回合尚未完成：" + String.join("、", missingActions) + "。請先完成後再結束回合"
             );
         }
-        int clearedEffectCount = matchEffectService.clearExpiredTurnEffects(matchId, context.turnNumber);
+        int clearedEffectCount = matchTurnEffectMaintenanceService.clearExpiredTurnEffects(matchId, context.turnNumber);
         int resetRestedCount = resetRestedHolomemsForTurnStart(
             matchId,
             context.opponentUserId,
@@ -6955,7 +7078,7 @@ public class MatchActionService {
     ) {
         String normalizedSourceActionType = normalizeZone(pending.sourceActionType());
         if ("BLOOM".equals(normalizedSourceActionType)) {
-            return matchEffectService.applyBloomTriggeredEffects(
+            return matchTriggeredCardEffectService.applyBloomTriggeredEffects(
                 matchId,
                 userId,
                 pending.sourceCardId(),
@@ -7102,7 +7225,7 @@ public class MatchActionService {
             skipped.put("sourceActionType", "GIFT");
             return skipped;
         }
-        return applyGiftTriggeredEffectsFromContext(
+        return matchTriggeredGiftResolutionService.applyGiftTriggeredEffectsFromContext(
             matchId,
             userId,
             pending.sourceCardInstanceId(),
@@ -7124,51 +7247,17 @@ public class MatchActionService {
         int turnNumber,
         List<Long> selectedCardInstanceIds
     ) {
-        boolean hasCollabEffect = pending.contextNode() != null && pending.contextNode().path("hasCollabEffect").asBoolean(false);
-        Map<String, Object> collabSummary = null;
-        if (hasCollabEffect) {
-            collabSummary = matchEffectService.applyCollabTriggeredEffects(
-                matchId,
-                userId,
-                pending.sourceCardId(),
-                pending.sourceCardInstanceId()
-            );
-        }
-
-        List<Map<String, Object>> giftTriggers = extractGiftTriggerContexts(pending.contextNode());
-        Map<String, Object> giftSummary = null;
-        if (!giftTriggers.isEmpty()) {
-            giftSummary = applyGiftTriggeredEffectsFromContext(
-                matchId,
-                userId,
-                pending.sourceCardInstanceId(),
-                turnNumber,
-                giftTriggers,
-                "GIFT",
-                selectedCardInstanceIds,
-                extractJsonLong(pending.contextNode(), "selectionGiftHolderCardInstanceId")
-            );
-        }
-
-        List<Map<String, Object>> executedEffects = new ArrayList<>();
-        List<Map<String, Object>> skippedEffects = new ArrayList<>();
-        List<String> unsupportedEffects = new ArrayList<>();
-        List<Map<String, Object>> triggeredGifts = new ArrayList<>();
-
-        collectTriggeredEffectSummary(collabSummary, executedEffects, skippedEffects, unsupportedEffects, null);
-        collectTriggeredEffectSummary(giftSummary, executedEffects, skippedEffects, unsupportedEffects, triggeredGifts);
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("sourceActionType", "COLLAB");
-        result.put("collabEffect", collabSummary);
-        result.put("gift", giftSummary);
-        result.put("triggeredGifts", triggeredGifts);
-        result.put("executedEffects", executedEffects);
-        result.put("skippedEffects", skippedEffects);
-        result.put("unsupportedEffects", unsupportedEffects);
-        result.put("partiallyResolved", !skippedEffects.isEmpty() || !unsupportedEffects.isEmpty());
-        result.put("applied", collabSummary != null || !triggeredGifts.isEmpty());
-        return result;
+        return matchTriggeredEffectResolutionService.applyCollabPostTriggeredEffectsAfterConfirm(
+            matchId,
+            userId,
+            pending.sourceCardId(),
+            pending.sourceCardInstanceId(),
+            turnNumber,
+            pending.contextNode() != null && pending.contextNode().path("hasCollabEffect").asBoolean(false),
+            extractGiftTriggerContexts(pending.contextNode()),
+            selectedCardInstanceIds,
+            extractJsonLong(pending.contextNode(), "selectionGiftHolderCardInstanceId")
+        );
     }
 
     /**
@@ -7181,90 +7270,16 @@ public class MatchActionService {
         int turnNumber,
         List<Long> selectedCardInstanceIds
     ) {
-        List<Map<String, Object>> executedEffects = new ArrayList<>();
-        List<Map<String, Object>> skippedEffects = new ArrayList<>();
-        List<String> unsupportedEffects = new ArrayList<>();
-        List<Map<String, Object>> triggeredGifts = new ArrayList<>();
-
-        Map<String, Object> downEventContext = extractDownEventContext(pending.contextNode());
-        Map<String, Object> downEventResult = null;
-        if (downEventContext != null) {
-            Long downedOwnerUserId = asLong(downEventContext.get("downedOwnerUserId"));
-            String downedCardId = asString(downEventContext.get("downedCardId"));
-            String downedStageZone = asString(downEventContext.get("downedStageZone"));
-            Integer downEventTurn = asInt(downEventContext.get("turnNumber"));
-            downEventResult = matchEffectService.applyDownEventEffect(
-                matchId,
-                userId,
-                downedOwnerUserId,
-                downedCardId,
-                downEventTurn == null || downEventTurn <= 0 ? turnNumber : downEventTurn,
-                downedStageZone
-            );
-            if (downEventResult != null && !downEventResult.isEmpty()) {
-                executedEffects.add(downEventResult);
-            }
-        }
-
-        List<Map<String, Object>> giftTriggers = extractGiftTriggerContexts(pending.contextNode());
-        Map<String, Object> giftSummary = null;
-        if (!giftTriggers.isEmpty()) {
-            giftSummary = applyGiftTriggeredEffectsFromContext(
-                matchId,
-                userId,
-                pending.sourceCardInstanceId(),
-                turnNumber,
-                giftTriggers,
-                "ATTACK_ART_POST_TRIGGER",
-                selectedCardInstanceIds,
-                extractJsonLong(pending.contextNode(), "selectionGiftHolderCardInstanceId")
-            );
-            Object giftExecutedEffects = giftSummary.get("executedEffects");
-            if (giftExecutedEffects instanceof List<?> effects) {
-                for (Object effect : effects) {
-                    if (effect instanceof Map<?, ?> effectMap) {
-                        executedEffects.add(new LinkedHashMap<>(castToMap(effectMap)));
-                    }
-                }
-            }
-            Object giftSkippedEffects = giftSummary.get("skippedEffects");
-            if (giftSkippedEffects instanceof List<?> effects) {
-                for (Object effect : effects) {
-                    if (effect instanceof Map<?, ?> effectMap) {
-                        skippedEffects.add(new LinkedHashMap<>(castToMap(effectMap)));
-                    }
-                }
-            }
-            Object giftUnsupportedEffects = giftSummary.get("unsupportedEffects");
-            if (giftUnsupportedEffects instanceof List<?> effectTypes) {
-                for (Object effectType : effectTypes) {
-                    String normalized = normalizeZone(effectType);
-                    if (StringUtils.hasText(normalized) && !unsupportedEffects.contains(normalized)) {
-                        unsupportedEffects.add(normalized);
-                    }
-                }
-            }
-            Object gifts = giftSummary.get("triggeredGifts");
-            if (gifts instanceof List<?> list) {
-                for (Object gift : list) {
-                    if (gift instanceof Map<?, ?> map) {
-                        triggeredGifts.add(new LinkedHashMap<>(castToMap(map)));
-                    }
-                }
-            }
-        }
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("sourceActionType", "ATTACK_ART_POST_TRIGGER");
-        result.put("downEvent", downEventResult);
-        result.put("gift", giftSummary);
-        result.put("triggeredGifts", triggeredGifts);
-        result.put("executedEffects", executedEffects);
-        result.put("skippedEffects", skippedEffects);
-        result.put("unsupportedEffects", unsupportedEffects);
-        result.put("partiallyResolved", !skippedEffects.isEmpty() || !unsupportedEffects.isEmpty());
-        result.put("applied", downEventResult != null || !triggeredGifts.isEmpty());
-        return result;
+        return matchTriggeredEffectResolutionService.applyAttackArtPostTriggeredEffectsAfterConfirm(
+            matchId,
+            userId,
+            pending.sourceCardInstanceId(),
+            turnNumber,
+            extractGiftTriggerContexts(pending.contextNode()),
+            selectedCardInstanceIds,
+            extractJsonLong(pending.contextNode(), "selectionGiftHolderCardInstanceId"),
+            extractDownEventContext(pending.contextNode())
+        );
     }
 
     /**
@@ -7276,353 +7291,13 @@ public class MatchActionService {
         PendingDecision pending,
         int turnNumber
     ) {
-        Map<String, Object> result = new LinkedHashMap<>();
-        Map<String, Object> downEventContext = extractDownEventContext(pending.contextNode());
-        String originSourceActionType = extractJsonText(pending.contextNode(), "originSourceActionType");
-
-        result.put("sourceActionType", ACTION_TYPE_EFFECT_POST_TRIGGER);
-        result.put("originSourceActionType", originSourceActionType);
-
-        if (downEventContext == null || downEventContext.isEmpty()) {
-            result.put("applied", false);
-            result.put("reason", "NO_DOWN_EVENT_CONTEXT");
-            result.put("executedEffects", List.of());
-            result.put("skippedEffects", List.of());
-            result.put("unsupportedEffects", List.of());
-            return result;
-        }
-
-        Long downedOwnerUserId = asLong(downEventContext.get("downedOwnerUserId"));
-        String downedCardId = asString(downEventContext.get("downedCardId"));
-        String downedStageZone = asString(downEventContext.get("downedStageZone"));
-        Integer downEventTurn = asInt(downEventContext.get("turnNumber"));
-        Map<String, Object> downEventResult = matchEffectService.applyDownEventEffect(
+        return matchTriggeredEffectResolutionService.applyEffectPostTriggeredEffectsAfterConfirm(
             matchId,
             userId,
-            downedOwnerUserId,
-            downedCardId,
-            downEventTurn == null || downEventTurn <= 0 ? turnNumber : downEventTurn,
-            downedStageZone
+            turnNumber,
+            extractJsonText(pending.contextNode(), "originSourceActionType"),
+            extractDownEventContext(pending.contextNode())
         );
-
-        result.put("downEvent", downEventResult);
-        result.put("executedEffects", downEventResult == null ? List.of() : List.of(downEventResult));
-        result.put("skippedEffects", List.of());
-        result.put("unsupportedEffects", List.of());
-        result.put("lifeReduced", downEventResult != null && toBoolean(downEventResult.get("lifeReduced")));
-        result.put("applied", downEventResult != null && toBoolean(downEventResult.get("triggered")));
-        return result;
-    }
-
-    /**
-     * 將 Gift trigger context 轉為正式效果摘要並執行。
-     */
-    private Map<String, Object> applyGiftTriggeredEffectsFromContext(
-        Long matchId,
-        Long userId,
-        Long defaultSourceCardInstanceId,
-        int turnNumber,
-        List<Map<String, Object>> giftTriggers,
-        String sourceActionType,
-        List<Long> selectedCardInstanceIds,
-        Long selectionGiftHolderCardInstanceId
-    ) {
-        List<Long> effectiveSelectedCardInstanceIds = selectedCardInstanceIds == null ? List.of() : selectedCardInstanceIds;
-        List<Map<String, Object>> triggeredGifts = new ArrayList<>();
-        List<Map<String, Object>> aggregatedExecutedEffects = new ArrayList<>();
-        List<Map<String, Object>> aggregatedSkippedEffects = new ArrayList<>();
-        List<String> aggregatedUnsupportedEffects = new ArrayList<>();
-
-        for (Map<String, Object> trigger : giftTriggers) {
-            String triggerType = asString(trigger.get("triggerType"));
-            Long sourceCardInstanceId = asLong(trigger.get("sourceCardInstanceId"));
-            Long triggerTargetCardInstanceId = asLong(trigger.get("triggerTargetCardInstanceId"));
-            Long giftHolderHolomemId = asLong(trigger.get("giftHolderHolomemId"));
-            boolean selectionMatched = !effectiveSelectedCardInstanceIds.isEmpty()
-                && toBoolean(trigger.get("selectionRequired"))
-                && Objects.equals(selectionGiftHolderCardInstanceId, asLong(trigger.get("giftHolderCardInstanceId")));
-            Map<String, Object> effectiveTrigger = trigger;
-            if (selectionMatched) {
-                effectiveTrigger = new LinkedHashMap<>(trigger);
-                effectiveTrigger.put("selectedCardInstanceIds", effectiveSelectedCardInstanceIds);
-            }
-            if (sourceCardInstanceId == null || sourceCardInstanceId <= 0) {
-                sourceCardInstanceId = defaultSourceCardInstanceId;
-            }
-            Map<String, Object> summary = null;
-            if (isHbp01124StoredTrigger(effectiveTrigger)) {
-                summary = applyHbp01124StoredTriggerEffect(matchId, userId, effectiveTrigger);
-            } else if (!selectionMatched) {
-                summary = matchEffectService.applySingleGiftTriggeredEffect(
-                    matchId,
-                    userId,
-                    triggerType,
-                    sourceCardInstanceId,
-                    triggerTargetCardInstanceId,
-                    turnNumber,
-                    giftHolderHolomemId
-                );
-            }
-            if ((summary == null || summary.isEmpty()) && asLong(effectiveTrigger.get("giftHolderCardInstanceId")) != null) {
-                summary = matchEffectService.applyStoredGiftTriggeredEffect(
-                    matchId,
-                    userId,
-                    triggerType,
-                    sourceCardInstanceId,
-                    triggerTargetCardInstanceId,
-                    effectiveTrigger
-                );
-            }
-            if (summary == null || summary.isEmpty()) {
-                continue;
-            }
-            triggeredGifts.add(summary);
-            Object executedEffects = summary.get("executedEffects");
-            if (executedEffects instanceof List<?> effects) {
-                for (Object effect : effects) {
-                    if (effect instanceof Map<?, ?> effectMap) {
-                        aggregatedExecutedEffects.add(new LinkedHashMap<>(castToMap(effectMap)));
-                    }
-                }
-            }
-            Object skippedEffects = summary.get("skippedEffects");
-            if (skippedEffects instanceof List<?> effects) {
-                for (Object effect : effects) {
-                    if (effect instanceof Map<?, ?> effectMap) {
-                        aggregatedSkippedEffects.add(new LinkedHashMap<>(castToMap(effectMap)));
-                    }
-                }
-            }
-            Object unsupportedEffects = summary.get("unsupportedEffects");
-            if (unsupportedEffects instanceof List<?> effectTypes) {
-                for (Object effectType : effectTypes) {
-                    String normalized = normalizeZone(effectType);
-                    if (StringUtils.hasText(normalized) && !aggregatedUnsupportedEffects.contains(normalized)) {
-                        aggregatedUnsupportedEffects.add(normalized);
-                    }
-                }
-            }
-        }
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("sourceActionType", normalizeZone(sourceActionType));
-        result.put("triggeredGifts", triggeredGifts);
-        result.put("executedEffects", aggregatedExecutedEffects);
-        result.put("skippedEffects", aggregatedSkippedEffects);
-        result.put("unsupportedEffects", aggregatedUnsupportedEffects);
-        result.put("partiallyResolved", !aggregatedSkippedEffects.isEmpty() || !aggregatedUnsupportedEffects.isEmpty());
-        result.put("applied", !triggeredGifts.isEmpty());
-        return result;
-    }
-
-    private boolean isHbp01124StoredTrigger(Map<String, Object> trigger) {
-        if (trigger == null || trigger.isEmpty()) {
-            return false;
-        }
-        return "HBP01-124".equals(asString(trigger.get("giftHolderCardId")))
-            && "SELF_DOWNED".equals(normalizeZone(trigger.get("triggerType")));
-    }
-
-    private Map<String, Object> applyHbp01124StoredTriggerEffect(
-        Long matchId,
-        Long userId,
-        Map<String, Object> trigger
-    ) {
-        if (matchId == null || userId == null || trigger == null || trigger.isEmpty()) {
-            return Map.of();
-        }
-        Long holderHolomemId = asLong(trigger.get("giftHolderHolomemId"));
-        if (holderHolomemId == null || holderHolomemId <= 0) {
-            return Map.of();
-        }
-        Long targetHolomemId = jdbcTemplate.query(
-            """
-            SELECT h.id
-            FROM match_holomems h
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.zone IN ('CENTER', 'COLLAB', 'BACK')
-              AND h.id <> ?
-            ORDER BY CASE h.zone WHEN 'CENTER' THEN 1 WHEN 'COLLAB' THEN 2 WHEN 'BACK' THEN 3 ELSE 9 END, h.id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            holderHolomemId
-        );
-        List<Long> preferredCheerCardInstanceIds = toLongList(trigger.get("giftHolderAttachedCheerCardInstanceIds"));
-        String movedCheerCardId = null;
-        Long movedCheerRowId = null;
-        if (targetHolomemId != null) {
-            for (Long cheerCardInstanceId : preferredCheerCardInstanceIds) {
-                if (cheerCardInstanceId == null || cheerCardInstanceId <= 0) {
-                    continue;
-                }
-                Map<String, Object> cheerCard = jdbcTemplate.query(
-                    """
-                    SELECT id, card_id, zone
-                    FROM match_cards
-                    WHERE id = ?
-                      AND match_id = ?
-                      AND owner_user_id = ?
-                    LIMIT 1
-                    """,
-                    rs -> {
-                        if (!rs.next()) {
-                            return null;
-                        }
-                        Map<String, Object> row = new LinkedHashMap<>();
-                        row.put("id", rs.getLong("id"));
-                        row.put("card_id", rs.getString("card_id"));
-                        row.put("zone", rs.getString("zone"));
-                        return row;
-                    },
-                    cheerCardInstanceId,
-                    matchId,
-                    userId
-                );
-                if (cheerCard == null) {
-                    continue;
-                }
-                String zone = normalizeZone(cheerCard.get("zone"));
-                String cheerCardId = asString(cheerCard.get("card_id"));
-                if (!StringUtils.hasText(cheerCardId) || (!"ARCHIVE".equals(zone) && !"STAGE".equals(zone))) {
-                    continue;
-                }
-                if ("STAGE".equals(zone)) {
-                    jdbcTemplate.update(
-                        """
-                        DELETE FROM match_holomem_cheers c
-                        USING match_holomems h
-                        WHERE c.match_holomem_id = h.id
-                          AND c.match_card_id = ?
-                          AND h.match_id = ?
-                          AND h.owner_user_id = ?
-                        """,
-                        cheerCardInstanceId,
-                        matchId,
-                        userId
-                    );
-                } else {
-                    int movedToStage = jdbcTemplate.update(
-                        """
-                        UPDATE match_cards
-                        SET zone = 'STAGE',
-                            order_index = NULL,
-                            is_face_down = FALSE,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                          AND match_id = ?
-                          AND owner_user_id = ?
-                          AND zone = 'ARCHIVE'
-                        """,
-                        cheerCardInstanceId,
-                        matchId,
-                        userId
-                    );
-                    if (movedToStage != 1) {
-                        continue;
-                    }
-                }
-                movedCheerRowId = jdbcTemplate.query(
-                    """
-                    INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
-                    VALUES (?, ?, ?, FALSE)
-                    RETURNING id
-                    """,
-                    rs -> rs.next() ? rs.getLong(1) : null,
-                    targetHolomemId,
-                    cheerCardInstanceId,
-                    cheerCardId
-                );
-                movedCheerCardId = cheerCardId;
-                break;
-            }
-        }
-
-        Map<String, Object> reattach = new LinkedHashMap<>();
-        reattach.put("effectType", "REATTACH");
-        reattach.put("moveRequested", 1);
-        reattach.put("moveApplied", movedCheerCardId == null ? 0 : 1);
-        reattach.put("targetHolomemId", targetHolomemId);
-        reattach.put("targetHolomemCardInstanceId", targetHolomemId == null
-            ? null
-            : jdbcTemplate.query(
-                "SELECT match_card_id FROM match_holomems WHERE id = ?",
-                rs -> rs.next() ? rs.getLong(1) : null,
-                targetHolomemId
-            ));
-        reattach.put("movedCheerCardIds", movedCheerCardId == null ? List.of() : List.of(movedCheerCardId));
-        reattach.put("movedCheerRowIds", movedCheerRowId == null ? List.of() : List.of(movedCheerRowId));
-        reattach.put("sourceMode", "HOLDER_CHEER");
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("triggerType", asString(trigger.get("triggerType")));
-        summary.put("giftHolderHolomemId", holderHolomemId);
-        summary.put("giftHolderCardInstanceId", asLong(trigger.get("giftHolderCardInstanceId")));
-        summary.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
-        summary.put("giftHolderZone", normalizeZone(trigger.get("giftHolderZone")));
-        summary.put("sourceCardInstanceId", asLong(trigger.get("sourceCardInstanceId")));
-        summary.put("triggerTargetCardInstanceId", asLong(trigger.get("triggerTargetCardInstanceId")));
-        summary.put("rawText", asString(trigger.get("rawText")));
-        summary.put("requestedEffects", List.of("REATTACH"));
-        summary.put("executedEffects", List.of(reattach));
-        summary.put("unsupportedEffects", List.of());
-        summary.put("skippedEffects", movedCheerCardId == null ? List.of(Map.of(
-            "effectType", "REATTACH",
-            "applied", false,
-            "reason", "NO_MOVABLE_HOLDER_CHEER_OR_TARGET"
-        )) : List.of());
-        return summary;
-    }
-
-    private void collectTriggeredEffectSummary(
-        Map<String, Object> summary,
-        List<Map<String, Object>> executedEffects,
-        List<Map<String, Object>> skippedEffects,
-        List<String> unsupportedEffects,
-        List<Map<String, Object>> triggeredGifts
-    ) {
-        if (summary == null || summary.isEmpty()) {
-            return;
-        }
-        Object summaryExecutedEffects = summary.get("executedEffects");
-        if (summaryExecutedEffects instanceof List<?> effects) {
-            for (Object effect : effects) {
-                if (effect instanceof Map<?, ?> effectMap) {
-                    executedEffects.add(new LinkedHashMap<>(castToMap(effectMap)));
-                }
-            }
-        }
-        Object summarySkippedEffects = summary.get("skippedEffects");
-        if (summarySkippedEffects instanceof List<?> effects) {
-            for (Object effect : effects) {
-                if (effect instanceof Map<?, ?> effectMap) {
-                    skippedEffects.add(new LinkedHashMap<>(castToMap(effectMap)));
-                }
-            }
-        }
-        Object summaryUnsupportedEffects = summary.get("unsupportedEffects");
-        if (summaryUnsupportedEffects instanceof List<?> effectTypes) {
-            for (Object effectType : effectTypes) {
-                String normalized = normalizeZone(effectType);
-                if (StringUtils.hasText(normalized) && !unsupportedEffects.contains(normalized)) {
-                    unsupportedEffects.add(normalized);
-                }
-            }
-        }
-        if (triggeredGifts == null) {
-            return;
-        }
-        Object gifts = summary.get("triggeredGifts");
-        if (gifts instanceof List<?> list) {
-            for (Object gift : list) {
-                if (gift instanceof Map<?, ?> map) {
-                    triggeredGifts.add(new LinkedHashMap<>(castToMap(map)));
-                }
-            }
-        }
     }
 
     /**

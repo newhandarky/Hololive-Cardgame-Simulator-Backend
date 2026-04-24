@@ -33,6 +33,18 @@ abstract class MatchIntegrationTestSupport extends AbstractPostgresIntegrationTe
     protected MatchEffectService matchEffectService;
 
     @Autowired
+    protected MatchEffectDamageService matchEffectDamageService;
+
+    @Autowired
+    protected MatchEffectCombatModifierService matchEffectCombatModifierService;
+
+    @Autowired
+    protected MatchTriggeredCardEffectService matchTriggeredCardEffectService;
+
+    @Autowired
+    protected MatchGiftTriggerService matchGiftTriggerService;
+
+    @Autowired
     protected DeckService deckService;
 
     @Autowired

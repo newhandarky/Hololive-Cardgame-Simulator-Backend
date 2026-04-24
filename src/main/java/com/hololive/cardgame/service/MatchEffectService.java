@@ -15,7 +15,6 @@ import com.hololive.cardgame.game.action.SendCheerAction;
 import com.hololive.cardgame.service.effect.EffectTextParser;
 import com.hololive.cardgame.service.effect.GiftExecutionSummary;
 import com.hololive.cardgame.service.effect.GiftTriggerMatcher;
-import com.hololive.cardgame.service.effect.GiftTriggerPreviewService;
 import com.hololive.cardgame.service.effect.SearchCriteria;
 import com.hololive.cardgame.service.effect.SearchCriteriaParser;
 import java.util.ArrayList;
@@ -52,10 +51,10 @@ public class MatchEffectService {
     private static final Pattern DICE_AT_MOST_PATTERN = Pattern.compile("(\\d+)\\s*以下の時");
     private static final Pattern DICE_ROLL_COUNT_PATTERN = Pattern.compile("サイコロ\\D*(\\d+)\\s*回");
     private static final Pattern SEARCH_LOOK_TOP_COUNT_PATTERN = Pattern.compile("デッキの上から\\s*(\\d+)\\s*枚を見る");
-    private static final Pattern ATTACHED_SUPPORT_HP_PATTERN = Pattern.compile(
+    static final Pattern ATTACHED_SUPPORT_HP_PATTERN = Pattern.compile(
         "この(?:マスコット|ツール|ファン)が付いているホロメンのHP\\s*([+＋−-]\\s*\\d+)"
     );
-    private static final Pattern ATTACHED_SUPPORT_ARTS_PATTERN = Pattern.compile(
+    static final Pattern ATTACHED_SUPPORT_ARTS_PATTERN = Pattern.compile(
         "この(?:マスコット|ツール|ファン)が付いているホロメンのアーツ\\s*([+＋−-]\\s*\\d+)"
     );
     private static final Pattern ATTACHED_SUPPORT_DAMAGE_REDUCTION_PATTERN = Pattern.compile(
@@ -106,11 +105,10 @@ public class MatchEffectService {
     private final GameActionExecutor gameActionExecutor;
     private final EffectTextParser effectTextParser;
     private final GiftTriggerMatcher giftTriggerMatcher;
-    private final GiftTriggerPreviewService giftTriggerPreviewService;
     private final SearchCriteriaParser searchCriteriaParser;
     private final MatchEffectSearchService searchService;
     private final MatchGiftTriggerConditionService giftTriggerConditionService;
-    private final MatchGiftTriggerSummaryService giftTriggerSummaryService;
+    private final MatchGiftTriggerContextService giftTriggerContextService;
 
     /**
      * 效果結算服務建構子。
@@ -129,15 +127,18 @@ public class MatchEffectService {
         this.gameActionExecutor = gameActionExecutor;
         this.effectTextParser = new EffectTextParser(objectMapper);
         this.giftTriggerMatcher = new GiftTriggerMatcher();
-        this.giftTriggerPreviewService = new GiftTriggerPreviewService();
         this.searchCriteriaParser = new SearchCriteriaParser(jdbcTemplate, effectTextParser);
         this.searchService = new MatchEffectSearchService(jdbcTemplate, effectTextParser);
-        this.giftTriggerSummaryService = new MatchGiftTriggerSummaryService(giftTriggerPreviewService);
         this.giftTriggerConditionService = new MatchGiftTriggerConditionService(
             jdbcTemplate,
             effectTextParser,
             giftTriggerMatcher,
             searchCriteriaParser
+        );
+        this.giftTriggerContextService = new MatchGiftTriggerContextService(
+            jdbcTemplate,
+            objectMapper,
+            effectTextParser
         );
     }
 
@@ -378,1144 +379,62 @@ public class MatchEffectService {
     }
 
     /**
-     * 套用藝能造成的直接傷害。
+     * 執行單一 Gift 持有者所需的 effectType 並彙整結果。
      */
-    public Map<String, Object> applyArtDamage(
+    GiftExecutionSummary resolveGiftTriggerExecution(
         Long matchId,
         Long userId,
-        int baseDamage,
-        Long targetHolomemCardInstanceId
-    ) {
-        return applyArtDamage(matchId, userId, baseDamage, targetHolomemCardInstanceId, false);
-    }
-
-    /**
-     * 套用藝能造成的直接傷害（可選擇是否延遲 down event 額外結算）。
-     */
-    public Map<String, Object> applyArtDamage(
-        Long matchId,
-        Long userId,
-        int baseDamage,
-        Long targetHolomemCardInstanceId,
-        boolean deferDownEvent
-    ) {
-        if (baseDamage <= 0) {
-            throw new IllegalArgumentException("藝能傷害必須大於 0");
-        }
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("type", "DAMAGE");
-        payload.put("value", baseDamage);
-        payload.put("deferDownEvent", deferDownEvent);
-        JsonNode effectNode = objectMapper.valueToTree(payload);
-        return executeDamageEffect(
-            matchId,
-            userId,
-            "ART_DAMAGE",
-            effectNode,
-            "ENEMY",
-            targetHolomemCardInstanceId
-        );
-    }
-
-    /**
-     * 處理「使用藝能後」由 Gift/被動觸發的追加效果。
-     */
-    public List<Map<String, Object>> applyGiftTriggeredEffectsOnArt(
-        Long matchId,
-        Long userId,
-        Long attackerCardInstanceId,
-        Long attackTargetCardInstanceId,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "ART_USED",
-            attackerCardInstanceId,
-            attackTargetCardInstanceId,
-            turnNumber,
-            true
-        );
-    }
-
-    /**
-     * 預覽「使用藝能後」會觸發的 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnArt(
-        Long matchId,
-        Long userId,
-        Long attackerCardInstanceId,
-        Long attackTargetCardInstanceId,
-        int turnNumber
-    ) {
-        return previewGiftTriggeredEffectsOnArt(
-            matchId,
-            userId,
-            attackerCardInstanceId,
-            attackTargetCardInstanceId,
-            turnNumber,
-            null
-        );
-    }
-
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnArt(
-        Long matchId,
-        Long userId,
-        Long attackerCardInstanceId,
-        Long attackTargetCardInstanceId,
-        int turnNumber,
-        String attackerArtName
-    ) {
-        return applyGiftTriggeredEffectsByTriggerWithSourceArt(
-            matchId,
-            userId,
-            "ART_USED",
-            attackerCardInstanceId,
-            attackTargetCardInstanceId,
-            turnNumber,
-            false,
-            attackerArtName
-        );
-    }
-
-    /**
-     * 處理「擊倒對手 Holomem 後」由 Gift/被動觸發的追加效果。
-     */
-    public List<Map<String, Object>> applyGiftTriggeredEffectsOnDownedOpponent(
-        Long matchId,
-        Long userId,
-        Long attackerCardInstanceId,
-        Long downedTargetCardInstanceId,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "OPPONENT_DOWNED",
-            attackerCardInstanceId,
-            downedTargetCardInstanceId,
-            turnNumber,
-            true
-        );
-    }
-
-    /**
-     * 預覽「擊倒對手 Holomem 後」會觸發的 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnDownedOpponent(
-        Long matchId,
-        Long userId,
-        Long attackerCardInstanceId,
-        Long downedTargetCardInstanceId,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "OPPONENT_DOWNED",
-            attackerCardInstanceId,
-            downedTargetCardInstanceId,
-            turnNumber,
-            false
-        );
-    }
-
-    /**
-     * 預覽「自己的這張 Holomem down」時會觸發的 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnSelfDowned(
-        Long matchId,
-        Long userId,
-        Long downedCardInstanceId,
-        String downedStageZone,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "SELF_DOWNED",
-            downedCardInstanceId,
-            downedCardInstanceId,
-            turnNumber,
-            false,
-            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone, null)
-        );
-    }
-
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnSelfDowned(
-        Long matchId,
-        Long userId,
-        Long downedCardInstanceId,
-        String downedStageZone,
-        int turnNumber,
-        Map<String, Object> holderSnapshot
-    ) {
-        if (holderSnapshot == null || holderSnapshot.isEmpty()) {
-            return previewGiftTriggeredEffectsOnSelfDowned(
-                matchId,
-                userId,
-                downedCardInstanceId,
-                downedStageZone,
-                turnNumber
-            );
-        }
-        Map<String, Object> summary = buildGiftTriggerSummary(
-            matchId,
-            userId,
-            turnNumber,
-            downedCardInstanceId,
-            downedCardInstanceId,
-            "SELF_DOWNED",
-            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone, null),
-            holderSnapshot,
-            false
-        );
-        return summary == null ? List.of() : List.of(summary);
-    }
-
-    /**
-     * 預覽「自己的 Holomem down」時會觸發的其他 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnAllyDowned(
-        Long matchId,
-        Long userId,
-        Long downedCardInstanceId,
-        String downedStageZone,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "ALLY_DOWNED",
-            downedCardInstanceId,
-            downedCardInstanceId,
-            turnNumber,
-            false,
-            loadGiftTriggerSourceContext(matchId, downedCardInstanceId, downedStageZone, null)
-        );
-    }
-
-    /**
-     * 預覽「Holomem 進場後」會觸發的 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnStageEnter(
-        Long matchId,
-        Long userId,
-        Long enteredCardInstanceId,
-        String enteredStageZone,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "STAGE_ENTER",
-            enteredCardInstanceId,
-            enteredCardInstanceId,
-            turnNumber,
-            false,
-            loadGiftTriggerSourceContext(matchId, enteredCardInstanceId, enteredStageZone, null)
-        );
-    }
-
-    /**
-     * 預覽「自己的 Holomem 執行 Collab」時會觸發的 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnCollab(
-        Long matchId,
-        Long userId,
-        Long collabCardInstanceId,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "COLLAB",
-            collabCardInstanceId,
-            collabCardInstanceId,
-            turnNumber,
-            false,
-            loadGiftTriggerSourceContext(matchId, collabCardInstanceId, "COLLAB", null)
-        );
-    }
-
-    /**
-     * 預覽「Holomem 因 バトンタッチ 移回 BACK」時會觸發的 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnBatonTouchBack(
-        Long matchId,
-        Long userId,
-        Long movedToBackCardInstanceId,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "BATON_TOUCH_BACK",
-            movedToBackCardInstanceId,
-            movedToBackCardInstanceId,
-            turnNumber,
-            false,
-            loadGiftTriggerSourceContext(matchId, movedToBackCardInstanceId, "BACK", null)
-        );
-    }
-
-    /**
-     * 預覽「自己的表演階段開始」會觸發的 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnOwnPerformanceStart(
-        Long matchId,
-        Long userId,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "PERFORMANCE_START_SELF",
-            null,
-            null,
-            turnNumber,
-            false,
-            null
-        );
-    }
-
-    /**
-     * 預覽「自己的主階段」會觸發的 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnOwnMainStep(
-        Long matchId,
-        Long userId,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "MAIN_STEP_SELF",
-            null,
-            null,
-            turnNumber,
-            false,
-            null
-        );
-    }
-
-    /**
-     * 預覽「對手的表演階段開始」會觸發的 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnOpponentPerformanceStart(
-        Long matchId,
-        Long userId,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "PERFORMANCE_START_OPPONENT",
-            null,
-            null,
-            turnNumber,
-            false,
-            null
-        );
-    }
-
-    /**
-     * 預覽「自己的表演階段結束」會觸發的 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnOwnPerformanceEnd(
-        Long matchId,
-        Long userId,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "PERFORMANCE_END_SELF",
-            null,
-            null,
-            turnNumber,
-            false,
-            null
-        );
-    }
-
-    /**
-     * 預覽「對手的表演階段結束」會觸發的 Gift（不執行效果）。
-     */
-    public List<Map<String, Object>> previewGiftTriggeredEffectsOnOpponentPerformanceEnd(
-        Long matchId,
-        Long userId,
-        int turnNumber
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            "PERFORMANCE_END_OPPONENT",
-            null,
-            null,
-            turnNumber,
-            false,
-            null
-        );
-    }
-
-    /**
-     * 記錄表演階段開始時的快照，供表演結束條件判斷使用。
-     */
-    public void recordPerformancePhaseSnapshot(
-        Long matchId,
-        Long sourceUserId,
-        Long affectedUserId,
-        int turnNumber
-    ) {
-        if (matchId == null || affectedUserId == null || turnNumber <= 0) {
-            return;
-        }
-        Integer currentLife = jdbcTemplate.query(
-            """
-            SELECT current_life
-            FROM match_players
-            WHERE match_id = ?
-              AND user_id = ?
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getInt("current_life") : null,
-            matchId,
-            affectedUserId
-        );
-        Map<String, Integer> holomemDamage = new LinkedHashMap<>();
-        jdbcTemplate.query(
-            """
-            SELECT id, COALESCE(damage_taken, 0) AS damage_taken
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-            ORDER BY id
-            """,
-            rs -> {
-                holomemDamage.put(Long.toString(rs.getLong("id")), rs.getInt("damage_taken"));
-            },
-            matchId,
-            affectedUserId
-        );
-        jdbcTemplate.update(
-            """
-            DELETE FROM match_turn_effects
-            WHERE match_id = ?
-              AND affected_user_id = ?
-              AND stat_type = 'PERFORMANCE_SNAPSHOT'
-              AND expires_turn = ?
-            """,
-            matchId,
-            affectedUserId,
-            turnNumber
-        );
-        jdbcTemplate.update(
-            """
-            INSERT INTO match_turn_effects (
-                match_id,
-                source_user_id,
-                affected_user_id,
-                effect_type,
-                stat_type,
-                modifier_value,
-                expires_turn,
-                payload
-            ) VALUES (?, ?, ?, ?, 'PERFORMANCE_SNAPSHOT', 0, ?, CAST(? AS jsonb))
-            """,
-            matchId,
-            sourceUserId,
-            affectedUserId,
-            "SYSTEM",
-            turnNumber,
-            effectTextParser.toJsonString(
-                Map.of(
-                    "turnNumber", turnNumber,
-                    "currentLife", currentLife == null ? 0 : currentLife,
-                    "holomemDamage", holomemDamage
-                )
-            )
-        );
-    }
-
-    /**
-     * 依已選定 Gift 持有者執行一次觸發效果（供互動確認後使用）。
-     */
-    public Map<String, Object> applySingleGiftTriggeredEffect(
-        Long matchId,
-        Long userId,
-        String triggerType,
-        Long sourceCardInstanceId,
+        Long holderCardInstanceId,
         Long triggerTargetCardInstanceId,
-        int turnNumber,
-        Long giftHolderHolomemId
-    ) {
-        if (matchId == null || userId == null || sourceCardInstanceId == null || turnNumber <= 0 || giftHolderHolomemId == null || giftHolderHolomemId <= 0) {
-            return null;
-        }
-        String normalizedTriggerType = normalizeGiftTriggerType(triggerType);
-        Map<String, Object> holder = jdbcTemplate.query(
-            """
-            SELECT h.id AS holomem_id,
-                   h.match_card_id,
-                   h.card_id,
-                   h.zone,
-                   h.current_level,
-                   m.passive_effect_json::text AS passive_text
-            FROM match_holomems h
-            JOIN member_cards m ON m.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("holomem_id", rs.getLong("holomem_id"));
-                row.put("match_card_id", rs.getLong("match_card_id"));
-                row.put("card_id", rs.getString("card_id"));
-                row.put("zone", rs.getString("zone"));
-                row.put("current_level", rs.getString("current_level"));
-                row.put("passive_text", rs.getString("passive_text"));
-                return row;
-            },
-            matchId,
-            userId,
-            giftHolderHolomemId
-        );
-        if (holder == null) {
-            return null;
-        }
-        GiftTriggerSourceContext sourceContext = loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null, null);
-        return buildGiftTriggerSummary(
-            matchId,
-            userId,
-            turnNumber,
-            sourceCardInstanceId,
-            triggerTargetCardInstanceId,
-            normalizedTriggerType,
-            sourceContext,
-            holder,
-            true
-        );
-    }
-
-    public Map<String, Object> applyStoredGiftTriggeredEffect(
-        Long matchId,
-        Long userId,
-        String triggerType,
-        Long sourceCardInstanceId,
-        Long triggerTargetCardInstanceId,
-        Map<String, Object> storedTrigger
-    ) {
-        if (matchId == null || userId == null || storedTrigger == null || storedTrigger.isEmpty()) {
-            return null;
-        }
-        Long holderHolomemId = asLong(storedTrigger.get("giftHolderHolomemId"));
-        Long holderCardInstanceId = asLong(storedTrigger.get("giftHolderCardInstanceId"));
-        if (holderCardInstanceId == null || holderCardInstanceId <= 0) {
-            return null;
-        }
-        String normalizedTriggerType = normalizeGiftTriggerType(triggerType);
-        String giftText = loadGiftEffectText(asText(storedTrigger.get("rawText")));
-        if (!StringUtils.hasText(giftText)) {
-            return null;
-        }
-
-        GiftExecutionSummary execution = executeGiftEffectsForHolder(
-            matchId,
-            userId,
-            holderCardInstanceId,
-            triggerTargetCardInstanceId,
-            giftText,
-            storedTrigger
-        );
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("triggerType", normalizedTriggerType);
-        summary.put("giftHolderHolomemId", holderHolomemId);
-        summary.put("giftHolderCardInstanceId", holderCardInstanceId);
-        summary.put("giftHolderCardId", asText(storedTrigger.get("giftHolderCardId")));
-        summary.put("giftHolderZone", normalize(asText(storedTrigger.get("giftHolderZone"))));
-        summary.put("sourceCardInstanceId", sourceCardInstanceId);
-        summary.put("triggerTargetCardInstanceId", triggerTargetCardInstanceId);
-        summary.put("rawText", giftText);
-        summary.put("requestedEffects", execution.requestedEffects());
-        summary.put("executedEffects", execution.executedEffects());
-        summary.put("unsupportedEffects", execution.unsupportedEffects());
-        summary.put("skippedEffects", execution.skippedEffects());
-        return summary;
-    }
-
-    public Map<String, Object> loadGiftHolderSnapshot(Long matchId, Long userId, Long giftHolderHolomemId) {
-        if (matchId == null || userId == null || giftHolderHolomemId == null || giftHolderHolomemId <= 0) {
-            return null;
-        }
-        return jdbcTemplate.query(
-            """
-            SELECT h.id AS holomem_id,
-                   h.match_card_id,
-                   h.card_id,
-                   h.zone,
-                   h.current_level,
-                   m.passive_effect_json::text AS passive_text
-            FROM match_holomems h
-            JOIN member_cards m ON m.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Long holomemId = rs.getLong("holomem_id");
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("holomem_id", holomemId);
-                row.put("match_card_id", rs.getLong("match_card_id"));
-                row.put("card_id", rs.getString("card_id"));
-                row.put("zone", rs.getString("zone"));
-                row.put("current_level", rs.getString("current_level"));
-                row.put("passive_text", rs.getString("passive_text"));
-                List<Map<String, Object>> attachedCheers = jdbcTemplate.queryForList(
-                    """
-                    SELECT match_card_id,
-                           cheer_card_id
-                    FROM match_holomem_cheers
-                    WHERE match_holomem_id = ?
-                    ORDER BY id
-                    """,
-                    holomemId
-                );
-                List<Long> attachedCheerCardInstanceIds = new ArrayList<>();
-                List<String> attachedCheerCardIds = new ArrayList<>();
-                for (Map<String, Object> attachedCheer : attachedCheers) {
-                    Long attachedCheerCardInstanceId = asLong(attachedCheer.get("match_card_id"));
-                    String attachedCheerCardId = asText(attachedCheer.get("cheer_card_id"));
-                    if (attachedCheerCardInstanceId != null && attachedCheerCardInstanceId > 0) {
-                        attachedCheerCardInstanceIds.add(attachedCheerCardInstanceId);
-                    }
-                    if (StringUtils.hasText(attachedCheerCardId)) {
-                        attachedCheerCardIds.add(attachedCheerCardId);
-                    }
-                }
-                row.put("attached_cheer_card_instance_ids", attachedCheerCardInstanceIds);
-                row.put("attached_cheer_card_ids", attachedCheerCardIds);
-                List<Map<String, Object>> stackCards = jdbcTemplate.queryForList(
-                    """
-                    SELECT s.match_card_id,
-                           mc.card_id
-                    FROM match_holomem_stack_cards s
-                    JOIN match_cards mc ON mc.id = s.match_card_id
-                    WHERE s.match_holomem_id = ?
-                    ORDER BY s.stack_order DESC, s.id DESC
-                    """,
-                    holomemId
-                );
-                List<Long> stackCardInstanceIds = new ArrayList<>();
-                List<String> stackCardIds = new ArrayList<>();
-                for (Map<String, Object> stackCard : stackCards) {
-                    Long stackCardInstanceId = asLong(stackCard.get("match_card_id"));
-                    String stackCardId = asText(stackCard.get("card_id"));
-                    if (stackCardInstanceId != null && stackCardInstanceId > 0) {
-                        stackCardInstanceIds.add(stackCardInstanceId);
-                    }
-                    if (StringUtils.hasText(stackCardId)) {
-                        stackCardIds.add(stackCardId);
-                    }
-                }
-                row.put("stack_card_instance_ids", stackCardInstanceIds);
-                row.put("stack_card_ids", stackCardIds);
-                return row;
-            },
-            matchId,
-            userId,
-            giftHolderHolomemId
-        );
-    }
-
-    /**
-     * down event 預覽（不扣生命，供互動確認）。
-     */
-    public Map<String, Object> previewDownEventEffect(
-        Long matchId,
-        Long actorUserId,
-        Long downedOwnerUserId,
-        String downedCardId,
-        int currentTurn
-    ) {
-        return executeDownEvent(matchId, actorUserId, downedOwnerUserId, downedCardId, currentTurn, false, null);
-    }
-
-    /**
-     * down event 正式結算（確認後扣生命）。
-     */
-    public Map<String, Object> applyDownEventEffect(
-        Long matchId,
-        Long actorUserId,
-        Long downedOwnerUserId,
-        String downedCardId,
-        int currentTurn
-    ) {
-        return applyDownEventEffect(matchId, actorUserId, downedOwnerUserId, downedCardId, currentTurn, null);
-    }
-
-    public Map<String, Object> applyDownEventEffect(
-        Long matchId,
-        Long actorUserId,
-        Long downedOwnerUserId,
-        String downedCardId,
-        int currentTurn,
-        String downedStageZone
-    ) {
-        return executeDownEvent(
-            matchId,
-            actorUserId,
-            downedOwnerUserId,
-            downedCardId,
-            currentTurn,
-            true,
-            downedStageZone
-        );
-    }
-
-    /**
-     * 依觸發事件執行 Gift 效果。
-     */
-    private List<Map<String, Object>> applyGiftTriggeredEffectsByTrigger(
-        Long matchId,
-        Long userId,
-        String triggerType,
-        Long sourceCardInstanceId,
-        Long triggerTargetCardInstanceId,
-        int turnNumber,
+        String giftText,
         boolean executeEffects
     ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            triggerType,
-            sourceCardInstanceId,
-            triggerTargetCardInstanceId,
-            turnNumber,
-            executeEffects,
-            loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null, null)
-        );
-    }
-
-    private List<Map<String, Object>> applyGiftTriggeredEffectsByTriggerWithSourceArt(
-        Long matchId,
-        Long userId,
-        String triggerType,
-        Long sourceCardInstanceId,
-        Long triggerTargetCardInstanceId,
-        int turnNumber,
-        boolean executeEffects,
-        String sourceArtName
-    ) {
-        return applyGiftTriggeredEffectsByTrigger(
-            matchId,
-            userId,
-            triggerType,
-            sourceCardInstanceId,
-            triggerTargetCardInstanceId,
-            turnNumber,
-            executeEffects,
-            loadGiftTriggerSourceContext(matchId, sourceCardInstanceId, null, sourceArtName)
-        );
-    }
-
-    private List<Map<String, Object>> applyGiftTriggeredEffectsByTrigger(
-        Long matchId,
-        Long userId,
-        String triggerType,
-        Long sourceCardInstanceId,
-        Long triggerTargetCardInstanceId,
-        int turnNumber,
-        boolean executeEffects,
-        GiftTriggerSourceContext sourceContext
-    ) {
-        if (matchId == null || userId == null || turnNumber <= 0) {
-            return List.of();
-        }
-        String normalizedTriggerType = normalizeGiftTriggerType(triggerType);
-        List<Map<String, Object>> holders = jdbcTemplate.queryForList(
-            """
-            SELECT h.id AS holomem_id,
-                   h.match_card_id,
-                   h.card_id,
-                   h.zone,
-                   h.current_level,
-                   m.passive_effect_json::text AS passive_text
-            FROM match_holomems h
-            JOIN member_cards m ON m.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-            ORDER BY h.id
-            """,
-            matchId,
-            userId
-        );
-        if (holders.isEmpty()) {
-            return List.of();
-        }
-
-        List<Map<String, Object>> triggered = new ArrayList<>();
-        for (Map<String, Object> holder : holders) {
-            Long effectiveSourceCardInstanceId = sourceCardInstanceId == null
-                ? asLong(holder.get("match_card_id"))
-                : sourceCardInstanceId;
-            GiftTriggerSourceContext effectiveSourceContext = sourceContext == null
-                ? loadGiftTriggerSourceContext(matchId, effectiveSourceCardInstanceId, asText(holder.get("zone")), null)
-                : sourceContext;
-            Map<String, Object> summary = buildGiftTriggerSummary(
-                matchId,
-                userId,
-                turnNumber,
-                effectiveSourceCardInstanceId,
-                triggerTargetCardInstanceId,
-                normalizedTriggerType,
-                effectiveSourceContext,
-                holder,
-                executeEffects
-            );
-            if (summary != null) {
-                triggered.add(summary);
-            }
-        }
-        return triggered;
-    }
-
-    /**
-     * 建立單一 Gift 持有者的觸發摘要（可選擇立即執行或僅預覽）。
-     */
-    private Map<String, Object> buildGiftTriggerSummary(
-        Long matchId,
-        Long userId,
-        int turnNumber,
-        Long sourceCardInstanceId,
-        Long triggerTargetCardInstanceId,
-        String normalizedTriggerType,
-        GiftTriggerSourceContext sourceContext,
-        Map<String, Object> holder,
-        boolean executeEffects
-    ) {
-        Long holderHolomemId = asLong(holder.get("holomem_id"));
-        Long holderCardInstanceId = asLong(holder.get("match_card_id"));
-        String holderZone = normalize(asText(holder.get("zone")));
-        String holderLevel = normalizeLevelType(asText(holder.get("current_level")));
-        String giftText = loadGiftEffectText(asText(holder.get("passive_text")));
-        if (!StringUtils.hasText(giftText)) {
-            return null;
-        }
-        if (!giftTriggerMatcher.matchesGiftTriggerType(giftText, normalizedTriggerType)) {
-            return null;
-        }
-        if (
-            !isGiftHolderEligibleForTrigger(
-                matchId,
-                userId,
-                turnNumber,
-                holderHolomemId,
-                holderCardInstanceId,
-                holderZone,
-                holderLevel,
-                sourceCardInstanceId,
-                sourceContext,
-                giftText,
-                normalizedTriggerType
-            )
-        ) {
-            return null;
-        }
-        GiftExecutionSummary execution;
         if (executeEffects) {
-            execution = executeGiftEffectsForHolder(
+            return executeGiftEffectsForHolder(
                 matchId,
                 userId,
                 holderCardInstanceId,
                 triggerTargetCardInstanceId,
                 giftText
             );
-        } else {
-            execution = previewGiftEffects(giftText);
         }
-        Map<String, Object> summary = giftTriggerSummaryService.buildTriggerSummary(
-            normalizedTriggerType,
-            holderHolomemId,
-            holderCardInstanceId,
-            asText(holder.get("card_id")),
-            holderZone,
-            sourceCardInstanceId,
-            triggerTargetCardInstanceId,
-            giftText,
-            execution,
-            !executeEffects,
-            holder
-        );
-        if (!executeEffects) {
-            appendGiftSelectionPreviewContext(summary, matchId, userId, giftText, holder);
-        }
-        return summary;
+        return previewGiftEffects(giftText);
     }
 
-    private void appendGiftSelectionPreviewContext(
-        Map<String, Object> summary,
+    MatchGiftTriggerOrchestrationService.GiftSelectionPreview resolveGiftSelectionPreview(
         Long matchId,
         Long userId,
+        String effectType,
         String giftText,
         Map<String, Object> storedTriggerContext
     ) {
-        if (summary == null || summary.isEmpty() || matchId == null || userId == null || !StringUtils.hasText(giftText)) {
-            return;
-        }
         ObjectNode giftNode = objectMapper.createObjectNode();
         giftNode.put("rawText", giftText);
-        appendStoredGiftExecutionContext(giftNode, storedTriggerContext);
-        for (String effectType : toTextList(summary.get("requestedEffects"))) {
-            SelectionProbe probe = probeSelectionCandidates(matchId, userId, effectType, giftNode);
-            if (probe == null || probe.candidates().isEmpty()) {
-                continue;
-            }
-            int maxSelect = Math.min(probe.requestedCount(), probe.candidates().size());
-            if (maxSelect <= 0 || probe.candidates().size() <= maxSelect) {
-                continue;
-            }
-            summary.put("selectionRequired", true);
-            summary.put("selectionEffectType", effectTextParser.normalizeEffectType(effectType));
-            summary.put("selectionMinSelect", 1);
-            summary.put("selectionMaxSelect", maxSelect);
-            List<Long> candidateCardInstanceIds = probe.candidates().stream()
-                .map(DecisionCandidate::cardInstanceId)
-                .filter(Objects::nonNull)
-                .toList();
-            summary.put("selectionCandidateCardInstanceIds", candidateCardInstanceIds);
-            summary.put("selectionCandidates", probe.candidates());
-            break;
+        giftTriggerContextService.appendStoredGiftExecutionContext(giftNode, storedTriggerContext);
+        SelectionProbe probe = probeSelectionCandidates(matchId, userId, effectType, giftNode);
+        if (probe == null || probe.candidates().isEmpty()) {
+            return null;
         }
+        return new MatchGiftTriggerOrchestrationService.GiftSelectionPreview(
+            effectType,
+            probe.requestedCount(),
+            probe.candidates()
+        );
     }
 
-    /**
-     * 檢查 Gift 持有者與條件是否滿足（位置、層級、回合次數、來源卡等）。
-     */
-    private boolean isGiftHolderEligibleForTrigger(
-        Long matchId,
-        Long userId,
-        int turnNumber,
-        Long holderHolomemId,
-        Long holderCardInstanceId,
-        String holderZone,
-        String holderLevel,
-        Long sourceCardInstanceId,
-        GiftTriggerSourceContext sourceContext,
-        String giftText,
-        String triggerType
-    ) {
-        if (giftText.contains("このホロメンが") && !sourceCardInstanceId.equals(holderCardInstanceId)) {
-            return false;
-        }
-        if ("ART_USED".equals(triggerType)
-            && !matchesGiftReferencedArtNameCondition(giftText, sourceContext == null ? null : sourceContext.artName())) {
-            return false;
-        }
-        if ("ART_USED".equals(triggerType) && !matchesGiftSpecialDamageThresholdCondition(giftText, sourceContext)) {
-            return false;
-        }
-        if (!matchesGiftTurnOwnershipCondition(matchId, userId, giftText)) {
-            return false;
-        }
-        if (!matchesGiftLifeComparisonCondition(matchId, userId, giftText)) {
-            return false;
-        }
-        if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(giftText, holderZone)) {
-            return false;
-        }
-        if (giftText.contains("このホロメンに")
-            && giftText.contains("が付いている")
-            && !matchesPassiveGiftAttachedSupportCondition(giftText, holderHolomemId)) {
-            return false;
-        }
-        if (giftText.contains("1stホロメンからBloomしているこのホロメン")) {
-            if (!Set.of("SECOND", "BUZZ").contains(holderLevel)) {
-                return false;
-            }
-        }
-        if ("SELF_DOWNED".equals(triggerType)
-            && !giftText.contains("このホロメンがダウンした時")
-            && !Objects.equals(sourceCardInstanceId, holderCardInstanceId)) {
-            // 像 `自分の〈さくらみこ〉がダウンした時` 這種具名文案，本身無法只靠文字判斷是 self 還是 ally。
-            // 這裡把「被打倒的來源卡就是 Gift 持有者自己」視為 SELF_DOWNED，讓具名文案能正確落到 self 路徑。
-            return false;
-        }
-        if ("ALLY_DOWNED".equals(triggerType)
-            && !giftText.contains("このホロメンがダウンした時")
-            && Objects.equals(sourceCardInstanceId, holderCardInstanceId)) {
-            // 同一張具名 down 文案會同時匹配 SELF / ALLY 的文字粗篩，因此這裡再用來源卡是否就是持有者自己
-            // 做第二層分流，避免 self down 被 ally 路徑重複收進來。
-            return false;
-        }
-        if (giftText.contains("ターンに1回") && isGiftAlreadyUsedThisTurn(matchId, userId, turnNumber, holderHolomemId)) {
-            return false;
-        }
-        if ("OPPONENT_DOWNED".equals(triggerType)) {
-            if (giftText.contains("このホロメンがダウンした時")) {
-                return false;
-            }
-            if (
-                (giftText.contains("相手のホロメンがダウンした時") || giftText.contains("ダウンさせた時"))
-                && sourceCardInstanceId == null
-            ) {
-                return false;
-            }
-        }
-        if (Set.of("SELF_DOWNED", "ALLY_DOWNED").contains(triggerType)
-            && !matchesGiftDownedSourceCondition(giftText, sourceContext, triggerType)) {
-            return false;
-        }
-        if ("COLLAB".equals(triggerType) && !matchesGiftCollabSourceCondition(giftText, sourceContext)) {
-            return false;
-        }
-        if ("BATON_TOUCH_BACK".equals(triggerType) && !matchesGiftBatonTouchBackSourceCondition(giftText, sourceContext)) {
-            return false;
-        }
-        if (Set.of("PERFORMANCE_END_SELF", "PERFORMANCE_END_OPPONENT").contains(triggerType)
-            && !matchesGiftPerformanceEndCondition(matchId, userId, turnNumber, holderHolomemId, giftText)) {
-            return false;
-        }
-        if ("STAGE_ENTER".equals(triggerType) && !matchesGiftStageEnterSourceCondition(giftText, sourceContext)) {
-            return false;
-        }
-        if (!matchesGiftHandCountCondition(matchId, userId, giftText)) {
-            return false;
-        }
-        return true;
-    }
-
-    private boolean matchesGiftReferencedArtNameCondition(String giftText, String attackerArtName) {
-        return giftTriggerConditionService.matchesReferencedArtNameCondition(giftText, attackerArtName);
-    }
-
-    /**
-     * 檢查 Gift 文案是否要求特定回合歸屬。
-     *
-     * <p>這個判斷放在 eligibility 層，而不是 trigger matcher 層，原因是：
-     *
-     * <p>1. `ALLY_DOWNED` / `SELF_DOWNED` 只是事件種類，不能代表一定是誰的回合
-     * <p>2. `相手のターンで` / `自分のターンで` 需要結合當前對戰狀態才判得出來
-     *
-     * <p>因此它屬於「文字 + 目前對戰上下文」的條件，最適合留在這裡集中處理。
-     */
     private boolean matchesGiftTurnOwnershipCondition(Long matchId, Long userId, String giftText) {
         return giftTriggerConditionService.matchesTurnOwnershipCondition(matchId, userId, giftText);
     }
 
-    /**
-     * 檢查 Gift 文案中的生命值比較條件。
-     *
-     * <p>目前官方 Gift 常見的寫法有兩種：
-     *
-     * <p>- `自分のライフが相手以下`
-     * <p>- `自分のライフが相手のライフより少ない`
-     *
-     * <p>這裡故意集中成同一個 helper，避免每一張卡都在個別 effect executor 裡各自查一次
-     * `match_players.current_life`。之後如果再出現其他生命比較文案，只要在這裡擴充即可。
-     */
     private boolean matchesGiftLifeComparisonCondition(Long matchId, Long userId, String giftText) {
         return giftTriggerConditionService.matchesLifeComparisonCondition(matchId, userId, giftText);
     }
 
-    /**
-     * 檢查 Gift 文案中的手牌張數門檻。
-     *
-     * <p>目前先支援官方卡已出現的明確寫法：
-     *
-     * <p>- `自分の手札が5枚以上なら`
-     *
-     * <p>這類條件屬於純 eligibility 判斷，不需要等效果執行時才知道，因此和生命值比較一樣
-     * 集中放在 trigger eligibility 層處理。後續若再出現 `N 枚以下` 或 `剛好 N 枚` 之類文案，
-     * 直接在這裡擴充即可，不需要把查 `HAND` 張數的 SQL 散落到各個 effect executor。
-     */
     private boolean matchesGiftHandCountCondition(Long matchId, Long userId, String giftText) {
         return giftTriggerConditionService.matchesHandCountCondition(matchId, userId, giftText);
     }
 
-    private boolean matchesGiftSpecialDamageThresholdCondition(String giftText, GiftTriggerSourceContext sourceContext) {
-        return giftTriggerConditionService.matchesSpecialDamageThresholdCondition(
-            giftText,
-            sourceContext == null ? null : sourceContext.cardId(),
-            sourceContext == null ? null : sourceContext.cardName(),
-            sourceContext == null ? null : sourceContext.artName()
-        );
-    }
-
-    private boolean matchesGiftPerformanceEndCondition(
-        Long matchId,
-        Long userId,
-        int turnNumber,
-        Long holderHolomemId,
-        String giftText
-    ) {
-        return giftTriggerConditionService.matchesPerformanceEndCondition(
-            matchId,
-            userId,
-            turnNumber,
-            holderHolomemId,
-            giftText
-        );
-    }
-
-    private boolean matchesGiftStageEnterSourceCondition(String giftText, GiftTriggerSourceContext sourceContext) {
-        return giftTriggerConditionService.matchesStageEnterSourceCondition(
-            giftText,
-            sourceContext == null ? null : sourceContext.levelType(),
-            sourceContext == null ? null : sourceContext.stageZone(),
-            sourceContext == null ? null : sourceContext.tagsJson()
-        );
-    }
-
-    private boolean matchesGiftCollabSourceCondition(String giftText, GiftTriggerSourceContext sourceContext) {
-        return giftTriggerConditionService.matchesCollabSourceCondition(
-            giftText,
-            sourceContext == null ? null : sourceContext.cardName(),
-            sourceContext == null ? null : sourceContext.levelType(),
-            sourceContext == null ? null : sourceContext.stageZone(),
-            sourceContext == null ? null : sourceContext.tagsJson()
-        );
-    }
-
-    private boolean matchesGiftBatonTouchBackSourceCondition(String giftText, GiftTriggerSourceContext sourceContext) {
-        return giftTriggerConditionService.matchesBatonTouchBackSourceCondition(
-            giftText,
-            sourceContext == null ? null : sourceContext.cardName(),
-            sourceContext == null ? null : sourceContext.levelType(),
-            sourceContext == null ? null : sourceContext.stageZone(),
-            sourceContext == null ? null : sourceContext.tagsJson()
-        );
-    }
-
-    private boolean matchesGiftDownedSourceCondition(
-        String giftText,
-        GiftTriggerSourceContext sourceContext,
-        String triggerType
-    ) {
-        return giftTriggerConditionService.matchesDownedSourceCondition(
-            giftText,
-            sourceContext == null ? null : sourceContext.cardName(),
-            sourceContext == null ? null : sourceContext.levelType(),
-            sourceContext == null ? null : sourceContext.stageZone(),
-            sourceContext == null ? null : sourceContext.tagsJson(),
-            triggerType
-        );
-    }
-
-    /**
-     * 執行單一 Gift 持有者所需的 effectType 並彙整結果。
-     */
-    private GiftExecutionSummary executeGiftEffectsForHolder(
+    GiftExecutionSummary executeGiftEffectsForHolder(
         Long matchId,
         Long userId,
         Long holderCardInstanceId,
@@ -1532,7 +451,7 @@ public class MatchEffectService {
         );
     }
 
-    private GiftExecutionSummary executeGiftEffectsForHolder(
+    GiftExecutionSummary executeGiftEffectsForHolder(
         Long matchId,
         Long userId,
         Long holderCardInstanceId,
@@ -1545,7 +464,7 @@ public class MatchEffectService {
         }
         ObjectNode giftNode = objectMapper.createObjectNode();
         giftNode.put("rawText", giftText);
-        appendStoredGiftExecutionContext(giftNode, storedTriggerContext);
+        giftTriggerContextService.appendStoredGiftExecutionContext(giftNode, storedTriggerContext);
         int clauseSeparatorIndex = findClauseSeparator(giftText);
         List<String> costEffectTypes = clauseSeparatorIndex >= 0 ? inferBloomEffectTypes(extractCostClause(giftText)) : List.of();
         List<String> resolvedEffectTypes = clauseSeparatorIndex >= 0 ? inferBloomEffectTypes(extractResolvedEffectClause(giftText)) : List.of();
@@ -1707,63 +626,6 @@ public class MatchEffectService {
             userId
         );
         return count == null ? 0 : Math.max(count, 0);
-    }
-
-    private void appendStoredGiftExecutionContext(ObjectNode giftNode, Map<String, Object> storedTriggerContext) {
-        if (giftNode == null || storedTriggerContext == null || storedTriggerContext.isEmpty()) {
-            return;
-        }
-        Long giftHolderHolomemId = asLong(storedTriggerContext.get("giftHolderHolomemId"));
-        if (giftHolderHolomemId != null && giftHolderHolomemId > 0) {
-            giftNode.put("giftHolderHolomemId", giftHolderHolomemId);
-        }
-        List<Long> attachedCheerCardInstanceIds = toLongList(storedTriggerContext.get("giftHolderAttachedCheerCardInstanceIds"));
-        if (attachedCheerCardInstanceIds.isEmpty()) {
-            attachedCheerCardInstanceIds = toLongList(storedTriggerContext.get("attached_cheer_card_instance_ids"));
-        }
-        if (!attachedCheerCardInstanceIds.isEmpty()) {
-            giftNode.set(
-                "giftHolderAttachedCheerCardInstanceIds",
-                objectMapper.valueToTree(attachedCheerCardInstanceIds)
-            );
-        }
-        List<String> attachedCheerCardIds = toTextList(storedTriggerContext.get("giftHolderAttachedCheerCardIds"));
-        if (attachedCheerCardIds.isEmpty()) {
-            attachedCheerCardIds = toTextList(storedTriggerContext.get("attached_cheer_card_ids"));
-        }
-        if (!attachedCheerCardIds.isEmpty()) {
-            giftNode.set(
-                "giftHolderAttachedCheerCardIds",
-                objectMapper.valueToTree(attachedCheerCardIds)
-            );
-        }
-        List<Long> stackCardInstanceIds = toLongList(storedTriggerContext.get("giftHolderStackCardInstanceIds"));
-        if (stackCardInstanceIds.isEmpty()) {
-            stackCardInstanceIds = toLongList(storedTriggerContext.get("stack_card_instance_ids"));
-        }
-        if (!stackCardInstanceIds.isEmpty()) {
-            giftNode.set(
-                "giftHolderStackCardInstanceIds",
-                objectMapper.valueToTree(stackCardInstanceIds)
-            );
-        }
-        List<String> stackCardIds = toTextList(storedTriggerContext.get("giftHolderStackCardIds"));
-        if (stackCardIds.isEmpty()) {
-            stackCardIds = toTextList(storedTriggerContext.get("stack_card_ids"));
-        }
-        if (!stackCardIds.isEmpty()) {
-            giftNode.set(
-                "giftHolderStackCardIds",
-                objectMapper.valueToTree(stackCardIds)
-            );
-        }
-        List<Long> selectedCardInstanceIds = toLongList(storedTriggerContext.get("selectedCardInstanceIds"));
-        if (!selectedCardInstanceIds.isEmpty()) {
-            giftNode.set(
-                "selectedCardInstanceIds",
-                objectMapper.valueToTree(selectedCardInstanceIds)
-            );
-        }
     }
 
     /**
@@ -1939,7 +801,7 @@ public class MatchEffectService {
     /**
      * 僅解析 Gift effectType，不執行效果。
      */
-    private GiftExecutionSummary previewGiftEffects(String giftText) {
+    GiftExecutionSummary previewGiftEffects(String giftText) {
         List<String> effectTypes = inferBloomEffectTypes(giftText);
         return new GiftExecutionSummary(effectTypes, List.of(), List.of(), List.of());
     }
@@ -1947,7 +809,7 @@ public class MatchEffectService {
     /**
      * 在藝能傷害套用前，處理「受傷時觸發」的 Gift（例如 HBP01-027）。
      */
-    public Map<String, Object> resolveTriggeredGiftDamagePrevention(
+    Map<String, Object> resolveTriggeredGiftDamagePrevention(
         Long matchId,
         Long defendingUserId,
         Long attackingUserId,
@@ -2212,93 +1074,11 @@ public class MatchEffectService {
     }
 
     /**
-     * Gift trigger type 正規化。
-     */
-    private String normalizeGiftTriggerType(String triggerType) {
-        String normalized = normalize(triggerType);
-        return switch (normalized) {
-            case "DAMAGE_RECEIVED", "ON_DAMAGE_RECEIVED", "ON_TAKE_DAMAGE", "TAKE_DAMAGE" -> "DAMAGE_RECEIVED";
-            case "OPPONENT_DOWNED", "DOWNED", "DOWNED_OPPONENT" -> "OPPONENT_DOWNED";
-            case "SELF_DOWNED", "DOWNED_SELF", "OWN_SELF_DOWNED" -> "SELF_DOWNED";
-            case "ALLY_DOWNED", "OWN_DOWNED", "OWN_HOLOMEM_DOWNED", "FRIENDLY_DOWNED" -> "ALLY_DOWNED";
-            case "COLLAB", "ON_COLLAB", "SELF_COLLAB" -> "COLLAB";
-            case "BATON_TOUCH_BACK", "BATON_TOUCH_MOVE_TO_BACK", "ON_BATON_TOUCH_BACK" -> "BATON_TOUCH_BACK";
-            case "PERFORMANCE_START_SELF", "OWN_PERFORMANCE_START", "PERFORMANCE_START" -> "PERFORMANCE_START_SELF";
-            case "MAIN_STEP_SELF", "OWN_MAIN_STEP", "MAIN_STEP_START_SELF" -> "MAIN_STEP_SELF";
-            case "PERFORMANCE_START_OPPONENT", "OPPONENT_PERFORMANCE_START" -> "PERFORMANCE_START_OPPONENT";
-            case "PERFORMANCE_END_SELF", "OWN_PERFORMANCE_END", "PERFORMANCE_END" -> "PERFORMANCE_END_SELF";
-            case "PERFORMANCE_END_OPPONENT", "OPPONENT_PERFORMANCE_END" -> "PERFORMANCE_END_OPPONENT";
-            case "STAGE_ENTER", "ENTER_STAGE", "HOLOMEM_ENTER", "ON_HOLOMEM_ENTER" -> "STAGE_ENTER";
-            default -> "ART_USED";
-        };
-    }
-
-    private GiftTriggerSourceContext loadGiftTriggerSourceContext(
-        Long matchId,
-        Long sourceCardInstanceId,
-        String fallbackStageZone,
-        String sourceArtName
-    ) {
-        if (matchId == null || sourceCardInstanceId == null || sourceCardInstanceId <= 0) {
-            return null;
-        }
-        return jdbcTemplate.query(
-            """
-            SELECT mc.card_id,
-                   c.name,
-                   m.level_type,
-                   c.tags_json::text AS tags_json,
-                   h.zone AS stage_zone
-            FROM match_cards mc
-            JOIN cards c ON c.card_id = mc.card_id
-            LEFT JOIN member_cards m ON m.card_id = mc.card_id
-            LEFT JOIN match_holomems h
-              ON h.match_id = mc.match_id
-             AND h.match_card_id = mc.id
-            WHERE mc.match_id = ?
-              AND mc.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                String stageZone = normalize(rs.getString("stage_zone"));
-                if (!StringUtils.hasText(stageZone)) {
-                    stageZone = normalize(fallbackStageZone);
-                }
-                return new GiftTriggerSourceContext(
-                    rs.getString("card_id"),
-                    rs.getString("name"),
-                    rs.getString("level_type"),
-                    stageZone,
-                    rs.getString("tags_json"),
-                    sourceArtName
-                );
-            },
-            matchId,
-            sourceCardInstanceId
-        );
-    }
-
-    /**
-     * Gift 效果執行摘要。
-     */
-    private record GiftTriggerSourceContext(
-        String cardId,
-        String cardName,
-        String levelType,
-        String stageZone,
-        String tagsJson,
-        String artName
-    ) {}
-
-    /**
      * 描述常駐藝能加成的受益者。
      *
      * <p>目前只保留常駐 Gift 判斷真正需要的欄位，避免把完整 Holomem state 傳遞到每個 helper。
      */
-    private record StaticArtBonusTargetContext(
+    record StaticArtBonusTargetContext(
         Long holomemId,
         String stageZone,
         String levelType,
@@ -2323,7 +1103,7 @@ public class MatchEffectService {
      *
      * <p>才能在攻擊時計算像 `HSD13-007`、`HSD07-009` 這類條件加傷。
      */
-    private record ArtSelfBonusTargetContext(
+    record ArtSelfBonusTargetContext(
         Long holomemId,
         String stageZone,
         String levelType,
@@ -2336,7 +1116,7 @@ public class MatchEffectService {
     /**
      * 描述提供常駐 Gift 的 holder。
      */
-    private record PassiveGiftHolderContext(
+    record PassiveGiftHolderContext(
         Long holomemId,
         String stageZone,
         String passiveEffectJsonText
@@ -2353,7 +1133,7 @@ public class MatchEffectService {
      *
      * <p>因此需要比一般 `アーツ+N` 多帶出卡名欄位。
      */
-    private record PassiveGiftArtCostReductionTargetContext(
+    record PassiveGiftArtCostReductionTargetContext(
         Long holomemId,
         String stageZone,
         String levelType,
@@ -2371,7 +1151,7 @@ public class MatchEffectService {
      * <p>- 站位 / 等級 / tag（保留未來擴到其他自動常駐文案的空間）
      * <p>- 身上的 Cheer 數量（像 `このホロメンのエール1枚につき` 會直接用到）
      */
-    private record PassiveGiftHpTargetContext(
+    record PassiveGiftHpTargetContext(
         Long holomemId,
         String stageZone,
         String levelType,
@@ -2397,7 +1177,7 @@ public class MatchEffectService {
      * <p>先把這個 target context 單獨抽出來，可以避免後面在 matcher 裡反覆 query stage zone，
      * 也讓 `HSD07-009` / `HBP06-009` 這種固定格式共享同一條保守主幹。
      */
-    private record PassiveGiftIncomingDamageReductionTargetContext(
+    record PassiveGiftIncomingDamageReductionTargetContext(
         Long holomemId,
         String stageZone,
         String levelType,
@@ -2427,460 +1207,9 @@ public class MatchEffectService {
     ) {}
 
     /**
-     * 計算附加支援造成的 HP 加成總和。
-     */
-    public int resolveAttachedSupportHpBonus(Long matchId, Long matchHolomemId) {
-        return resolveAttachedSupportStatBonus(matchId, matchHolomemId, ATTACHED_SUPPORT_HP_PATTERN);
-    }
-
-    /**
-     * 計算附加支援造成的藝能傷害加成總和。
-     */
-    public int resolveAttachedSupportArtBonus(Long matchId, Long matchHolomemId) {
-        return resolveAttachedSupportStatBonus(matchId, matchHolomemId, ATTACHED_SUPPORT_ARTS_PATTERN);
-    }
-
-    /**
-     * 計算附加支援造成的常駐受傷減免。
-     */
-    public int resolveAttachedSupportIncomingDamageReduction(
-        Long matchId,
-        Long matchHolomemId,
-        String targetStageZone
-    ) {
-        if (matchId == null || matchHolomemId == null) {
-            return 0;
-        }
-        List<String> effectJsonTexts = jdbcTemplate.query(
-            """
-            SELECT sc.effect_json::text AS effect_json_text
-            FROM match_holomem_supports hs
-            JOIN support_cards sc ON sc.card_id = hs.support_card_id
-            JOIN match_holomems h ON h.id = hs.match_holomem_id
-            WHERE hs.match_holomem_id = ?
-              AND h.match_id = ?
-            ORDER BY hs.id
-            """,
-            (rs, rowNum) -> rs.getString("effect_json_text"),
-            matchHolomemId,
-            matchId
-        );
-        if (effectJsonTexts.isEmpty()) {
-            return 0;
-        }
-        int total = 0;
-        for (String effectJsonText : effectJsonTexts) {
-            total += extractAttachedSupportIncomingDamageReduction(effectJsonText, targetStageZone);
-        }
-        return total;
-    }
-
-    /**
-     * 預覽附加型 SUPPORT 的條件觸發。
-     *
-     * <p>這個入口先作為 official smoke 的穩定解析層：辨識「附加對象受傷 / Down」時會觸發的
-     * Mascot / Tool / Fan 文案，並輸出統一 trigger summary。真正需要玩家選擇或支付成本的效果，
-     * 後續再由個別 deep test 補完整執行路徑。
-     */
-    public List<Map<String, Object>> previewAttachedSupportConditionalTriggers(
-        Long matchId,
-        Long ownerUserId,
-        Long holderHolomemId,
-        String triggerType,
-        int turnNumber
-    ) {
-        if (matchId == null || ownerUserId == null || holderHolomemId == null) {
-            return List.of();
-        }
-        String normalizedTriggerType = normalize(triggerType);
-        if (!"SELF_DOWNED".equals(normalizedTriggerType) && !"DAMAGE_RECEIVED".equals(normalizedTriggerType)) {
-            return List.of();
-        }
-        List<Map<String, Object>> supportRows = jdbcTemplate.query(
-            """
-            SELECT hs.match_card_id AS support_card_instance_id,
-                   hs.support_card_id,
-                   hs.support_type,
-                   c.name,
-                   sc.effect_type,
-                   sc.effect_json::text AS effect_json_text
-            FROM match_holomem_supports hs
-            JOIN support_cards sc ON sc.card_id = hs.support_card_id
-            JOIN cards c ON c.card_id = hs.support_card_id
-            JOIN match_holomems h ON h.id = hs.match_holomem_id
-            WHERE hs.match_holomem_id = ?
-              AND h.match_id = ?
-              AND h.owner_user_id = ?
-            ORDER BY hs.id
-            """,
-            (rs, rowNum) -> {
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("supportCardInstanceId", rs.getLong("support_card_instance_id"));
-                row.put("supportCardId", rs.getString("support_card_id"));
-                row.put("supportType", rs.getString("support_type"));
-                row.put("name", rs.getString("name"));
-                row.put("effectType", rs.getString("effect_type"));
-                row.put("effectJsonText", rs.getString("effect_json_text"));
-                return row;
-            },
-            holderHolomemId,
-            matchId,
-            ownerUserId
-        );
-        if (supportRows.isEmpty()) {
-            return List.of();
-        }
-
-        boolean opponentTurn = isOpponentTurnForUser(matchId, ownerUserId);
-        List<Map<String, Object>> previews = new ArrayList<>();
-        for (Map<String, Object> supportRow : supportRows) {
-            String rawText = extractAttachedSupportRawText(asText(supportRow.get("effectJsonText")));
-            String triggerClause = extractAttachedSupportConditionalTriggerClause(rawText, normalizedTriggerType);
-            if (!StringUtils.hasText(triggerClause)) {
-                continue;
-            }
-            if (triggerClause.contains("相手のターンで") && !opponentTurn) {
-                continue;
-            }
-            List<String> requestedEffects = inferAttachedSupportConditionalRequestedEffects(
-                triggerClause,
-                asText(supportRow.get("effectType")),
-                normalizedTriggerType
-            );
-            if (requestedEffects.isEmpty()) {
-                continue;
-            }
-
-            Map<String, Object> preview = new LinkedHashMap<>();
-            preview.put("triggerType", normalizedTriggerType);
-            preview.put("turnNumber", turnNumber);
-            preview.put("giftHolderHolomemId", holderHolomemId);
-            preview.put("giftHolderCardInstanceId", asLong(supportRow.get("supportCardInstanceId")));
-            preview.put("giftHolderCardId", asText(supportRow.get("supportCardId")));
-            preview.put("giftHolderCardType", "SUPPORT");
-            preview.put("supportType", asText(supportRow.get("supportType")));
-            preview.put("supportName", asText(supportRow.get("name")));
-            preview.put("rawText", triggerClause);
-            preview.put("requestedEffects", requestedEffects);
-            preview.put("executedEffects", List.of());
-            preview.put("unsupportedEffects", List.of());
-            preview.put("skippedEffects", List.of());
-            preview.put("selectionRequired", hasAttachedSupportOptionalOrCostText(triggerClause));
-            preview.put("sourceMode", "ATTACHED_SUPPORT_CONDITIONAL_TRIGGER");
-            previews.add(preview);
-        }
-        return previews;
-    }
-
-    /**
-     * 計算由我方中心位常駐 Gift 提供給攻擊者的藝能傷害加成。
-     *
-     * <p>這個入口目前只處理「不需要建立 pending、也不需要額外互動」的常駐型被動效果。
-     * 例如 `HSD08-004` 這種：
-     *
-     * <p>- holder 必須在 `CENTER`
-     * <p>- 指定我方某個站位/標籤/等級的 Holomem
-     * <p>- 直接讓該 Holomem 的藝能 `+N`
-     *
-     * <p>這裡刻意不把它做成完整常駐效果引擎，原因是目前專案仍在逐步補齊卡效，若直接引入
-     * 一整套 aura / layer 系統，風險會遠高於收益。先把「攻擊時計算可驗證的靜態加成」抽成
-     * 單一入口，可以讓後續每張類似卡片都沿用同一條主幹。
-     */
-    public int resolvePassiveGiftArtBonus(Long matchId, Long userId, Long attackerHolomemId, String targetZone) {
-        if (matchId == null || userId == null || attackerHolomemId == null) {
-            return 0;
-        }
-        StaticArtBonusTargetContext attackerContext = loadStaticArtBonusTargetContext(matchId, userId, attackerHolomemId);
-        if (attackerContext == null) {
-            return 0;
-        }
-        List<PassiveGiftHolderContext> holderContexts = loadPassiveGiftArtBonusHolderContexts(matchId, userId);
-        if (holderContexts.isEmpty()) {
-            return 0;
-        }
-        int total = 0;
-        for (PassiveGiftHolderContext holderContext : holderContexts) {
-            total += resolvePassiveGiftArtBonusFromHolder(matchId, userId, holderContext, attackerContext, targetZone);
-        }
-        return total;
-    }
-
-    /**
-     * 計算我方常駐 Gift 對指定攻擊者提供的藝能 Cheer 費用減免。
-     *
-     * <p>目前先保守支援官方已驗證句型：
-     *
-     * <p>- `[センターポジション・コラボポジション限定]自分の〈古代武器〉が付いているセンターホロメンの〈アーニャ・メルフィッサ〉のアーツに必要な黄-1。`
-     *
-     * <p>也就是：
-     *
-     * <p>- holder 可在 `CENTER / COLLAB`
-     * <p>- 受益者可帶 `zone / name / tag / level` 條件
-     * <p>- 受益者身上可要求附著指定名稱 support
-     * <p>- 目前回傳的是依顏色聚合後的減免 map，交由 `attackArt(...)` 在付費前套用
-     */
-    public Map<String, Integer> resolvePassiveGiftArtCheerCostReduction(
-        Long matchId,
-        Long userId,
-        Long attackerHolomemId,
-        String attackerArtName
-    ) {
-        if (matchId == null || userId == null || attackerHolomemId == null) {
-            return Map.of();
-        }
-        PassiveGiftArtCostReductionTargetContext attackerContext =
-            loadPassiveGiftArtCostReductionTargetContext(matchId, userId, attackerHolomemId, attackerArtName);
-        if (attackerContext == null) {
-            return Map.of();
-        }
-        List<PassiveGiftHolderContext> holderContexts = loadPassiveGiftArtBonusHolderContexts(matchId, userId);
-        if (holderContexts.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, Integer> total = new LinkedHashMap<>();
-        for (PassiveGiftHolderContext holderContext : holderContexts) {
-            Map<String, Integer> reduction = resolvePassiveGiftArtCostReductionFromHolder(
-                matchId,
-                userId,
-                holderContext,
-                attackerContext
-            );
-            if (reduction.isEmpty()) {
-                continue;
-            }
-            for (Map.Entry<String, Integer> entry : reduction.entrySet()) {
-                String color = normalizeColorType(entry.getKey());
-                int value = entry.getValue() == null ? 0 : entry.getValue();
-                if (!StringUtils.hasText(color) || value <= 0) {
-                    continue;
-                }
-                total.merge(color, value, Integer::sum);
-            }
-        }
-        return total;
-    }
-
-    /**
-     * 計算藝能自己文字提供的即時傷害加成。
-     *
-     * <p>這和常駐 Gift 最大差別在於：來源不是 stage 上另一個 holder，而是「這張藝能自己的 raw text」。
-     * 目前先保守支援像 `HSD13-007` 這種：
-     *
-     * <p>- 文案明確寫 `このホロメンのエール1枚につき`
-     * <p>- 加成對象明確寫 `このアーツ`
-     * <p>- 數值是固定的 `+N`
-     *
-     * <p>先把這一類常見格式集中成單一入口，後續若出現更多「依附著資源數量放大藝能傷害」的卡，
-     * 可以在這裡往外擴，而不是每張卡都在 `attackArt(...)` 各自補特例。
-     */
-    public int resolveArtTextDamageBonus(
-        Long matchId,
-        Long userId,
-        int turnNumber,
-        Long attackerHolomemId,
-        String artEffectJsonText
-    ) {
-        if (matchId == null || userId == null || attackerHolomemId == null || !StringUtils.hasText(artEffectJsonText)) {
-            return 0;
-        }
-        ArtSelfBonusTargetContext attackerContext = loadArtSelfBonusTargetContext(matchId, userId, attackerHolomemId);
-        if (attackerContext == null) {
-            return 0;
-        }
-        return resolveArtTextDamageBonusFromRawText(
-            matchId,
-            userId,
-            turnNumber,
-            extractAttachedSupportRawText(artEffectJsonText),
-            attackerContext
-        );
-    }
-
-    /**
-     * 計算我方常駐 Gift 對指定受擊 Holomem 提供的受傷減免。
-     *
-     * <p>目前先保守支援兩種已驗證的官方固定文案：
-     *
-     * <p>- `HSD07-009`：`[センターポジション限定]このホロメンが受けるダメージ-10`
-     * <p>- `HBP06-009`：`[センターポジション限定]自分のコラボホロメンが受けるダメージ-10`
-     *
-     * <p>這裡刻意不提早抽象成完整常駐防禦 aura 引擎，而是維持一個保守入口：
-     *
-     * <p>- 只掃描我方中心位 holder
-     * <p>- 只接受固定的受保護對象描述
-     * <p>- 只回傳最終減傷數值
-     *
-     * <p>這樣做可以先讓既有 `attackArt(...)` 在不改結算模型的前提下，吃到官方已知被動減傷卡，
-     * 同時避免把其他尚未完整建模的防禦文案誤判成已支援。
-     */
-    public int resolvePassiveGiftIncomingDamageReduction(
-        Long matchId,
-        Long userId,
-        Long targetHolomemId,
-        String incomingSourceLevelType
-    ) {
-        if (matchId == null || userId == null || targetHolomemId == null) {
-            return 0;
-        }
-        PassiveGiftIncomingDamageReductionTargetContext targetContext =
-            loadPassiveGiftIncomingDamageReductionTargetContext(matchId, userId, targetHolomemId, incomingSourceLevelType);
-        if (targetContext == null) {
-            return 0;
-        }
-        List<PassiveGiftHolderContext> holderContexts = loadPassiveGiftHolderContexts(matchId, userId);
-        if (holderContexts.isEmpty()) {
-            return 0;
-        }
-        int total = 0;
-        for (PassiveGiftHolderContext holderContext : holderContexts) {
-            total += resolvePassiveGiftIncomingDamageReductionFromHolder(matchId, userId, holderContext, targetContext);
-        }
-        return total;
-    }
-
-    /**
-     * 計算指定 Holomem 受到自己常駐 Gift 影響的 HP 加成。
-     *
-     * <p>這個入口目前先處理像 `HSD13-007` 這種：
-     *
-     * <p>- 文案本身就是常駐 Gift
-     * <p>- 不需要 pending / confirm
-     * <p>- 加成目標就是「這張 Holomem 自己」
-     * <p>- 數值和當前附著 Cheer 數量有關
-     *
-     * <p>因此這裡刻意先做成「讀取目標 Holomem 自己的 passive gift，直接算出 HP bonus」，
-     * 避免太早引入完整 aura/layer 系統，卻仍能讓 `GameState` 與傷害判定吃到正確數值。
-     */
-    public int resolvePassiveGiftHpBonus(Long matchId, Long userId, Long targetHolomemId) {
-        if (matchId == null || userId == null || targetHolomemId == null) {
-            return 0;
-        }
-        PassiveGiftHpTargetContext targetContext = loadPassiveGiftHpTargetContext(matchId, userId, targetHolomemId);
-        if (targetContext == null) {
-            return 0;
-        }
-        PassiveGiftHolderContext holderContext = loadPassiveGiftHolderContext(matchId, userId, targetHolomemId);
-        if (holderContext == null) {
-            return 0;
-        }
-        return resolvePassiveGiftHpBonusFromHolder(holderContext, targetContext);
-    }
-
-    /**
-     * 在 Holomem 完成 Bloom 後，檢查是否有「不需要 pending、但會立刻改變本回合 Bloom 規則」的常駐 Gift。
-     *
-     * <p>目前先聚焦處理像 `HSD10-004` 這種「Bloom 完自己後，若條件成立，允許同回合再 Bloom 一次」
-     * 的文案。這類效果有兩個特性：
-     *
-     * <p>1. 它不是一般 `SELF_DOWNED / STAGE_ENTER / PERFORMANCE_START` 之類的事件觸發 Gift
-     * <p>2. 它也不是單純攻擊時計算的靜態加成，而是會改變後續動作合法性
-     *
-     * <p>若把它硬塞進既有 pending trigger 流程，會讓「沒有選擇、沒有確認」的效果也多一層互動；
-     * 反過來若完全不處理，Bloom 第二次就永遠會被一般規則擋掉。因此這裡獨立做一個
-     * 「Bloom 後立即檢查」入口，把結果寫進 `match_turn_effects.ALLOW_EXTRA_BLOOM`，再交給既有
-     * `MatchActionService.findExtraBloomAllowanceId(...)` 流程消耗。
-     */
-    public Map<String, Object> applyPassiveGiftExtraBloomAllowanceOnBloom(
-        Long matchId,
-        Long userId,
-        Long bloomedHolomemId,
-        Long holderCardInstanceId,
-        String holderCardId
-    ) {
-        if (matchId == null || userId == null || bloomedHolomemId == null || holderCardInstanceId == null) {
-            return Map.of("effectType", "ALLOW_EXTRA_BLOOM", "applied", false, "reason", "缺少 Bloom 後靜態 Gift 所需參數");
-        }
-
-        String passiveText = loadPassiveEffectText(holderCardId);
-        String giftText = loadGiftEffectText(passiveText);
-        if (!StringUtils.hasText(giftText) || !giftText.contains("もう1回Bloomできる")) {
-            return Map.of("effectType", "ALLOW_EXTRA_BLOOM", "applied", false, "reason", "此卡沒有額外 Bloom 的靜態 Gift");
-        }
-
-        ObjectNode effectNode = objectMapper.createObjectNode();
-        effectNode.put("rawText", giftText);
-        return executeAllowExtraBloomEffect(
-            matchId,
-            userId,
-            "ALLOW_EXTRA_BLOOM",
-            effectNode,
-            bloomedHolomemId,
-            holderCardInstanceId
-        );
-    }
-
-    /**
      * Bloom 觸發效果入口（含條件判斷、執行結果摘要）。
      */
-    public TriggeredEffectPreview previewBloomTriggeredEffect(String bloomCardId) {
-        BloomEffectPlan bloomPlan = resolveBloomEffectPlan(bloomCardId, null);
-        return new TriggeredEffectPreview(
-            bloomPlan.hasBloomEffect(),
-            bloomPlan.effectTypes(),
-            bloomPlan.rawText(),
-            bloomPlan.diceRoll()
-        );
-    }
-
-    /**
-     * Bloom 觸發效果預覽（含來源等級條件）。
-     */
-    public TriggeredEffectPreview previewBloomTriggeredEffect(
-        Long matchId,
-        Long userId,
-        String bloomCardId,
-        Long selfHolomemCardInstanceId,
-        String sourceLevelType
-    ) {
-        BloomEffectPlan bloomPlan = resolveBloomEffectPlan(
-            bloomCardId,
-            new BloomRuntimeContext(
-                sourceLevelType,
-                loadCollabRuntimeContext(matchId, userId, selfHolomemCardInstanceId)
-            )
-        );
-        return new TriggeredEffectPreview(
-            bloomPlan.hasBloomEffect(),
-            bloomPlan.effectTypes(),
-            bloomPlan.rawText(),
-            bloomPlan.diceRoll()
-        );
-    }
-
-    /**
-     * Collab 觸發效果預覽（僅解析，不執行）。
-     */
-    public TriggeredEffectPreview previewCollabTriggeredEffect(
-        Long matchId,
-        Long userId,
-        String collabCardId,
-        Long selfHolomemCardInstanceId
-    ) {
-        CollabRuntimeContext runtimeContext = loadCollabRuntimeContext(
-            matchId,
-            userId,
-            selfHolomemCardInstanceId
-        );
-        BloomEffectPlan collabPlan = resolveCollabEffectPlan(collabCardId, runtimeContext);
-        return new TriggeredEffectPreview(
-            collabPlan.hasBloomEffect(),
-            collabPlan.effectTypes(),
-            collabPlan.rawText(),
-            collabPlan.diceRoll()
-        );
-    }
-
-    /**
-     * 向後相容：不帶場況資訊的連動效果預覽。
-     */
-    public TriggeredEffectPreview previewCollabTriggeredEffect(String collabCardId) {
-        return previewCollabTriggeredEffect(null, null, collabCardId, null);
-    }
-
-    /**
-     * Bloom 觸發效果入口（含條件判斷、執行結果摘要）。
-     */
-    public Map<String, Object> applyBloomTriggeredEffects(
+    Map<String, Object> applyBloomTriggeredEffects(
         Long matchId,
         Long userId,
         String bloomCardId,
@@ -2892,7 +1221,7 @@ public class MatchEffectService {
     /**
      * Bloom 觸發效果入口（含來源等級條件）。
      */
-    public Map<String, Object> applyBloomTriggeredEffects(
+    Map<String, Object> applyBloomTriggeredEffects(
         Long matchId,
         Long userId,
         String bloomCardId,
@@ -3192,7 +1521,7 @@ public class MatchEffectService {
     /**
      * Collab 觸發效果入口（含條件判斷、執行結果摘要）。
      */
-    public Map<String, Object> applyCollabTriggeredEffects(
+    Map<String, Object> applyCollabTriggeredEffects(
         Long matchId,
         Long userId,
         String collabCardId,
@@ -5567,7 +3896,7 @@ public class MatchEffectService {
     /**
      * 設定本回合額外 Bloom 許可效果。
      */
-    private Map<String, Object> executeAllowExtraBloomEffect(
+    Map<String, Object> executeAllowExtraBloomEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -5587,7 +3916,7 @@ public class MatchEffectService {
      * <p>因此這裡不再把規則寫死成單一卡特例，而是先讀文案，再用保守條件把 allowance 寫到
      * `match_turn_effects`。只要 target 最終沒有被唯一辨識出來，就回傳 skipped，避免誤放寬 Bloom 規則。
      */
-    private Map<String, Object> executeAllowExtraBloomEffect(
+    Map<String, Object> executeAllowExtraBloomEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -6901,7 +5230,7 @@ public class MatchEffectService {
     /**
      * 執行傷害效果，含傷害修正、擊倒處理、附屬卡歸檔與生命扣減。
      */
-    private Map<String, Object> executeDamageEffect(
+    Map<String, Object> executeDamageEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -7073,8 +5402,16 @@ public class MatchEffectService {
             rs -> rs.next() ? rs.getInt("hp") : 0,
             targetCardId
         );
-        int attachedSupportHpBonus = resolveAttachedSupportHpBonus(matchId, targetHolomemId);
-        int passiveGiftHpBonus = resolvePassiveGiftHpBonus(matchId, targetOwnerUserId, targetHolomemId);
+        int attachedSupportHpBonus = resolveAttachedSupportStatBonus(
+            matchId,
+            targetHolomemId,
+            ATTACHED_SUPPORT_HP_PATTERN
+        );
+        PassiveGiftHpTargetContext targetContext = loadPassiveGiftHpTargetContext(matchId, targetOwnerUserId, targetHolomemId);
+        PassiveGiftHolderContext holderContext = loadPassiveGiftHolderContext(matchId, targetOwnerUserId, targetHolomemId);
+        int passiveGiftHpBonus = targetContext == null || holderContext == null
+            ? 0
+            : resolvePassiveGiftHpBonusFromHolder(holderContext, targetContext);
         int hp = Math.max(baseHp + attachedSupportHpBonus + passiveGiftHpBonus, 0);
         int damageTaken = asInt(holomemState.get("damage_taken"));
 
@@ -7370,7 +5707,7 @@ public class MatchEffectService {
         return count != null && count > 0;
     }
 
-    private boolean isOpponentTurnForUser(Long matchId, Long userId) {
+    boolean isOpponentTurnForUser(Long matchId, Long userId) {
         if (matchId == null || userId == null) {
             return false;
         }
@@ -8425,7 +6762,7 @@ public class MatchEffectService {
     /**
      * 載入指定成員卡的 passive effect JSON 文字。
      */
-    private String loadPassiveEffectText(String bloomCardId) {
+    String loadPassiveEffectText(String bloomCardId) {
         if (!StringUtils.hasText(bloomCardId)) {
             return null;
         }
@@ -8444,11 +6781,11 @@ public class MatchEffectService {
     /**
      * 解析 Bloom 效果計畫，優先結構化 JSON，否則回退文案推斷。
      */
-    private BloomEffectPlan resolveBloomEffectPlan(String bloomCardId) {
+    BloomEffectPlan resolveBloomEffectPlan(String bloomCardId) {
         return resolveBloomEffectPlan(bloomCardId, null);
     }
 
-    private BloomEffectPlan resolveBloomEffectPlan(String bloomCardId, BloomRuntimeContext runtimeContext) {
+    BloomEffectPlan resolveBloomEffectPlan(String bloomCardId, BloomRuntimeContext runtimeContext) {
         String passiveText = loadPassiveEffectText(bloomCardId);
         if (!StringUtils.hasText(passiveText)) {
             return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
@@ -8554,7 +6891,7 @@ public class MatchEffectService {
     /**
      * 解析 Collab 效果計畫，優先結構化 JSON，否則回退文案推斷。
      */
-    private BloomEffectPlan resolveCollabEffectPlan(String collabCardId) {
+    BloomEffectPlan resolveCollabEffectPlan(String collabCardId) {
         String passiveText = loadPassiveEffectText(collabCardId);
         if (!StringUtils.hasText(passiveText)) {
             return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
@@ -8590,7 +6927,7 @@ public class MatchEffectService {
     /**
      * 解析 Collab 效果計畫（含場況條件修正）。
      */
-    private BloomEffectPlan resolveCollabEffectPlan(String collabCardId, CollabRuntimeContext runtimeContext) {
+    BloomEffectPlan resolveCollabEffectPlan(String collabCardId, CollabRuntimeContext runtimeContext) {
         BloomEffectPlan basePlan = resolveCollabEffectPlan(collabCardId);
         if (basePlan == null || !basePlan.hasBloomEffect()) {
             return basePlan;
@@ -8719,7 +7056,7 @@ public class MatchEffectService {
     /**
      * 載入 Collab 規則判斷所需場況（回合、CENTER 搭檔、對手手牌資訊）。
      */
-    private CollabRuntimeContext loadCollabRuntimeContext(
+    CollabRuntimeContext loadCollabRuntimeContext(
         Long matchId,
         Long userId,
         Long selfHolomemCardInstanceId
@@ -9073,7 +7410,7 @@ public class MatchEffectService {
     /**
      * 從被動文本中提取 Gift 專用描述文字。
      */
-    private String loadGiftEffectText(String passiveText) {
+    String loadGiftEffectText(String passiveText) {
         if (!StringUtils.hasText(passiveText) || !passiveText.contains("ギフト")) {
             return null;
         }
@@ -9344,7 +7681,7 @@ public class MatchEffectService {
     /**
      * 清除已過期的回合性效果（expires_turn <= currentTurn）。
      */
-    public int clearExpiredTurnEffects(Long matchId, int currentTurn) {
+    int clearExpiredTurnEffects(Long matchId, int currentTurn) {
         return jdbcTemplate.update(
             """
             DELETE FROM match_turn_effects
@@ -10053,7 +8390,7 @@ public class MatchEffectService {
     /**
      * 正規化顏色字串為系統常量值。
      */
-    private String normalizeColorType(String color) {
+    String normalizeColorType(String color) {
         String normalized = normalize(color);
         return switch (normalized) {
             case "RED", "BLUE", "GREEN", "WHITE", "PURPLE", "YELLOW", "COLORLESS" -> normalized;
@@ -10533,7 +8870,7 @@ public class MatchEffectService {
     /**
      * 彙總附屬支援卡提供的指定數值加成（HP/ARTS）。
      */
-    private int resolveAttachedSupportStatBonus(Long matchId, Long matchHolomemId, Pattern pattern) {
+    int resolveAttachedSupportStatBonus(Long matchId, Long matchHolomemId, Pattern pattern) {
         if (matchId == null || matchHolomemId == null || pattern == null) {
             return 0;
         }
@@ -10572,7 +8909,7 @@ public class MatchEffectService {
      *
      * <p>因此這裡只抓規則判斷需要的最小欄位，避免把整個 Holomem 狀態物件搬進來。
      */
-    private StaticArtBonusTargetContext loadStaticArtBonusTargetContext(Long matchId, Long userId, Long holomemId) {
+    StaticArtBonusTargetContext loadStaticArtBonusTargetContext(Long matchId, Long userId, Long holomemId) {
         Set<String> opponentStageTags = loadOpponentStageTags(matchId, userId);
         return jdbcTemplate.query(
             """
@@ -10610,7 +8947,7 @@ public class MatchEffectService {
     /**
      * 載入常駐 Gift 藝能費用減免受益者所需資訊。
      */
-    private PassiveGiftArtCostReductionTargetContext loadPassiveGiftArtCostReductionTargetContext(
+    PassiveGiftArtCostReductionTargetContext loadPassiveGiftArtCostReductionTargetContext(
         Long matchId,
         Long userId,
         Long holomemId,
@@ -10655,7 +8992,7 @@ public class MatchEffectService {
      * <p>這和藝能加成不同，因為 `HSD13-007` 的條件直接依賴「這張 Holomem 身上有幾張 Cheer」。
      * 因此這裡除了基本站位/等級/tag，還要把附著 Cheer 數量一起帶出來。
      */
-    private PassiveGiftHpTargetContext loadPassiveGiftHpTargetContext(Long matchId, Long userId, Long holomemId) {
+    PassiveGiftHpTargetContext loadPassiveGiftHpTargetContext(Long matchId, Long userId, Long holomemId) {
         return jdbcTemplate.query(
             """
             SELECT h.id,
@@ -10711,7 +9048,7 @@ public class MatchEffectService {
      * <p>若未來出現更多「依等級 / tag / 名稱決定誰能被保護」的常駐減傷文案，再往這個 target context
      * 補欄位即可，不需要回頭重寫 `attackArt(...)` 主流程。
      */
-    private PassiveGiftIncomingDamageReductionTargetContext loadPassiveGiftIncomingDamageReductionTargetContext(
+    PassiveGiftIncomingDamageReductionTargetContext loadPassiveGiftIncomingDamageReductionTargetContext(
         Long matchId,
         Long userId,
         Long holomemId,
@@ -10802,7 +9139,7 @@ public class MatchEffectService {
      * <p>目前先沿用和 `PassiveGiftHpTargetContext` 類似的資料結構，因為 `HSD13-007` 這類文案
      * 的核心條件同樣是「這張 Holomem 現在身上究竟有幾張 Cheer」。
      */
-    private ArtSelfBonusTargetContext loadArtSelfBonusTargetContext(Long matchId, Long userId, Long holomemId) {
+    ArtSelfBonusTargetContext loadArtSelfBonusTargetContext(Long matchId, Long userId, Long holomemId) {
         return jdbcTemplate.query(
             """
             SELECT h.id,
@@ -10853,7 +9190,7 @@ public class MatchEffectService {
      * <p>常駐 HP Gift 和 `HSD08-004` 這種中心位 aura 不同，效果來源就是這張卡自己，
      * 因此不應沿用「只抓我方 CENTER holder」的 loader。
      */
-    private PassiveGiftHolderContext loadPassiveGiftHolderContext(Long matchId, Long userId, Long holomemId) {
+    PassiveGiftHolderContext loadPassiveGiftHolderContext(Long matchId, Long userId, Long holomemId) {
         return jdbcTemplate.query(
             """
             SELECT h.id,
@@ -10889,7 +9226,7 @@ public class MatchEffectService {
      * <p>這裡先抓 `CENTER / COLLAB`，再交由文案 matcher 做最終站位過濾。
      * 這樣像 `HSD07-009`（center 限定）與 `HBP04-068`（center/collab 限定）可共用同一條主幹。
      */
-    private List<PassiveGiftHolderContext> loadPassiveGiftHolderContexts(Long matchId, Long userId) {
+    List<PassiveGiftHolderContext> loadPassiveGiftHolderContexts(Long matchId, Long userId) {
         return jdbcTemplate.query(
             """
             SELECT h.id,
@@ -10925,7 +9262,7 @@ public class MatchEffectService {
      * `[センターポジション・コラボポジション限定]`。因此藝能加成入口需要額外把 `COLLAB` holder
      * 也納入，再交由文案 matcher 做最終站位過濾。
      */
-    private List<PassiveGiftHolderContext> loadPassiveGiftArtBonusHolderContexts(Long matchId, Long userId) {
+    List<PassiveGiftHolderContext> loadPassiveGiftArtBonusHolderContexts(Long matchId, Long userId) {
         return jdbcTemplate.query(
             """
             SELECT h.id,
@@ -10998,7 +9335,7 @@ public class MatchEffectService {
      *
      * <p>如此可避免把其他非攻擊加成文案誤判為 `+damage`。
      */
-    private int resolvePassiveGiftArtBonusFromHolder(
+    int resolvePassiveGiftArtBonusFromHolder(
         Long matchId,
         Long userId,
         PassiveGiftHolderContext holderContext,
@@ -11123,7 +9460,7 @@ public class MatchEffectService {
     /**
      * 以單一 holder 的常駐文案判斷是否減少攻擊者藝能所需 Cheer。
      */
-    private Map<String, Integer> resolvePassiveGiftArtCostReductionFromHolder(
+    Map<String, Integer> resolvePassiveGiftArtCostReductionFromHolder(
         Long matchId,
         Long userId,
         PassiveGiftHolderContext holderContext,
@@ -11247,7 +9584,7 @@ public class MatchEffectService {
     /**
      * 判斷常駐 Gift 是否要求 holder 身上附著指定名稱的支援卡。
      */
-    private boolean matchesPassiveGiftAttachedSupportCondition(String rawText, Long holderHolomemId) {
+    boolean matchesPassiveGiftAttachedSupportCondition(String rawText, Long holderHolomemId) {
         if (!StringUtils.hasText(rawText) || holderHolomemId == null) {
             return true;
         }
@@ -11481,7 +9818,7 @@ public class MatchEffectService {
      *
      * <p>如此可以避免把其他條件更複雜、尚未建模完成的 HP 文案誤判成已支援。
      */
-    private int resolvePassiveGiftHpBonusFromHolder(
+    int resolvePassiveGiftHpBonusFromHolder(
         PassiveGiftHolderContext holderContext,
         PassiveGiftHpTargetContext targetContext
     ) {
@@ -11518,7 +9855,7 @@ public class MatchEffectService {
      * <p>如此可以先讓 `HSD13-007` 正確落地，同時避免把其他尚未完整建模的 BUFF 藝能誤算成
      * 「每張 Cheer 都會放大傷害」。
      */
-    private int resolveArtTextDamageBonusFromRawText(
+    int resolveArtTextDamageBonusFromRawText(
         Long matchId,
         Long userId,
         int turnNumber,
@@ -11688,7 +10025,7 @@ public class MatchEffectService {
      * <p>若現在直接把所有 `受けるダメージ-N` 都視為同一種 aura，很容易在沒有完整規則模型時誤支援。
      * 因此這裡維持「先辨識受保護對象，再抓減傷數值」的保守順序。
      */
-    private int resolvePassiveGiftIncomingDamageReductionFromHolder(
+    int resolvePassiveGiftIncomingDamageReductionFromHolder(
         Long matchId,
         Long userId,
         PassiveGiftHolderContext holderContext,
@@ -11945,7 +10282,7 @@ public class MatchEffectService {
      * <p>之所以獨立做成入口，而不是塞進 Gift trigger，是因為這類效果的來源是「本次藝能本身」，
      * 不應與 stage 上其他被動 Gift 共用同一個觸發模型。
      */
-    public Map<String, Object> applyArtDownTriggeredEffects(
+    Map<String, Object> applyArtDownTriggeredEffects(
         Long matchId,
         Long userId,
         Long attackerCardInstanceId,
@@ -12067,7 +10404,7 @@ public class MatchEffectService {
     /**
      * 由附加支援文案擷取「受擊時自動套用」的常駐減傷。
      */
-    private int extractAttachedSupportIncomingDamageReduction(String effectJsonText, String targetStageZone) {
+    int extractAttachedSupportIncomingDamageReduction(String effectJsonText, String targetStageZone) {
         if (!StringUtils.hasText(effectJsonText)) {
             return 0;
         }
@@ -12114,7 +10451,7 @@ public class MatchEffectService {
             || (mentionsBack && "BACK".equals(targetStageZone));
     }
 
-    private String extractAttachedSupportConditionalTriggerClause(String rawText, String triggerType) {
+    String extractAttachedSupportConditionalTriggerClause(String rawText, String triggerType) {
         if (!StringUtils.hasText(rawText)) {
             return "";
         }
@@ -12135,7 +10472,7 @@ public class MatchEffectService {
         return "";
     }
 
-    private List<String> inferAttachedSupportConditionalRequestedEffects(
+    List<String> inferAttachedSupportConditionalRequestedEffects(
         String triggerClause,
         String effectType,
         String triggerType
@@ -12183,7 +10520,7 @@ public class MatchEffectService {
         }
     }
 
-    private boolean hasAttachedSupportOptionalOrCostText(String triggerClause) {
+    boolean hasAttachedSupportOptionalOrCostText(String triggerClause) {
         return StringUtils.hasText(triggerClause)
             && (
                 triggerClause.contains("できる")
@@ -12197,7 +10534,7 @@ public class MatchEffectService {
     /**
      * 解析支援效果 JSON 並抽取可判讀的 raw text。
      */
-    private String extractAttachedSupportRawText(String effectJsonText) {
+    String extractAttachedSupportRawText(String effectJsonText) {
         try {
             JsonNode node = objectMapper.readTree(effectJsonText);
             return effectTextParser.normalizeDigits(effectTextParser.extractText(node, "rawText", "rawEffect", "rawHeader"));
@@ -13075,7 +11412,7 @@ public class MatchEffectService {
     /**
      * 檢查同一張 Gift 是否在本回合已觸發過（turn once）。
      */
-    private boolean isGiftAlreadyUsedThisTurn(Long matchId, Long userId, int turnNumber, Long holderHolomemId) {
+    boolean isGiftAlreadyUsedThisTurn(Long matchId, Long userId, int turnNumber, Long holderHolomemId) {
         if (matchId == null || userId == null || turnNumber <= 0 || holderHolomemId == null || holderHolomemId <= 0) {
             return false;
         }
@@ -13325,7 +11662,7 @@ public class MatchEffectService {
     /**
      * 結算 Down 觸發的額外效果（例如 Buzz 的額外失去生命），走 Action Pipeline。
      */
-    private Map<String, Object> executeDownEvent(
+    Map<String, Object> executeDownEvent(
         Long matchId,
         Long actorUserId,
         Long downedOwnerUserId,
@@ -13633,7 +11970,7 @@ public class MatchEffectService {
     /**
      * Collab 效果場況上下文（供規則分支判斷使用）。
      */
-    private record CollabRuntimeContext(
+    record CollabRuntimeContext(
         Long selfHolomemCardInstanceId,
         int turnNumber,
         boolean secondPlayerFirstTurn,
@@ -13651,7 +11988,7 @@ public class MatchEffectService {
     /**
      * Bloom 效果場況上下文（目前僅補來源等級與通用場況）。
      */
-    private record BloomRuntimeContext(
+    record BloomRuntimeContext(
         String sourceLevelType,
         CollabRuntimeContext common
     ) {}
@@ -13677,7 +12014,7 @@ public class MatchEffectService {
     /**
      * Bloom/Collab 解析後的效果計畫模型。
      */
-    private record BloomEffectPlan(
+    record BloomEffectPlan(
         boolean hasBloomEffect,
         List<String> effectTypes,
         JsonNode effectNode,

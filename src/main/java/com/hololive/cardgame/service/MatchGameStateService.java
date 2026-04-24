@@ -58,7 +58,7 @@ public class MatchGameStateService {
     private final MatchPlayerRepository matchPlayerRepository;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
-    private final MatchEffectService matchEffectService;
+    private final MatchEffectCombatModifierService matchEffectCombatModifierService;
 
     /**
      * 建立對戰狀態查詢服務，統整 DB 資料成前端可直接渲染的 GameState。
@@ -68,13 +68,13 @@ public class MatchGameStateService {
         MatchPlayerRepository matchPlayerRepository,
         JdbcTemplate jdbcTemplate,
         ObjectMapper objectMapper,
-        MatchEffectService matchEffectService
+        MatchEffectCombatModifierService matchEffectCombatModifierService
     ) {
         this.matchRepository = matchRepository;
         this.matchPlayerRepository = matchPlayerRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
-        this.matchEffectService = matchEffectService;
+        this.matchEffectCombatModifierService = matchEffectCombatModifierService;
     }
 
     @Transactional(readOnly = true)
@@ -215,9 +215,9 @@ public class MatchGameStateService {
             Long holomemId = toLong(row.get("holomem_id"));
             Integer damageTaken = toNullableInt(row.get("damage_taken"));
             Integer baseMaxHp = toNullableInt(row.get("base_max_hp"));
-            int hpBonus = matchEffectService.resolveAttachedSupportHpBonus(matchId, holomemId)
-                + matchEffectService.resolvePassiveGiftHpBonus(matchId, ownerUserId, holomemId);
-            int artBonus = matchEffectService.resolveAttachedSupportArtBonus(matchId, holomemId);
+            int hpBonus = matchEffectCombatModifierService.resolveAttachedSupportHpBonus(matchId, holomemId)
+                + matchEffectCombatModifierService.resolvePassiveGiftHpBonus(matchId, ownerUserId, holomemId);
+            int artBonus = matchEffectCombatModifierService.resolveAttachedSupportArtBonus(matchId, holomemId);
             int turnDamageModifier = activeTurnDamageModifiers.getOrDefault(ownerUserId, 0);
             int adjustedMaxHp = Math.max((baseMaxHp == null ? 0 : baseMaxHp) + hpBonus, 0);
             int adjustedCurrentHp = Math.max(adjustedMaxHp - (damageTaken == null ? 0 : damageTaken), 0);
@@ -558,8 +558,8 @@ public class MatchGameStateService {
             Long ownerUserId = toLong(stats.get("owner_user_id"));
             Integer damageTaken = toNullableInt(stats.get("damage_taken"));
             Integer baseMaxHp = toNullableInt(stats.get("base_max_hp"));
-            int hpBonus = matchEffectService.resolveAttachedSupportHpBonus(matchId, holomemId)
-                + matchEffectService.resolvePassiveGiftHpBonus(matchId, ownerUserId, holomemId);
+            int hpBonus = matchEffectCombatModifierService.resolveAttachedSupportHpBonus(matchId, holomemId)
+                + matchEffectCombatModifierService.resolvePassiveGiftHpBonus(matchId, ownerUserId, holomemId);
             int adjustedMaxHp = Math.max((baseMaxHp == null ? 0 : baseMaxHp) + hpBonus, 0);
             int adjustedCurrentHp = Math.max(adjustedMaxHp - (damageTaken == null ? 0 : damageTaken), 0);
             candidate.setCurrentHp(adjustedCurrentHp);

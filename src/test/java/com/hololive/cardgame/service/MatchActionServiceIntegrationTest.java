@@ -5720,7 +5720,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         );
         int deckBefore = countZone(matchId, hostId, "DECK");
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -5795,7 +5795,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         );
         int deckBefore = countZone(matchId, hostId, "DECK");
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -5860,7 +5860,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             hostId,
             matchId
         );
-        Map<String, Object> hostSummary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> hostSummary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -5880,7 +5880,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             guestId,
             matchId
         );
-        Map<String, Object> guestSummary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> guestSummary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             guestId,
             collabCardId,
@@ -5946,7 +5946,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             backTargetHolomemId
         );
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -6054,7 +6054,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             backTargetHolomemId
         );
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -6132,7 +6132,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         moveOneMemberFromDeckToHand(matchId, guestId);
 
         int deckBefore = countZone(matchId, hostId, "DECK");
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -6189,7 +6189,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         moveOneMemberFromDeckToHand(matchId, guestId);
         moveOneMemberFromDeckToHand(matchId, guestId);
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -6289,7 +6289,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         int handBefore = countZone(matchId, hostId, "HAND");
         int holopowerBefore = countZone(matchId, hostId, "HOLOPOWER");
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -6385,7 +6385,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         int handBefore = countZone(matchId, hostId, "HAND");
         int holopowerBefore = countZone(matchId, hostId, "HOLOPOWER");
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -6489,7 +6489,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         int handBefore = countZone(matchId, hostId, "HAND");
         int holopowerBefore = countZone(matchId, hostId, "HOLOPOWER");
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -6586,7 +6586,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         int handBefore = countZone(matchId, hostId, "HAND");
         int holopowerBefore = countZone(matchId, hostId, "HOLOPOWER");
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -6737,7 +6737,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         int handBefore = countZone(matchId, hostId, "HAND");
         int archiveBefore = countZone(matchId, hostId, "ARCHIVE");
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -6831,7 +6831,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
 
         int handBefore = countZone(matchId, hostId, "HAND");
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -6985,7 +6985,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             collabHolomemId
         );
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             "HSD07-013",
@@ -7061,7 +7061,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             0
         );
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -7116,7 +7116,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         );
         assertThat(collabCardInstanceId).isNotNull();
 
-        Map<String, Object> summary = matchEffectService.applyCollabTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
             matchId,
             hostId,
             collabCardId,
@@ -8171,7 +8171,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         assertThat(validTargetInstanceId).isNotNull();
 
         int handBefore = countZone(matchId, hostId, "HAND");
-        Map<String, Object> summary = matchEffectService.applyBloomTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyBloomTriggeredEffects(
             matchId,
             hostId,
             bloomCardId,
@@ -8307,7 +8307,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         int handBefore = countZone(matchId, hostId, "HAND");
         int archiveBefore = countZone(matchId, hostId, "ARCHIVE");
 
-        Map<String, Object> summary = matchEffectService.applyBloomTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyBloomTriggeredEffects(
             matchId,
             hostId,
             bloomCardId,
@@ -8383,7 +8383,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         assertThat(searchableInstanceId).isNotNull();
 
         int handBefore = countZone(matchId, hostId, "HAND");
-        Map<String, Object> summary = matchEffectService.applyBloomTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyBloomTriggeredEffects(
             matchId,
             hostId,
             bloomCardId,
@@ -8439,7 +8439,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         assertThat(searchableInstanceId).isNotNull();
 
         int handBefore = countZone(matchId, hostId, "HAND");
-        Map<String, Object> summary = matchEffectService.applyBloomTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyBloomTriggeredEffects(
             matchId,
             hostId,
             bloomCardId,
@@ -8635,7 +8635,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         int deckBefore = countZone(matchId, hostId, "DECK");
         int archiveBefore = countZone(matchId, hostId, "ARCHIVE");
 
-        Map<String, Object> summary = matchEffectService.applyBloomTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyBloomTriggeredEffects(
             matchId,
             hostId,
             "HBP04-059",
@@ -8687,7 +8687,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             0
         );
 
-        Map<String, Object> summary = matchEffectService.applyBloomTriggeredEffects(
+        Map<String, Object> summary = matchTriggeredCardEffectService.applyBloomTriggeredEffects(
             matchId,
             hostId,
             "HBP04-059",
@@ -13765,7 +13765,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         );
         assertThat(giftActions).hasSize(1);
 
-        List<Map<String, Object>> secondTrigger = matchEffectService.applyGiftTriggeredEffectsOnArt(
+        List<Map<String, Object>> secondTrigger = matchGiftTriggerService.applyGiftTriggeredEffectsOnArt(
             matchId,
             hostId,
             attackerCardInstanceId,
@@ -26899,7 +26899,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             hostId
         )).isEqualTo(1);
         assertThat(
-            matchEffectService.resolvePassiveGiftArtCheerCostReduction(
+            matchEffectCombatModifierService.resolvePassiveGiftArtCheerCostReduction(
                 matchId,
                 hostId,
                 attackerHolomemId,
@@ -27097,7 +27097,8 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         attachDirectTestCheers(matchId, hostId, attackerHolomemId, 2, "COLORLESS", "hbp06046-colorless");
         insertOshiSkillHistoryAction(matchId, hostId, 1, 99, "SP", "ホークアイ");
 
-        assertThat(matchEffectService.resolvePassiveGiftArtBonus(matchId, hostId, attackerHolomemId, "CENTER")).isEqualTo(20);
+        assertThat(matchEffectCombatModifierService.resolvePassiveGiftArtBonus(matchId, hostId, attackerHolomemId, "CENTER"))
+            .isEqualTo(20);
 
         jdbcTemplate.update(
             """
@@ -27196,7 +27197,8 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         attachDirectTestCheers(matchId, hostId, attackerHolomemId, 1, "RED", "hbp06046-ns-red");
         attachDirectTestCheers(matchId, hostId, attackerHolomemId, 2, "COLORLESS", "hbp06046-ns-colorless");
 
-        assertThat(matchEffectService.resolvePassiveGiftArtBonus(matchId, hostId, attackerHolomemId, "CENTER")).isZero();
+        assertThat(matchEffectCombatModifierService.resolvePassiveGiftArtBonus(matchId, hostId, attackerHolomemId, "CENTER"))
+            .isZero();
 
         jdbcTemplate.update(
             """

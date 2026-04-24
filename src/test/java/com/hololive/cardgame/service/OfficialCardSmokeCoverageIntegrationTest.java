@@ -241,8 +241,8 @@ class OfficialCardSmokeCoverageIntegrationTest extends MatchIntegrationTestSuppo
                 supportCard
             );
 
-            int resolvedHpBonus = matchEffectService.resolveAttachedSupportHpBonus(matchId, targetHolomemId);
-            int resolvedArtBonus = matchEffectService.resolveAttachedSupportArtBonus(matchId, targetHolomemId);
+            int resolvedHpBonus = matchEffectCombatModifierService.resolveAttachedSupportHpBonus(matchId, targetHolomemId);
+            int resolvedArtBonus = matchEffectCombatModifierService.resolveAttachedSupportArtBonus(matchId, targetHolomemId);
             if (resolvedHpBonus != supportCard.expectedHpBonus()
                 || resolvedArtBonus != supportCard.expectedArtBonus()) {
                 bonusFailures.add(
@@ -296,7 +296,7 @@ class OfficialCardSmokeCoverageIntegrationTest extends MatchIntegrationTestSuppo
                 supportCard.supportType()
             );
 
-            int resolvedDamageReduction = matchEffectService.resolveAttachedSupportIncomingDamageReduction(
+            int resolvedDamageReduction = matchEffectCombatModifierService.resolveAttachedSupportIncomingDamageReduction(
                 matchId,
                 targetHolomemId,
                 supportCard.targetZone()
@@ -351,7 +351,7 @@ class OfficialCardSmokeCoverageIntegrationTest extends MatchIntegrationTestSuppo
                 supportCard.supportType()
             );
 
-            List<Map<String, Object>> previews = matchEffectService.previewAttachedSupportConditionalTriggers(
+            List<Map<String, Object>> previews = matchEffectCombatModifierService.previewAttachedSupportConditionalTriggers(
                 matchId,
                 hostId,
                 targetHolomemId,
@@ -613,14 +613,14 @@ class OfficialCardSmokeCoverageIntegrationTest extends MatchIntegrationTestSuppo
             MatchEffectService.TriggeredEffectPreview preview;
             Map<String, Object> summary;
             try {
-                preview = matchEffectService.previewBloomTriggeredEffect(
+                preview = matchTriggeredCardEffectService.previewBloomTriggeredEffect(
                     matchId,
                     hostId,
                     bloomCard.cardId(),
                     bloomSourceCardInstanceId,
                     sourceLevelBeforeBloom(bloomCard.levelType())
                 );
-                summary = matchEffectService.applyBloomTriggeredEffects(
+                summary = matchTriggeredCardEffectService.applyBloomTriggeredEffects(
                     matchId,
                     hostId,
                     bloomCard.cardId(),
@@ -670,8 +670,8 @@ class OfficialCardSmokeCoverageIntegrationTest extends MatchIntegrationTestSuppo
             MatchEffectService.TriggeredEffectPreview preview;
             Map<String, Object> summary;
             try {
-                preview = matchEffectService.previewCollabTriggeredEffect(collabCard.cardId());
-                summary = matchEffectService.applyCollabTriggeredEffects(
+                preview = matchTriggeredCardEffectService.previewCollabTriggeredEffect(collabCard.cardId());
+                summary = matchTriggeredCardEffectService.applyCollabTriggeredEffects(
                     matchId,
                     hostId,
                     collabCard.cardId(),
@@ -755,7 +755,7 @@ class OfficialCardSmokeCoverageIntegrationTest extends MatchIntegrationTestSuppo
             );
             Map<String, Object> summary;
             try {
-                summary = matchEffectService.applyStoredGiftTriggeredEffect(
+                summary = matchGiftTriggerService.applyStoredGiftTriggeredEffect(
                     matchId,
                     hostId,
                     inferPassiveGiftSmokeTriggerType(giftCard.passiveText()),
@@ -834,14 +834,14 @@ class OfficialCardSmokeCoverageIntegrationTest extends MatchIntegrationTestSuppo
             Map<String, Object> preview;
             Map<String, Object> applied;
             try {
-                preview = matchEffectService.previewDownEventEffect(
+                preview = matchEffectDamageService.previewDownEventEffect(
                     matchId,
                     guestId,
                     hostId,
                     downEventCard.cardId(),
                     turnNumber
                 );
-                applied = matchEffectService.applyDownEventEffect(
+                applied = matchEffectDamageService.applyDownEventEffect(
                     matchId,
                     guestId,
                     hostId,
@@ -1581,7 +1581,7 @@ class OfficialCardSmokeCoverageIntegrationTest extends MatchIntegrationTestSuppo
         Long holderHolomemId,
         PassiveGiftSmokeCard giftCard
     ) {
-        Map<String, Object> snapshot = matchEffectService.loadGiftHolderSnapshot(matchId, hostId, holderHolomemId);
+        Map<String, Object> snapshot = matchGiftTriggerService.loadGiftHolderSnapshot(matchId, hostId, holderHolomemId);
         assertThat(snapshot).isNotNull();
 
         Map<String, Object> storedTrigger = new LinkedHashMap<>();
