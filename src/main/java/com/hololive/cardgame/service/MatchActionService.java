@@ -90,6 +90,7 @@ public class MatchActionService {
     private final MatchTurnLifecycleService matchTurnLifecycleService;
     private final EndTurnApplicationService endTurnApplicationService;
     private final BloomApplicationService bloomApplicationService;
+    private final BloomEffectResolutionService bloomEffectResolutionService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -118,6 +119,7 @@ public class MatchActionService {
         MatchTurnLifecycleService matchTurnLifecycleService,
         EndTurnApplicationService endTurnApplicationService,
         BloomApplicationService bloomApplicationService,
+        BloomEffectResolutionService bloomEffectResolutionService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
@@ -140,6 +142,7 @@ public class MatchActionService {
         this.matchTurnLifecycleService = matchTurnLifecycleService;
         this.endTurnApplicationService = endTurnApplicationService;
         this.bloomApplicationService = bloomApplicationService;
+        this.bloomEffectResolutionService = bloomEffectResolutionService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -391,48 +394,14 @@ public class MatchActionService {
         String bloomLevel = stateResolution.sourceLevelType();
         boolean bloomLevelOverrideApplied = stateResolution.bloomLevelOverrideApplied();
         int stackDepth = stateResolution.stackDepth();
-        Map<String, Object> passiveGiftSummary = matchTriggeredCardEffectService.applyPassiveGiftExtraBloomAllowanceOnBloom(
+        BloomEffectResolution effectResolution = bloomEffectResolutionService.resolveAfterBloom(
             matchId,
             userId,
-            target.holomemId(),
+            context.turnNumber,
             bloomCardInstanceId,
-            bloomCardId
-        );
-        String sourceLevelType = target.topLevelType();
-        MatchEffectService.TriggeredEffectPreview bloomPreview = matchTriggeredCardEffectService.previewBloomTriggeredEffect(
-            matchId,
-            userId,
             bloomCardId,
-            bloomCardInstanceId,
-            sourceLevelType
+            target
         );
-        Map<String, Object> bloomEffectSummary = buildTriggeredEffectDeferredSummary("BLOOM", bloomPreview);
-        Map<String, Object> triggerSummary = matchEventHookService.onHolomemBloom(
-            matchId,
-            userId,
-            bloomCardId,
-            bloomCardInstanceId,
-            targetHolomemCardInstanceId,
-            target.zone()
-        );
-        FollowupInteractionDecision triggerConfirmDecision = null;
-        if (bloomPreview.hasEffect()) {
-            Map<String, Object> additionalContext = new LinkedHashMap<>();
-            additionalContext.put("sourceLevelType", sourceLevelType);
-            triggerConfirmDecision = createTriggeredEffectConfirmPendingInteraction(
-                matchId,
-                userId,
-                "BLOOM",
-                bloomCardInstanceId,
-                bloomCardId,
-                "BLOOM_EFFECT",
-                "確認 Bloom 效果",
-                buildTriggeredEffectConfirmMessage("BLOOM", bloomPreview),
-                List.of(buildInteractionSourceCardPayload(matchId, userId, bloomCardInstanceId, bloomCardId, "STAGE")),
-                context.turnNumber,
-                additionalContext
-            );
-        }
 
         context.match.setCurrentPhase(MatchPhase.MAIN.name());
         touchUpdatedAt(context.match);
@@ -448,21 +417,11 @@ public class MatchActionService {
         payload.put("damageCarried", target.damageTaken());
         payload.put("stackDepth", stackDepth);
         payload.put("bloomLevelOverrideApplied", bloomLevelOverrideApplied);
-        payload.put("passiveGiftSummary", passiveGiftSummary);
-        payload.put("bloomEffect", bloomEffectSummary);
-        payload.put("triggerSummary", triggerSummary);
-        payload.put(
-            "triggerResolutionOrder",
-            buildTriggeredResolutionOrder(
-                "BLOOM_EFFECT",
-                100,
-                bloomEffectSummary,
-                "BLOOM_EVENT_HOOK",
-                200,
-                triggerSummary
-            )
-        );
-        putFollowupDecisionPayload(payload, triggerConfirmDecision);
+        payload.put("passiveGiftSummary", effectResolution.passiveGiftSummary());
+        payload.put("bloomEffect", effectResolution.bloomEffectSummary());
+        payload.put("triggerSummary", effectResolution.triggerSummary());
+        payload.put("triggerResolutionOrder", effectResolution.triggerResolutionOrder());
+        effectResolution.appendFollowupPayload(payload);
 
         appendAction(
             context.match,
@@ -487,27 +446,35 @@ public class MatchActionService {
             stackDepth,
             bloomLevelOverrideApplied,
             target.extraBloomAllowanceId(),
-            passiveGiftSummary,
-            bloomEffectSummary,
-            triggerSummary,
-            triggerConfirmDecision == null ? null : triggerConfirmDecision.decisionId()
+            effectResolution.passiveGiftSummary(),
+            effectResolution.bloomEffectSummary(),
+            effectResolution.triggerSummary(),
+            effectResolution.pendingInteractionDecisionId()
         );
         bloomApplicationService.dispatchResolvedEvents(action, resolutionResult);
-        if (!bloomPreview.hasEffect()) {
-            if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, bloomEffectSummary)) {
-                touchUpdatedAt(context.match);
-                matchRepository.saveAndFlush(context.match);
-            } else if (hasLifeReduced(bloomEffectSummary) && evaluateLifeDefeat(context.match, userId, context.turnNumber)) {
+        if (!effectResolution.deferredEffect()) {
+            if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, effectResolution.bloomEffectSummary())) {
                 touchUpdatedAt(context.match);
                 matchRepository.saveAndFlush(context.match);
             } else if (
-                hasHolomemDowned(bloomEffectSummary) &&
+                hasLifeReduced(effectResolution.bloomEffectSummary()) &&
+                    evaluateLifeDefeat(context.match, userId, context.turnNumber)
+            ) {
+                touchUpdatedAt(context.match);
+                matchRepository.saveAndFlush(context.match);
+            } else if (
+                hasHolomemDowned(effectResolution.bloomEffectSummary()) &&
                 evaluateNoHolomemDefeat(context.match, userId, context.turnNumber)
             ) {
                 touchUpdatedAt(context.match);
                 matchRepository.saveAndFlush(context.match);
             }
-            enqueueLifeLossSendCheerInteractions(context.match, matchId, bloomEffectSummary, context.turnNumber);
+            enqueueLifeLossSendCheerInteractions(
+                context.match,
+                matchId,
+                effectResolution.bloomEffectSummary(),
+                context.turnNumber
+            );
         }
     }
 
