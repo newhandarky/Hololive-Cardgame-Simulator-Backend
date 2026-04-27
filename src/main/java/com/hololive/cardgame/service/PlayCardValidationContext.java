@@ -1,0 +1,22 @@
+package com.hololive.cardgame.service;
+
+import com.hololive.cardgame.entity.MatchEntity;
+import com.hololive.cardgame.model.MatchPhase;
+
+public record PlayCardValidationContext(
+    MatchEntity match,
+    Long actorUserId,
+    int currentTurnNumber,
+    Long currentTurnPlayerId,
+    MatchPhase currentPhase,
+    String matchStatus,
+    String lobbyStatus,
+    boolean duplicateAction,
+    boolean actorPendingInteractions,
+    boolean stageActionLocked,
+    boolean actorMulliganDone,
+    boolean openingCenterPlaced,
+    int targetZoneOccupiedCount,
+    PlayCardSourceCardSnapshot sourceCard
+) {
+}
