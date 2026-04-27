@@ -19,7 +19,8 @@ public class EndTurnSystemStateFinalizationHandler implements EndTurnTriggerHand
     }
 
     @Override
-    public void handle(EndTurnEvent event) {
+    public EndTurnTriggerHandlingResult handle(EndTurnEvent event) {
         // 第一版 pilot 只建立 deterministic handler flow，實際 state mutation 已在 resolver / bridge 完成。
+        return EndTurnTriggerHandlingResult.syncHandled(handlerKey(), event == null ? null : event.eventType());
     }
 }

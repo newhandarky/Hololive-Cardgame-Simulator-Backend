@@ -16,7 +16,9 @@ public class EndTurnFollowupInteractionCreationHandler implements EndTurnTrigger
     }
 
     @Override
-    public void handle(EndTurnEvent event) {
-        // 第一版 pilot 只建立 handler contract，實際 follow-up 邏輯仍由 legacy bridge 處理。
+    public EndTurnTriggerHandlingResult handle(EndTurnEvent event) {
+        // 目前 END_TURN 的 follow-up interaction 已由 application / legacy bridge 建立，
+        // trigger handler 在這裡只負責表達這條 follow-up 屬於 deferred 類型。
+        return EndTurnTriggerHandlingResult.deferredHandled(handlerKey(), event == null ? null : event.eventType());
     }
 }

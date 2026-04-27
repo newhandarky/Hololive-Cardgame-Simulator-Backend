@@ -95,5 +95,15 @@ class EndTurnEventFactoryTest {
             "SYSTEM_STATE_FINALIZATION",
             "FOLLOWUP_INTERACTION_CREATION"
         );
+        assertThat(dispatchResult.handlingResults())
+            .extracting(EndTurnTriggerHandlingResult::executionMode)
+            .containsExactly(
+                EndTurnTriggerExecutionMode.SYNC,
+                EndTurnTriggerExecutionMode.SYNC,
+                EndTurnTriggerExecutionMode.SYNC,
+                EndTurnTriggerExecutionMode.SYNC,
+                EndTurnTriggerExecutionMode.SYNC,
+                EndTurnTriggerExecutionMode.DEFERRED
+            );
     }
 }

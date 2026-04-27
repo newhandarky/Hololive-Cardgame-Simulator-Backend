@@ -6,5 +6,5 @@ public interface EndTurnTriggerHandler {
 
     boolean supports(EndTurnEventType eventType);
 
-    void handle(EndTurnEvent event);
+    EndTurnTriggerHandlingResult handle(EndTurnEvent event);
 }

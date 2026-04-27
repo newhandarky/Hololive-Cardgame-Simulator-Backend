@@ -4,6 +4,7 @@ import java.util.List;
 
 public record EndTurnTriggerDispatchResult(
     List<EndTurnEvent> dispatchedEvents,
-    List<String> invokedHandlerKeys
+    List<String> invokedHandlerKeys,
+    List<EndTurnTriggerHandlingResult> handlingResults
 ) {
 }
