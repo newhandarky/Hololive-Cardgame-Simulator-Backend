@@ -4505,12 +4505,25 @@ public class MatchActionService {
      */
     @Transactional
     public void endTurn(Long matchId, Long userId) {
-        EndTurnAction action = EndTurnAction.fromLegacyApi(
+        endTurn(matchId, userId, null, null);
+    }
+
+    @Transactional
+    public void endTurn(Long matchId, Long userId, Integer requestedTurnNumber, String idempotencyKey) {
+        EndTurnAction action = EndTurnAction.fromApi(
             matchId,
             userId,
-            loadRequestedTurnNumberSnapshot(matchId)
+            resolveRequestedTurnNumber(matchId, requestedTurnNumber),
+            idempotencyKey
         );
         endTurnApplicationService.handle(action);
+    }
+
+    private int resolveRequestedTurnNumber(Long matchId, Integer requestedTurnNumber) {
+        if (requestedTurnNumber != null && requestedTurnNumber > 0) {
+            return requestedTurnNumber;
+        }
+        return loadRequestedTurnNumberSnapshot(matchId);
     }
 
     private int loadRequestedTurnNumberSnapshot(Long matchId) {

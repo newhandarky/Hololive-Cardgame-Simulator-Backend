@@ -4,6 +4,7 @@ import com.hololive.cardgame.dto.AttachCheerActionRequest;
 import com.hololive.cardgame.dto.AttackArtActionRequest;
 import com.hololive.cardgame.dto.BatonTouchActionRequest;
 import com.hololive.cardgame.dto.BloomActionRequest;
+import com.hololive.cardgame.dto.EndTurnActionRequest;
 import com.hololive.cardgame.dto.JoinMatchRequest;
 import com.hololive.cardgame.dto.LobbyEvent;
 import com.hololive.cardgame.dto.LobbyMatchResponse;
@@ -388,9 +389,17 @@ public class MatchController {
     /**
      * 結束回合；若為 NPC 對戰則嘗試接續執行 NPC 回合。
      */
-    public LobbyMatchResponse endTurn(@PathVariable Long matchId) {
+    public LobbyMatchResponse endTurn(
+        @PathVariable Long matchId,
+        @RequestBody(required = false) EndTurnActionRequest request
+    ) {
         try {
-            matchActionService.endTurn(matchId, currentUserId());
+            matchActionService.endTurn(
+                matchId,
+                currentUserId(),
+                request == null ? null : request.getRequestedTurnNumber(),
+                request == null ? null : request.getIdempotencyKey()
+            );
             LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
             publish(matchId, "TURN_ENDED", response);
 

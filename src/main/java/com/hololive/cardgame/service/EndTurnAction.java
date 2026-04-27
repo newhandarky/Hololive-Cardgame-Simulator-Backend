@@ -16,7 +16,12 @@ public record EndTurnAction(
 
     private static final String ACTION_TYPE = "END_TURN";
 
-    public static EndTurnAction fromLegacyApi(Long matchId, Long actorUserId, int requestedTurnNumber) {
+    public static EndTurnAction fromApi(
+        Long matchId,
+        Long actorUserId,
+        int requestedTurnNumber,
+        String idempotencyKey
+    ) {
         String traceId = UUID.randomUUID().toString();
         return new EndTurnAction(
             ACTION_TYPE,
@@ -25,7 +30,9 @@ public record EndTurnAction(
             requestedTurnNumber,
             ActionSource.API,
             traceId,
-            "legacy-end-turn:%s:%s:%s".formatted(matchId, actorUserId, requestedTurnNumber),
+            idempotencyKey == null || idempotencyKey.isBlank()
+                ? "legacy-end-turn:%s:%s:%s".formatted(matchId, actorUserId, requestedTurnNumber)
+                : idempotencyKey,
             LocalDateTime.now()
         );
     }

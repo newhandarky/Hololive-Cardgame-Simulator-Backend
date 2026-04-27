@@ -7,6 +7,7 @@ import com.hololive.cardgame.model.MatchPhase;
 import com.hololive.cardgame.repository.MatchPlayerRepository;
 import com.hololive.cardgame.repository.MatchRepository;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -17,6 +18,8 @@ public class EndTurnApplicationService {
     private final EndTurnActionValidator endTurnActionValidator;
     private final EndTurnActionResolver endTurnActionResolver;
     private final EndTurnLegacyResolutionBridge endTurnLegacyResolutionBridge;
+    private final EndTurnEventFactory endTurnEventFactory;
+    private final EndTurnTriggerDispatcher endTurnTriggerDispatcher;
     private final MatchTurnLifecycleService matchTurnLifecycleService;
     private final MatchRepository matchRepository;
     private final MatchPlayerRepository matchPlayerRepository;
@@ -26,6 +29,8 @@ public class EndTurnApplicationService {
         EndTurnActionValidator endTurnActionValidator,
         EndTurnActionResolver endTurnActionResolver,
         EndTurnLegacyResolutionBridge endTurnLegacyResolutionBridge,
+        EndTurnEventFactory endTurnEventFactory,
+        EndTurnTriggerDispatcher endTurnTriggerDispatcher,
         MatchTurnLifecycleService matchTurnLifecycleService,
         MatchRepository matchRepository,
         MatchPlayerRepository matchPlayerRepository,
@@ -34,6 +39,8 @@ public class EndTurnApplicationService {
         this.endTurnActionValidator = endTurnActionValidator;
         this.endTurnActionResolver = endTurnActionResolver;
         this.endTurnLegacyResolutionBridge = endTurnLegacyResolutionBridge;
+        this.endTurnEventFactory = endTurnEventFactory;
+        this.endTurnTriggerDispatcher = endTurnTriggerDispatcher;
         this.matchTurnLifecycleService = matchTurnLifecycleService;
         this.matchRepository = matchRepository;
         this.matchPlayerRepository = matchPlayerRepository;
@@ -54,6 +61,11 @@ public class EndTurnApplicationService {
         MatchEntity match = validationContext.match();
         EndTurnContext endTurnContext = endTurnLegacyResolutionBridge.prepareContext(action, validationContext);
         EndTurnResolutionResult resolutionResult = endTurnActionResolver.resolve(endTurnContext);
+        resolutionResult.endTurnActionPayload().put("traceId", action.traceId());
+        resolutionResult.endTurnActionPayload().put("idempotencyKey", action.idempotencyKey());
+        List<EndTurnEvent> events = new java.util.ArrayList<>(
+            endTurnEventFactory.createCoreEvents(action, endTurnContext, resolutionResult)
+        );
 
         matchTurnLifecycleService.appendEndTurnAction(
             resolutionResult.match(),
@@ -77,7 +89,15 @@ public class EndTurnApplicationService {
                 "TURN_START",
                 "TURN_START"
             );
+            events.add(
+                endTurnEventFactory.createPendingTurnStartInteractionEvent(
+                    action,
+                    resolutionResult,
+                    turnStartInteractionId
+                )
+            );
         }
+        endTurnTriggerDispatcher.dispatch(List.copyOf(events));
     }
 
     private EndTurnValidationContext loadValidationContext(EndTurnAction action) {
@@ -111,11 +131,39 @@ public class EndTurnApplicationService {
             currentPhase,
             String.valueOf(match.getStatus()),
             match.getLobbyStatus(),
-            hasAction(action.matchId(), action.actorUserId(), action.requestedTurnNumber(), "END_TURN"),
+            hasDuplicateAction(action),
             hasPendingDecision(action.matchId(), action.actorUserId()),
             hasAnyPendingDecision(action.matchId()),
             requiredActionSummary
         );
+    }
+
+    private boolean hasDuplicateAction(EndTurnAction action) {
+        if (action == null) {
+            return false;
+        }
+        if (action.idempotencyKey() != null && !action.idempotencyKey().isBlank()) {
+            Integer keyedCount = jdbcTemplate.queryForObject(
+                """
+                SELECT COUNT(*)
+                FROM match_actions
+                WHERE match_id = ?
+                  AND user_id = ?
+                  AND turn_number = ?
+                  AND action_type = 'END_TURN'
+                  AND payload ->> 'idempotencyKey' = ?
+                """,
+                Integer.class,
+                action.matchId(),
+                action.actorUserId(),
+                action.requestedTurnNumber(),
+                action.idempotencyKey()
+            );
+            if (keyedCount != null && keyedCount > 0) {
+                return true;
+            }
+        }
+        return hasAction(action.matchId(), action.actorUserId(), action.requestedTurnNumber(), "END_TURN");
     }
 
     private EndTurnRequiredActionSummary buildRequiredActionSummary(Long matchId, Long userId, int turnNumber) {
