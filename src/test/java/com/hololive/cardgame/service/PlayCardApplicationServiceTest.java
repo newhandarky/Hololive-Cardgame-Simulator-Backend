@@ -18,10 +18,14 @@ class PlayCardApplicationServiceTest {
     private final PlayCardLegacyResolutionBridge bridge = mock(PlayCardLegacyResolutionBridge.class);
     private final PlayCardActionValidator validator = mock(PlayCardActionValidator.class);
     private final PlayCardActionResolver resolver = mock(PlayCardActionResolver.class);
+    private final PlayCardEventFactory eventFactory = mock(PlayCardEventFactory.class);
+    private final PlayCardTriggerDispatcher triggerDispatcher = mock(PlayCardTriggerDispatcher.class);
     private final PlayCardApplicationService service = new PlayCardApplicationService(
         bridge,
         validator,
-        resolver
+        resolver,
+        eventFactory,
+        triggerDispatcher
     );
 
     @Test

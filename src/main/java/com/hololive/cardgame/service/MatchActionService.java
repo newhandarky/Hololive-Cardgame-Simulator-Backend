@@ -49,7 +49,6 @@ import org.springframework.util.StringUtils;
 @Service
 public class MatchActionService {
 
-    private static final Set<String> PLAY_TO_STAGE_ZONES = Set.of("CENTER", "BACK");
     private static final Set<String> CHEER_SOURCE_ZONES = Set.of("HAND", "CHEER_DECK");
     private static final String SUPPORT_DECISION_TYPE_CARD_SELECTION = "CARD_SELECTION";
     private static final String INTERACTION_TYPE_TURN_START = "TURN_START";
@@ -92,8 +91,10 @@ public class MatchActionService {
     private final BloomApplicationService bloomApplicationService;
     private final CollabApplicationService collabApplicationService;
     private final AttachCheerApplicationService attachCheerApplicationService;
+    private final PlayCardApplicationService playCardApplicationService;
     private final CollabEffectResolutionService collabEffectResolutionService;
     private final BloomEffectResolutionService bloomEffectResolutionService;
+    private final PlayCardEffectResolutionService playCardEffectResolutionService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -124,8 +125,10 @@ public class MatchActionService {
         BloomApplicationService bloomApplicationService,
         CollabApplicationService collabApplicationService,
         AttachCheerApplicationService attachCheerApplicationService,
+        PlayCardApplicationService playCardApplicationService,
         CollabEffectResolutionService collabEffectResolutionService,
         BloomEffectResolutionService bloomEffectResolutionService,
+        PlayCardEffectResolutionService playCardEffectResolutionService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
@@ -150,8 +153,10 @@ public class MatchActionService {
         this.bloomApplicationService = bloomApplicationService;
         this.collabApplicationService = collabApplicationService;
         this.attachCheerApplicationService = attachCheerApplicationService;
+        this.playCardApplicationService = playCardApplicationService;
         this.collabEffectResolutionService = collabEffectResolutionService;
         this.bloomEffectResolutionService = bloomEffectResolutionService;
+        this.playCardEffectResolutionService = playCardEffectResolutionService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -174,199 +179,52 @@ public class MatchActionService {
         }
         Long cardInstanceId = requirePositiveId(request == null ? null : request.getCardInstanceId(), "cardInstanceId");
         String targetZone = normalizeZone(request == null ? null : request.getTargetZone());
-        if (!PLAY_TO_STAGE_ZONES.contains(targetZone)) {
-            throw new IllegalArgumentException("targetZone 只支援 CENTER 或 BACK");
-        }
-
-        Map<String, Object> card = loadOwnedCardInstance(matchId, userId, cardInstanceId);
-        String sourceZone = normalizeZone(card.get("zone"));
-        if (!"HAND".equals(sourceZone)) {
-            throw new IllegalStateException("只能從手牌打出 Holomen");
-        }
-
-        String cardId = asString(card.get("card_id"));
-        String levelType = jdbcTemplate.query(
-            "SELECT level_type FROM member_cards WHERE card_id = ?",
-            rs -> rs.next() ? rs.getString("level_type") : null,
-            cardId
-        );
-        if (!StringUtils.hasText(levelType)) {
-            throw new IllegalStateException("只有 MEMBER 卡可以打到場上");
-        }
-        String normalizedLevelType = normalizeLevel(levelType);
         boolean openingReset = context.phase == MatchPhase.RESET;
-        if (openingReset) {
-            MatchPlayerEntity openingPlayer = matchPlayerRepository.findByMatchIdAndUserId(matchId, userId)
-                .orElseThrow(() -> new IllegalArgumentException("你不在此房間中"));
-            if (!openingPlayer.isMulliganDone()) {
-                throw new IllegalStateException("請先完成起手調度，再設置開場舞台");
-            }
-            boolean hasOpeningCenter = hasOpeningCenterPlaced(matchId, userId);
-            if (!hasOpeningCenter) {
-                if (!"DEBUT".equals(normalizedLevelType)) {
-                    throw new GameRuleException(
-                        GameErrorCode.PLAY_TO_STAGE_LEVEL_NOT_ALLOWED,
-                        "開場只能從手牌放置 DEBUT Holomem 到 CENTER"
-                    );
-                }
-                if (!"CENTER".equals(targetZone)) {
-                    throw new IllegalStateException("放置開場 CENTER 前，不能先設置開場 BACK");
-                }
-            } else {
-                if (!Set.of("DEBUT", "SPOT").contains(normalizedLevelType)) {
-                    throw new GameRuleException(
-                        GameErrorCode.PLAY_TO_STAGE_LEVEL_NOT_ALLOWED,
-                        "開場 BACK 只能放置 DEBUT 或 SPOT Holomem"
-                    );
-                }
-                if (!"BACK".equals(targetZone)) {
-                    throw new IllegalStateException("開場完成 CENTER 後，只能繼續設置 BACK");
-                }
-            }
-        } else {
-            if (!Set.of("DEBUT", "SPOT").contains(normalizedLevelType)) {
-                throw new GameRuleException(
-                    GameErrorCode.PLAY_TO_STAGE_LEVEL_NOT_ALLOWED,
-                    "只有 DEBUT 或 SPOT Holomem 可以從手牌放置到場上；FIRST/SECOND/BUZZ 請改用 BLOOM"
-                );
-            }
-            if (!"BACK".equals(targetZone)) {
-                throw new IllegalStateException("手牌 Holomem 只能放置到 BACK");
-            }
-        }
 
-        int occupiedCount = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM match_holomems WHERE match_id = ? AND owner_user_id = ? AND zone = ?",
-            Integer.class,
-            matchId,
-            userId,
-            targetZone
-        );
-        if ("BACK".equals(targetZone) && occupiedCount >= 5) {
-            throw new IllegalStateException("BACK 已滿（最多 5 張）");
-        }
-
-        int updated = jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET zone = 'STAGE',
-                order_index = NULL,
-                is_face_down = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'HAND'
-            """,
-            openingReset,
-            cardInstanceId,
-            matchId,
-            userId
-        );
-        if (updated != 1) {
-            throw new IllegalStateException("打牌失敗，請重新整理對戰狀態");
-        }
-
-        Long matchHolomemId = jdbcTemplate.query(
-            """
-            INSERT INTO match_holomems (
-                match_id,
-                owner_user_id,
-                match_card_id,
-                card_id,
-                zone,
-                is_rested,
-                is_face_down,
-                damage_taken,
-                current_level,
-                entered_turn_number
-            ) VALUES (?, ?, ?, ?, ?, FALSE, ?, 0, ?, ?)
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
+        PlayCardAction action = PlayCardAction.fromApi(
             matchId,
             userId,
             cardInstanceId,
-            cardId,
             targetZone,
+            context.turnNumber,
             openingReset,
-            normalizeLevel(levelType),
-            context.turnNumber
+            null
         );
-        if (matchHolomemId == null) {
-            throw new IllegalStateException("建立場上 Holomen 失敗");
-        }
-        recordHolomemStackCard(matchHolomemId, cardInstanceId);
+        PlayCardValidationContext validationContext = playCardApplicationService.validate(action);
+        PlayCardResolutionResult resolutionResult = playCardApplicationService.resolveState(action, validationContext);
 
-        if (openingReset) {
-            context.match.setCurrentPhase(MatchPhase.RESET.name());
-        } else {
-            context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        }
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
+        resolutionResult.match().setCurrentPhase(openingReset ? MatchPhase.RESET.name() : MatchPhase.MAIN.name());
+        touchUpdatedAt(resolutionResult.match());
+        matchRepository.saveAndFlush(resolutionResult.match());
 
-        Map<String, Object> triggerSummary = openingReset
-            ? Map.of("deferredUntilLiveStart", true)
-            : matchEventHookService.onHolomemEnter(
-                matchId,
-                userId,
-                cardId,
-                cardInstanceId,
-                targetZone
-            );
-        List<Map<String, Object>> giftTriggeredEffects = openingReset
-            ? List.of()
-            : matchGiftTriggerService.previewGiftTriggeredEffectsOnStageEnter(
-                matchId,
-                userId,
-                cardInstanceId,
-                targetZone,
-                context.turnNumber
-            );
-        Map<String, Object> giftEffectSummary = buildGiftTriggeredEffectDeferredSummary(giftTriggeredEffects);
-        FollowupInteractionDecision giftTriggerConfirmDecision = null;
-        if (!giftTriggeredEffects.isEmpty()) {
-            giftTriggerConfirmDecision = createGiftTriggeredEffectConfirmPendingInteraction(
-                matchId,
-                userId,
-                cardInstanceId,
-                cardId,
-                List.of(buildInteractionSourceCardPayload(matchId, userId, cardInstanceId, cardId, targetZone)),
-                giftTriggeredEffects,
-                context.turnNumber
-            );
-        }
+        PlayCardEffectResolution effectResolution = playCardEffectResolutionService.resolve(action, resolutionResult);
+        playCardApplicationService.dispatchResolvedEvents(action, resolutionResult, effectResolution);
 
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("cardInstanceId", cardInstanceId);
-        payload.put("cardId", cardId);
-        payload.put("targetZone", targetZone);
-        payload.put("enteredTurn", context.turnNumber);
-        payload.put("faceDown", openingReset);
-        payload.put("triggerSummary", triggerSummary);
+        payload.put("cardInstanceId", resolutionResult.cardInstanceId());
+        payload.put("cardId", resolutionResult.cardId());
+        payload.put("targetZone", resolutionResult.targetZone());
+        payload.put("enteredTurn", resolutionResult.enteredTurnNumber());
+        payload.put("faceDown", resolutionResult.faceDown());
+        payload.put("idempotencyKey", action.idempotencyKey());
+        payload.put("triggerSummary", effectResolution.triggerSummary());
         if (!openingReset) {
-            payload.put("giftEffect", giftEffectSummary);
-            payload.put(
-                "triggerResolutionOrder",
-                buildTriggeredResolutionOrder(
-                    "GIFT_TRIGGER",
-                    100,
-                    giftEffectSummary,
-                    "ENTER_EVENT_HOOK",
-                    200,
-                    triggerSummary
-                )
-            );
-            putFollowupDecisionPayload(payload, giftTriggerConfirmDecision);
+            payload.put("giftEffect", effectResolution.giftEffectSummary());
+            payload.put("triggerResolutionOrder", effectResolution.triggerResolutionOrder());
+            if (effectResolution.hasPendingInteraction()) {
+                payload.put("pendingInteractionDecisionId", effectResolution.pendingInteractionDecisionId());
+                payload.put("pendingInteractionDecisionType", effectResolution.pendingInteractionDecisionType());
+            }
         }
 
         appendAction(
-            context.match,
+            resolutionResult.match(),
             userId,
-            openingReset ? ("CENTER".equals(targetZone) ? "OPENING_SET_CENTER" : "OPENING_SET_BACK") : "PLAY_TO_STAGE",
+            openingReset
+                ? ("CENTER".equals(resolutionResult.targetZone()) ? "OPENING_SET_CENTER" : "OPENING_SET_BACK")
+                : "PLAY_TO_STAGE",
             toJson(payload),
-            context.turnNumber
+            resolutionResult.turnNumber()
         );
     }
 

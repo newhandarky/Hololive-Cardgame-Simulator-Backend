@@ -1,0 +1,9 @@
+package com.hololive.cardgame.service;
+
+public enum PlayCardEventType {
+    PLAY_CARD_REQUEST_ACCEPTED,
+    PLAY_CARD_RESOLVED,
+    PLAY_CARD_ENTER_HOOK_RESOLVED,
+    PLAY_CARD_GIFT_PREVIEW_CREATED,
+    PLAY_CARD_GIFT_CONFIRM_REQUIRED
+}
