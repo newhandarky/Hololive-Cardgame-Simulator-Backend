@@ -91,6 +91,7 @@ public class MatchActionService {
     private final EndTurnApplicationService endTurnApplicationService;
     private final BloomApplicationService bloomApplicationService;
     private final CollabApplicationService collabApplicationService;
+    private final CollabEffectResolutionService collabEffectResolutionService;
     private final BloomEffectResolutionService bloomEffectResolutionService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
@@ -121,6 +122,7 @@ public class MatchActionService {
         EndTurnApplicationService endTurnApplicationService,
         BloomApplicationService bloomApplicationService,
         CollabApplicationService collabApplicationService,
+        CollabEffectResolutionService collabEffectResolutionService,
         BloomEffectResolutionService bloomEffectResolutionService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
@@ -145,6 +147,7 @@ public class MatchActionService {
         this.endTurnApplicationService = endTurnApplicationService;
         this.bloomApplicationService = bloomApplicationService;
         this.collabApplicationService = collabApplicationService;
+        this.collabEffectResolutionService = collabEffectResolutionService;
         this.bloomEffectResolutionService = bloomEffectResolutionService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
@@ -1728,7 +1731,6 @@ public class MatchActionService {
         if (!"BACK".equals(sourceZone)) {
             throw new IllegalStateException("目前只支援從 BACK 移動 Holomem");
         }
-        boolean sourceRested = toBoolean(currentHolomem.get("is_rested"));
         if (targetZone.equals(sourceZone)) {
             throw new IllegalStateException("Holomem 已在目標區位");
         }
@@ -1748,17 +1750,6 @@ public class MatchActionService {
         );
         if ("CENTER".equals(targetZone) && targetOccupied > 0) {
             throw new IllegalStateException("CENTER 已有 Holomem");
-        }
-        if ("COLLAB".equals(targetZone) && targetOccupied > 0) {
-            throw new IllegalStateException("COLLAB 已有 Holomem");
-        }
-        if ("COLLAB".equals(targetZone)) {
-            if (sourceRested) {
-                throw new IllegalStateException("休息中的 Holomem 不能執行連動");
-            }
-            if (hasUsedCollabThisTurn(matchId, userId, context.turnNumber)) {
-                throw new IllegalStateException("本回合已執行過連動");
-            }
         }
 
         int moved = jdbcTemplate.update(
@@ -1780,110 +1771,23 @@ public class MatchActionService {
             throw new IllegalStateException("移動 Holomem 失敗，請重新整理");
         }
 
-        Long holopowerCardInstanceId = null;
-        Map<String, Object> collabEffectSummary = null;
-        List<Map<String, Object>> collabGiftTriggeredEffects = List.of();
-        Map<String, Object> collabGiftEffectSummary = null;
-        Map<String, Object> collabTriggerSummary = null;
-        MatchEffectService.TriggeredEffectPreview collabPreview = null;
-        FollowupInteractionDecision collabTriggerConfirmDecision = null;
-        if ("COLLAB".equals(targetZone)) {
-            holopowerCardInstanceId = moveTopDeckCardToHolopower(matchId, userId);
-            collabPreview = matchTriggeredCardEffectService.previewCollabTriggeredEffect(
-                matchId,
-                userId,
-                asString(currentHolomem.get("card_id")),
-                cardInstanceId
-            );
-            collabEffectSummary = buildTriggeredEffectDeferredSummary("COLLAB", collabPreview);
-            collabGiftTriggeredEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnCollab(
-                matchId,
-                userId,
-                cardInstanceId,
-                context.turnNumber
-            );
-            if (!collabGiftTriggeredEffects.isEmpty()) {
-                collabGiftEffectSummary = buildGiftTriggeredEffectDeferredSummary(collabGiftTriggeredEffects);
-            }
-            collabTriggerSummary = matchEventHookService.onHolomemCollab(
-                matchId,
-                userId,
-                asString(currentHolomem.get("card_id")),
-                cardInstanceId
-            );
-            if (collabPreview.hasEffect() || !collabGiftTriggeredEffects.isEmpty()) {
-                collabTriggerConfirmDecision = createCollabTriggeredEffectConfirmPendingInteraction(
-                    matchId,
-                    userId,
-                    cardInstanceId,
-                    asString(currentHolomem.get("card_id")),
-                    collabPreview,
-                    collabGiftTriggeredEffects,
-                    context.turnNumber
-                );
-            }
-        }
-
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("cardInstanceId", cardInstanceId);
         payload.put("cardId", asString(currentHolomem.get("card_id")));
         payload.put("sourceZone", sourceZone);
         payload.put("targetZone", targetZone);
-        if (holopowerCardInstanceId != null) {
-            payload.put("holopowerCardInstanceId", holopowerCardInstanceId);
-        }
-        if (collabEffectSummary != null) {
-            payload.put("collabEffect", collabEffectSummary);
-        }
-        if (collabGiftEffectSummary != null && toBoolean(collabGiftEffectSummary.get("deferred"))) {
-            payload.put("collabGiftEffect", collabGiftEffectSummary);
-        }
-        if (collabTriggerConfirmDecision != null) {
-            putFollowupDecisionPayload(payload, collabTriggerConfirmDecision);
-        }
-        if (collabTriggerSummary != null) {
-            payload.put("triggerSummary", collabTriggerSummary);
-        }
         payload.put(
             "triggerResolutionOrder",
             buildTriggeredResolutionOrder(
                 "COLLAB_TRIGGER",
                 100,
-                mergeEffectSummaryForChecks(
-                    collabEffectSummary,
-                    collabGiftEffectSummary == null ? List.of() : List.of(collabGiftEffectSummary)
-                ),
+                mergeEffectSummaryForChecks(null, List.of()),
                 "COLLAB_EVENT_HOOK",
                 200,
-                collabTriggerSummary
+                null
             )
         );
-        appendAction(
-            context.match,
-            userId,
-            "COLLAB".equals(targetZone) ? "COLLAB" : "MOVE_STAGE_HOLOMEM",
-            toJson(payload),
-            context.turnNumber
-        );
-        if (collabEffectSummary != null && (collabPreview == null || !collabPreview.hasEffect())) {
-            if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, collabEffectSummary)) {
-                touchUpdatedAt(context.match);
-                matchRepository.saveAndFlush(context.match);
-            } else if (
-                hasLifeReduced(collabEffectSummary) &&
-                evaluateLifeDefeat(context.match, userId, context.turnNumber)
-            ) {
-                touchUpdatedAt(context.match);
-                matchRepository.saveAndFlush(context.match);
-            } else if (
-                hasHolomemDowned(collabEffectSummary) &&
-                evaluateNoHolomemDefeat(context.match, userId, context.turnNumber)
-            ) {
-                touchUpdatedAt(context.match);
-                matchRepository.saveAndFlush(context.match);
-            }
-            enqueueLifeLossSendCheerInteractions(context.match, matchId, collabEffectSummary, context.turnNumber);
-        }
+        appendAction(context.match, userId, "MOVE_STAGE_HOLOMEM", toJson(payload), context.turnNumber);
     }
 
     private void executeCollabAction(Long matchId, Long userId, ActionContext context, Long cardInstanceId) {
@@ -1891,47 +1795,7 @@ public class MatchActionService {
         CollabValidationContext validationContext = collabApplicationService.validate(action);
         CollabResolutionResult resolutionResult = collabApplicationService.resolveState(action, validationContext);
         CollabSourceHolomemSnapshot currentHolomem = validationContext.sourceHolomem();
-
-        Map<String, Object> collabEffectSummary = null;
-        List<Map<String, Object>> collabGiftTriggeredEffects = List.of();
-        Map<String, Object> collabGiftEffectSummary = null;
-        Map<String, Object> collabTriggerSummary = null;
-        MatchEffectService.TriggeredEffectPreview collabPreview = null;
-        FollowupInteractionDecision collabTriggerConfirmDecision = null;
-
-        collabPreview = matchTriggeredCardEffectService.previewCollabTriggeredEffect(
-            matchId,
-            userId,
-            currentHolomem.cardId(),
-            cardInstanceId
-        );
-        collabEffectSummary = buildTriggeredEffectDeferredSummary("COLLAB", collabPreview);
-        collabGiftTriggeredEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnCollab(
-            matchId,
-            userId,
-            cardInstanceId,
-            context.turnNumber
-        );
-        if (!collabGiftTriggeredEffects.isEmpty()) {
-            collabGiftEffectSummary = buildGiftTriggeredEffectDeferredSummary(collabGiftTriggeredEffects);
-        }
-        collabTriggerSummary = matchEventHookService.onHolomemCollab(
-            matchId,
-            userId,
-            currentHolomem.cardId(),
-            cardInstanceId
-        );
-        if (collabPreview.hasEffect() || !collabGiftTriggeredEffects.isEmpty()) {
-            collabTriggerConfirmDecision = createCollabTriggeredEffectConfirmPendingInteraction(
-                matchId,
-                userId,
-                cardInstanceId,
-                currentHolomem.cardId(),
-                collabPreview,
-                collabGiftTriggeredEffects,
-                context.turnNumber
-            );
-        }
+        CollabEffectResolution effectResolution = collabEffectResolutionService.resolve(action, resolutionResult);
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("cardInstanceId", cardInstanceId);
@@ -1942,45 +1806,33 @@ public class MatchActionService {
         if (resolutionResult.holopowerCardInstanceId() != null) {
             payload.put("holopowerCardInstanceId", resolutionResult.holopowerCardInstanceId());
         }
-        if (collabEffectSummary != null) {
-            payload.put("collabEffect", collabEffectSummary);
+        if (!effectResolution.collabEffectSummary().isEmpty()) {
+            payload.put("collabEffect", effectResolution.collabEffectSummary());
         }
-        if (collabGiftEffectSummary != null && toBoolean(collabGiftEffectSummary.get("deferred"))) {
-            payload.put("collabGiftEffect", collabGiftEffectSummary);
+        if (!effectResolution.giftEffectSummary().isEmpty() && toBoolean(effectResolution.giftEffectSummary().get("deferred"))) {
+            payload.put("collabGiftEffect", effectResolution.giftEffectSummary());
         }
-        if (collabTriggerConfirmDecision != null) {
-            putFollowupDecisionPayload(payload, collabTriggerConfirmDecision);
+        if (effectResolution.hasPendingInteraction()) {
+            payload.put("pendingInteractionDecisionId", effectResolution.pendingInteractionDecisionId());
+            payload.put("pendingInteractionDecisionType", effectResolution.pendingInteractionDecisionType());
         }
-        if (collabTriggerSummary != null) {
-            payload.put("triggerSummary", collabTriggerSummary);
+        if (!effectResolution.triggerSummary().isEmpty()) {
+            payload.put("triggerSummary", effectResolution.triggerSummary());
         }
-        payload.put(
-            "triggerResolutionOrder",
-            buildTriggeredResolutionOrder(
-                "COLLAB_TRIGGER",
-                100,
-                mergeEffectSummaryForChecks(
-                    collabEffectSummary,
-                    collabGiftEffectSummary == null ? List.of() : List.of(collabGiftEffectSummary)
-                ),
-                "COLLAB_EVENT_HOOK",
-                200,
-                collabTriggerSummary
-            )
-        );
+        payload.put("triggerResolutionOrder", effectResolution.triggerResolutionOrder());
         appendAction(resolutionResult.match(), userId, "COLLAB", toJson(payload), context.turnNumber);
-        if (collabEffectSummary != null && (collabPreview == null || !collabPreview.hasEffect())) {
-            if (evaluateCardEffectMatchFinish(resolutionResult.match(), userId, context.turnNumber, collabEffectSummary)) {
+        if (effectResolution.hasImmediateEffectSummary() && !effectResolution.hasDeferredCollabEffect()) {
+            if (evaluateCardEffectMatchFinish(resolutionResult.match(), userId, context.turnNumber, effectResolution.collabEffectSummary())) {
                 touchUpdatedAt(resolutionResult.match());
                 matchRepository.saveAndFlush(resolutionResult.match());
             } else if (
-                hasLifeReduced(collabEffectSummary) &&
+                hasLifeReduced(effectResolution.collabEffectSummary()) &&
                     evaluateLifeDefeat(resolutionResult.match(), userId, context.turnNumber)
             ) {
                 touchUpdatedAt(resolutionResult.match());
                 matchRepository.saveAndFlush(resolutionResult.match());
             } else if (
-                hasHolomemDowned(collabEffectSummary) &&
+                hasHolomemDowned(effectResolution.collabEffectSummary()) &&
                     evaluateNoHolomemDefeat(resolutionResult.match(), userId, context.turnNumber)
             ) {
                 touchUpdatedAt(resolutionResult.match());
@@ -1989,7 +1841,7 @@ public class MatchActionService {
             enqueueLifeLossSendCheerInteractions(
                 resolutionResult.match(),
                 matchId,
-                collabEffectSummary,
+                effectResolution.collabEffectSummary(),
                 context.turnNumber
             );
         }
@@ -7155,105 +7007,6 @@ public class MatchActionService {
             turnNumber,
             additionalContext
         );
-    }
-
-    private FollowupInteractionDecision createCollabTriggeredEffectConfirmPendingInteraction(
-        Long matchId,
-        Long userId,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        MatchEffectService.TriggeredEffectPreview collabPreview,
-        List<Map<String, Object>> giftTriggeredEffects,
-        int turnNumber
-    ) {
-        List<Map<String, Object>> cards = buildGiftTriggerInteractionCards(
-            matchId,
-            userId,
-            sourceCardInstanceId,
-            sourceCardId,
-            giftTriggeredEffects
-        );
-        if (cards.isEmpty() && sourceCardInstanceId != null && sourceCardInstanceId > 0) {
-            cards = List.of(buildInteractionSourceCardPayload(matchId, userId, sourceCardInstanceId, sourceCardId, "COLLAB"));
-        }
-
-        Map<String, Object> additionalContext = new LinkedHashMap<>();
-        additionalContext.put("hasCollabEffect", collabPreview != null && collabPreview.hasEffect());
-
-        List<Map<String, Object>> giftTriggers = buildGiftTriggerPayloads(giftTriggeredEffects);
-        additionalContext.put("giftTriggers", giftTriggers);
-        additionalContext.put("giftCount", giftTriggers.size());
-        appendGiftSelectionPendingContext(additionalContext, giftTriggeredEffects);
-        additionalContext.put("triggerSections", buildCollabTriggerSections(collabPreview, giftTriggeredEffects));
-
-        return createTriggeredEffectConfirmPendingInteraction(
-            matchId,
-            userId,
-            "COLLAB",
-            sourceCardInstanceId,
-            sourceCardId,
-            "COLLAB_TRIGGER",
-            "確認連動觸發效果",
-            buildCollabTriggeredEffectConfirmMessage(collabPreview, giftTriggeredEffects),
-            cards,
-            turnNumber,
-            additionalContext
-        );
-    }
-
-    private String buildCollabTriggeredEffectConfirmMessage(
-        MatchEffectService.TriggeredEffectPreview collabPreview,
-        List<Map<String, Object>> giftTriggeredEffects
-    ) {
-        List<String> lines = new ArrayList<>();
-        if (collabPreview != null && collabPreview.hasEffect()) {
-            lines.add("[Collab]\n" + buildTriggeredEffectConfirmMessage("COLLAB", collabPreview).replaceFirst("^是否要執行本次觸發效果？\\n?", ""));
-        }
-        if (giftTriggeredEffects != null && !giftTriggeredEffects.isEmpty()) {
-            lines.add("[Gift]\n" + buildGiftTriggeredEffectDetails(giftTriggeredEffects));
-        }
-        if (lines.isEmpty()) {
-            return "是否要執行本次連動觸發效果？";
-        }
-        return "是否要執行本次連動觸發效果？\n" + String.join("\n\n", lines);
-    }
-
-    private List<Map<String, Object>> buildCollabTriggerSections(
-        MatchEffectService.TriggeredEffectPreview collabPreview,
-        List<Map<String, Object>> giftTriggeredEffects
-    ) {
-        List<Map<String, Object>> sections = new ArrayList<>();
-        if (collabPreview != null && collabPreview.hasEffect()) {
-            Map<String, Object> collabSection = new LinkedHashMap<>();
-            collabSection.put("sectionType", "COLLAB_EFFECT");
-            collabSection.put("title", "Collab");
-            collabSection.put("effectTypes", collabPreview.effectTypes() == null ? List.of() : collabPreview.effectTypes());
-            collabSection.put("rawText", collabPreview.rawText());
-            sections.add(collabSection);
-        }
-        if (giftTriggeredEffects != null && !giftTriggeredEffects.isEmpty()) {
-            List<Map<String, Object>> giftItems = new ArrayList<>();
-            for (Map<String, Object> trigger : giftTriggeredEffects) {
-                if (trigger == null || trigger.isEmpty()) {
-                    continue;
-                }
-                Map<String, Object> item = new LinkedHashMap<>();
-                item.put("triggerType", normalizeZone(trigger.get("triggerType")));
-                item.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
-                item.put("rawText", asString(trigger.get("rawText")));
-                item.put("requestedEffects", toStringList(trigger.get("requestedEffects")));
-                giftItems.add(item);
-            }
-            if (!giftItems.isEmpty()) {
-                Map<String, Object> giftSection = new LinkedHashMap<>();
-                giftSection.put("sectionType", "GIFT");
-                giftSection.put("title", "Gift");
-                giftSection.put("count", giftItems.size());
-                giftSection.put("items", giftItems);
-                sections.add(giftSection);
-            }
-        }
-        return sections;
     }
 
     /**

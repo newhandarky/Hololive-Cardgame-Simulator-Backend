@@ -1,0 +1,683 @@
+package com.hololive.cardgame.service;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
+
+@Service
+public class CollabEffectResolutionService {
+
+    private static final String INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM = "TRIGGER_EFFECT_CONFIRM";
+    private static final String PENDING_STATUS = "PENDING";
+
+    private final JdbcTemplate jdbcTemplate;
+    private final ObjectMapper objectMapper;
+    private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
+    private final MatchGiftTriggerService matchGiftTriggerService;
+    private final MatchEventHookService matchEventHookService;
+
+    public CollabEffectResolutionService(
+        JdbcTemplate jdbcTemplate,
+        ObjectMapper objectMapper,
+        MatchTriggeredCardEffectService matchTriggeredCardEffectService,
+        MatchGiftTriggerService matchGiftTriggerService,
+        MatchEventHookService matchEventHookService
+    ) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.objectMapper = objectMapper;
+        this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
+        this.matchGiftTriggerService = matchGiftTriggerService;
+        this.matchEventHookService = matchEventHookService;
+    }
+
+    public CollabEffectResolution resolve(CollabAction action, CollabResolutionResult resolutionResult) {
+        if (action == null || resolutionResult == null) {
+            throw new IllegalArgumentException("COLLAB effect 結算缺少必要上下文");
+        }
+
+        MatchEffectService.TriggeredEffectPreview collabPreview = matchTriggeredCardEffectService.previewCollabTriggeredEffect(
+            action.matchId(),
+            action.actorUserId(),
+            resolutionResult.sourceCardId(),
+            resolutionResult.sourceCardInstanceId()
+        );
+        Map<String, Object> collabEffectSummary = buildTriggeredEffectDeferredSummary(collabPreview);
+
+        List<Map<String, Object>> giftTriggeredEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnCollab(
+            action.matchId(),
+            action.actorUserId(),
+            resolutionResult.sourceCardInstanceId(),
+            resolutionResult.turnNumber()
+        );
+        Map<String, Object> giftEffectSummary = giftTriggeredEffects.isEmpty()
+            ? null
+            : buildGiftTriggeredEffectDeferredSummary(giftTriggeredEffects);
+
+        Map<String, Object> triggerSummary = matchEventHookService.onHolomemCollab(
+            action.matchId(),
+            action.actorUserId(),
+            resolutionResult.sourceCardId(),
+            resolutionResult.sourceCardInstanceId()
+        );
+
+        PendingInteractionDecision pendingDecision = null;
+        if (collabPreview.hasEffect() || !giftTriggeredEffects.isEmpty()) {
+            pendingDecision = createCollabTriggeredEffectConfirmPendingInteraction(
+                action.matchId(),
+                action.actorUserId(),
+                resolutionResult.sourceCardInstanceId(),
+                resolutionResult.sourceCardId(),
+                collabPreview,
+                giftTriggeredEffects,
+                resolutionResult.turnNumber()
+            );
+        }
+
+        return new CollabEffectResolution(
+            collabPreview,
+            collabEffectSummary,
+            giftTriggeredEffects,
+            giftEffectSummary,
+            triggerSummary,
+            pendingDecision == null ? null : pendingDecision.decisionId(),
+            pendingDecision == null ? null : pendingDecision.decisionType(),
+            buildTriggeredResolutionOrder(
+                "COLLAB_TRIGGER",
+                100,
+                mergeEffectSummaryForChecks(
+                    collabEffectSummary,
+                    giftEffectSummary == null ? List.of() : List.of(giftEffectSummary)
+                ),
+                "COLLAB_EVENT_HOOK",
+                200,
+                triggerSummary
+            )
+        );
+    }
+
+    private Map<String, Object> buildTriggeredEffectDeferredSummary(
+        MatchEffectService.TriggeredEffectPreview preview
+    ) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        boolean hasEffect = preview != null && preview.hasEffect();
+        summary.put("hasCollabEffect", hasEffect);
+        summary.put("deferred", hasEffect);
+        summary.put("requestedEffects", preview == null || preview.effectTypes() == null ? List.of() : preview.effectTypes());
+        summary.put("executedEffects", List.of());
+        summary.put("unsupportedEffects", List.of());
+        summary.put("rawText", preview == null ? null : preview.rawText());
+        if (preview != null && preview.diceRoll() != null) {
+            summary.put("diceRoll", preview.diceRoll());
+        }
+        return summary;
+    }
+
+    private Map<String, Object> buildGiftTriggeredEffectDeferredSummary(List<Map<String, Object>> giftTriggeredEffects) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        List<Map<String, Object>> triggers = giftTriggeredEffects == null ? List.of() : giftTriggeredEffects;
+        List<String> requestedEffects = new ArrayList<>();
+        for (Map<String, Object> trigger : triggers) {
+            Object requested = trigger.get("requestedEffects");
+            if (!(requested instanceof List<?> list)) {
+                continue;
+            }
+            for (Object effectType : list) {
+                String normalized = normalizeZone(effectType);
+                if (StringUtils.hasText(normalized) && !requestedEffects.contains(normalized)) {
+                    requestedEffects.add(normalized);
+                }
+            }
+        }
+        summary.put("sourceActionType", "GIFT");
+        summary.put("deferred", !triggers.isEmpty());
+        summary.put("triggeredGifts", triggers);
+        summary.put("requestedEffects", requestedEffects);
+        summary.put("executedEffects", List.of());
+        summary.put("unsupportedEffects", List.of());
+        return summary;
+    }
+
+    private PendingInteractionDecision createCollabTriggeredEffectConfirmPendingInteraction(
+        Long matchId,
+        Long userId,
+        Long sourceCardInstanceId,
+        String sourceCardId,
+        MatchEffectService.TriggeredEffectPreview collabPreview,
+        List<Map<String, Object>> giftTriggeredEffects,
+        int turnNumber
+    ) {
+        List<Map<String, Object>> cards = buildGiftTriggerInteractionCards(
+            matchId,
+            userId,
+            sourceCardInstanceId,
+            sourceCardId,
+            giftTriggeredEffects
+        );
+        if (cards.isEmpty() && sourceCardInstanceId != null && sourceCardInstanceId > 0) {
+            cards = List.of(buildInteractionSourceCardPayload(matchId, userId, sourceCardInstanceId, sourceCardId, "COLLAB"));
+        }
+
+        Map<String, Object> additionalContext = new LinkedHashMap<>();
+        additionalContext.put("hasCollabEffect", collabPreview != null && collabPreview.hasEffect());
+
+        List<Map<String, Object>> giftTriggers = buildGiftTriggerPayloads(giftTriggeredEffects);
+        additionalContext.put("giftTriggers", giftTriggers);
+        additionalContext.put("giftCount", giftTriggers.size());
+        appendGiftSelectionPendingContext(additionalContext, giftTriggeredEffects);
+        additionalContext.put("triggerSections", buildCollabTriggerSections(collabPreview, giftTriggeredEffects));
+
+        return createTriggeredEffectConfirmPendingInteraction(
+            matchId,
+            userId,
+            "COLLAB",
+            sourceCardInstanceId,
+            sourceCardId,
+            "COLLAB_TRIGGER",
+            "確認連動觸發效果",
+            buildCollabTriggeredEffectConfirmMessage(collabPreview, giftTriggeredEffects),
+            cards,
+            turnNumber,
+            additionalContext
+        );
+    }
+
+    private PendingInteractionDecision createTriggeredEffectConfirmPendingInteraction(
+        Long matchId,
+        Long userId,
+        String sourceActionType,
+        Long sourceCardInstanceId,
+        String sourceCardId,
+        String effectType,
+        String title,
+        String message,
+        List<Map<String, Object>> cards,
+        int turnNumber,
+        Map<String, Object> additionalContext
+    ) {
+        if (hasBlockingPendingDecision(matchId, userId)) {
+            throw new IllegalStateException("你有待處理的互動，請先完成確認");
+        }
+        int minSelect = 0;
+        int maxSelect = 0;
+        if (additionalContext != null && !additionalContext.isEmpty()) {
+            minSelect = Math.max(asInt(additionalContext.get("minSelect")), 0);
+            maxSelect = Math.max(asInt(additionalContext.get("maxSelect")), minSelect);
+        }
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("interactionType", INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
+        context.put("sourceActionType", normalizeZone(sourceActionType));
+        context.put("title", title);
+        context.put("message", message);
+        context.put("cards", cards == null ? List.of() : cards);
+        context.put("turnNumber", turnNumber);
+        if (additionalContext != null && !additionalContext.isEmpty()) {
+            context.putAll(additionalContext);
+        }
+
+        Long decisionId = jdbcTemplate.query(
+            """
+            INSERT INTO match_pending_decisions (
+                match_id,
+                user_id,
+                decision_type,
+                source_action_type,
+                source_card_instance_id,
+                source_card_id,
+                effect_type,
+                min_select,
+                max_select,
+                status,
+                context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
+            RETURNING id
+            """,
+            rs -> rs.next() ? rs.getLong("id") : null,
+            matchId,
+            userId,
+            INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM,
+            normalizeZone(sourceActionType),
+            sourceCardInstanceId,
+            sourceCardId,
+            effectType,
+            minSelect,
+            maxSelect,
+            PENDING_STATUS,
+            toJson(context)
+        );
+        if (decisionId == null) {
+            return null;
+        }
+        return new PendingInteractionDecision(decisionId, INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
+    }
+
+    private boolean hasBlockingPendingDecision(Long matchId, Long userId) {
+        Integer count = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        return count != null && count > 0;
+    }
+
+    private List<Map<String, Object>> buildGiftTriggerPayloads(List<Map<String, Object>> giftTriggeredEffects) {
+        List<Map<String, Object>> giftTriggers = new ArrayList<>();
+        if (giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
+            return giftTriggers;
+        }
+        for (Map<String, Object> trigger : giftTriggeredEffects) {
+            if (trigger == null || trigger.isEmpty()) {
+                continue;
+            }
+            Map<String, Object> triggerPayload = new LinkedHashMap<>();
+            triggerPayload.put("triggerType", normalizeZone(trigger.get("triggerType")));
+            triggerPayload.put("sourceCardInstanceId", asLong(trigger.get("sourceCardInstanceId")));
+            triggerPayload.put("triggerTargetCardInstanceId", asLong(trigger.get("triggerTargetCardInstanceId")));
+            triggerPayload.put("giftHolderHolomemId", asLong(trigger.get("giftHolderHolomemId")));
+            triggerPayload.put("giftHolderCardInstanceId", asLong(trigger.get("giftHolderCardInstanceId")));
+            triggerPayload.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
+            triggerPayload.put("giftHolderZone", asString(trigger.get("giftHolderZone")));
+            triggerPayload.put(
+                "giftHolderAttachedCheerCardInstanceIds",
+                toLongList(trigger.get("giftHolderAttachedCheerCardInstanceIds"))
+            );
+            triggerPayload.put("giftHolderAttachedCheerCardIds", toStringList(trigger.get("giftHolderAttachedCheerCardIds")));
+            triggerPayload.put("giftHolderStackCardInstanceIds", toLongList(trigger.get("giftHolderStackCardInstanceIds")));
+            triggerPayload.put("giftHolderStackCardIds", toStringList(trigger.get("giftHolderStackCardIds")));
+            triggerPayload.put("selectionRequired", toBoolean(trigger.get("selectionRequired")));
+            triggerPayload.put("selectionEffectType", asString(trigger.get("selectionEffectType")));
+            triggerPayload.put("selectionMinSelect", asInt(trigger.get("selectionMinSelect")));
+            triggerPayload.put("selectionMaxSelect", asInt(trigger.get("selectionMaxSelect")));
+            triggerPayload.put(
+                "selectionCandidateCardInstanceIds",
+                toLongList(trigger.get("selectionCandidateCardInstanceIds"))
+            );
+            triggerPayload.put("rawText", asString(trigger.get("rawText")));
+            giftTriggers.add(triggerPayload);
+        }
+        return giftTriggers;
+    }
+
+    private void appendGiftSelectionPendingContext(
+        Map<String, Object> additionalContext,
+        List<Map<String, Object>> giftTriggeredEffects
+    ) {
+        if (additionalContext == null || giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
+            return;
+        }
+        List<Map<String, Object>> selectableTriggers = giftTriggeredEffects.stream()
+            .filter(Objects::nonNull)
+            .filter(trigger -> toBoolean(trigger.get("selectionRequired")))
+            .toList();
+        if (selectableTriggers.size() != 1) {
+            return;
+        }
+        Map<String, Object> selectionTrigger = selectableTriggers.get(0);
+        List<Long> candidateCardInstanceIds = toLongList(selectionTrigger.get("selectionCandidateCardInstanceIds"));
+        if (candidateCardInstanceIds.isEmpty()) {
+            return;
+        }
+        additionalContext.put("candidateCardInstanceIds", candidateCardInstanceIds);
+        additionalContext.put("selectionGiftHolderCardInstanceId", asLong(selectionTrigger.get("giftHolderCardInstanceId")));
+        additionalContext.put("minSelect", Math.max(asInt(selectionTrigger.get("selectionMinSelect")), 1));
+        additionalContext.put(
+            "maxSelect",
+            Math.max(
+                asInt(selectionTrigger.get("selectionMaxSelect")),
+                Math.max(asInt(selectionTrigger.get("selectionMinSelect")), 1)
+            )
+        );
+    }
+
+    private String buildCollabTriggeredEffectConfirmMessage(
+        MatchEffectService.TriggeredEffectPreview collabPreview,
+        List<Map<String, Object>> giftTriggeredEffects
+    ) {
+        List<String> lines = new ArrayList<>();
+        if (collabPreview != null && collabPreview.hasEffect()) {
+            lines.add("[Collab]\n" + buildTriggeredEffectConfirmMessage(collabPreview));
+        }
+        if (giftTriggeredEffects != null && !giftTriggeredEffects.isEmpty()) {
+            lines.add("[Gift]\n" + buildGiftTriggeredEffectDetails(giftTriggeredEffects));
+        }
+        if (lines.isEmpty()) {
+            return "是否要執行本次連動觸發效果？";
+        }
+        return "是否要執行本次連動觸發效果？\n" + String.join("\n\n", lines);
+    }
+
+    private String buildTriggeredEffectConfirmMessage(MatchEffectService.TriggeredEffectPreview preview) {
+        String rawText = preview == null ? null : preview.rawText();
+        List<String> effectTypes = preview == null ? List.of() : preview.effectTypes();
+        String effectSummary = effectTypes == null || effectTypes.isEmpty()
+            ? "無可解析效果類型"
+            : String.join("、", effectTypes);
+        if (!StringUtils.hasText(rawText)) {
+            return "是否要執行此 連動 特殊效果？\n效果類型：" + effectSummary;
+        }
+        return "是否要執行此 連動 特殊效果？\n能力文本：" + rawText + "\n效果類型：" + effectSummary;
+    }
+
+    private List<Map<String, Object>> buildCollabTriggerSections(
+        MatchEffectService.TriggeredEffectPreview collabPreview,
+        List<Map<String, Object>> giftTriggeredEffects
+    ) {
+        List<Map<String, Object>> sections = new ArrayList<>();
+        if (collabPreview != null && collabPreview.hasEffect()) {
+            Map<String, Object> collabSection = new LinkedHashMap<>();
+            collabSection.put("sectionType", "COLLAB_EFFECT");
+            collabSection.put("title", "Collab");
+            collabSection.put("effectTypes", collabPreview.effectTypes() == null ? List.of() : collabPreview.effectTypes());
+            collabSection.put("rawText", collabPreview.rawText());
+            sections.add(collabSection);
+        }
+        if (giftTriggeredEffects != null && !giftTriggeredEffects.isEmpty()) {
+            List<Map<String, Object>> giftItems = new ArrayList<>();
+            for (Map<String, Object> trigger : giftTriggeredEffects) {
+                if (trigger == null || trigger.isEmpty()) {
+                    continue;
+                }
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("triggerType", normalizeZone(trigger.get("triggerType")));
+                item.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
+                item.put("rawText", asString(trigger.get("rawText")));
+                item.put("requestedEffects", toStringList(trigger.get("requestedEffects")));
+                giftItems.add(item);
+            }
+            if (!giftItems.isEmpty()) {
+                Map<String, Object> giftSection = new LinkedHashMap<>();
+                giftSection.put("sectionType", "GIFT");
+                giftSection.put("title", "Gift");
+                giftSection.put("count", giftItems.size());
+                giftSection.put("items", giftItems);
+                sections.add(giftSection);
+            }
+        }
+        return sections;
+    }
+
+    private String buildGiftTriggeredEffectDetails(List<Map<String, Object>> giftTriggeredEffects) {
+        int count = 0;
+        List<String> lines = new ArrayList<>();
+        for (Map<String, Object> trigger : giftTriggeredEffects) {
+            count++;
+            String cardId = asString(trigger.get("giftHolderCardId"));
+            String triggerType = normalizeZone(trigger.get("triggerType"));
+            String rawText = asString(trigger.get("rawText"));
+            List<String> effectTypes = toStringList(trigger.get("requestedEffects"));
+            String effectSummary = effectTypes.isEmpty() ? "無可解析效果類型" : String.join("、", effectTypes);
+            StringBuilder line = new StringBuilder();
+            line.append("#").append(count).append(" ");
+            if (StringUtils.hasText(cardId)) {
+                line.append(cardId).append(" ");
+            }
+            line.append("[").append(StringUtils.hasText(triggerType) ? triggerType : "GIFT").append("]");
+            line.append(" 效果類型：").append(effectSummary);
+            if (StringUtils.hasText(rawText)) {
+                line.append("\n").append(rawText);
+            }
+            lines.add(line.toString());
+        }
+        return String.join("\n\n", lines);
+    }
+
+    private List<Map<String, Object>> buildGiftTriggerInteractionCards(
+        Long matchId,
+        Long userId,
+        Long sourceCardInstanceId,
+        String sourceCardId,
+        List<Map<String, Object>> giftTriggeredEffects
+    ) {
+        List<Map<String, Object>> cards = new ArrayList<>();
+        if (sourceCardInstanceId != null && sourceCardInstanceId > 0) {
+            cards.add(buildInteractionSourceCardPayload(matchId, userId, sourceCardInstanceId, sourceCardId, "STAGE"));
+        }
+        if (giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
+            return cards;
+        }
+        for (Map<String, Object> trigger : giftTriggeredEffects) {
+            Long holderCardInstanceId = asLong(trigger.get("giftHolderCardInstanceId"));
+            String holderCardId = asString(trigger.get("giftHolderCardId"));
+            String holderZone = asString(trigger.get("giftHolderZone"));
+            if (holderCardInstanceId == null || holderCardInstanceId <= 0) {
+                continue;
+            }
+            boolean exists = cards.stream()
+                .anyMatch(card -> holderCardInstanceId.equals(asLong(card.get("cardInstanceId"))));
+            if (exists) {
+                continue;
+            }
+            cards.add(
+                buildInteractionSourceCardPayload(
+                    matchId,
+                    userId,
+                    holderCardInstanceId,
+                    holderCardId,
+                    StringUtils.hasText(holderZone) ? holderZone : "STAGE"
+                )
+            );
+        }
+        return cards;
+    }
+
+    private Map<String, Object> buildInteractionSourceCardPayload(
+        Long matchId,
+        Long userId,
+        Long cardInstanceId,
+        String cardId,
+        String fallbackZone
+    ) {
+        return loadCardCandidateForDecision(matchId, userId, userId, cardInstanceId, fallbackZone, cardId);
+    }
+
+    private Map<String, Object> loadCardCandidateForDecision(
+        Long matchId,
+        Long viewerUserId,
+        Long ownerUserId,
+        Long cardInstanceId,
+        String fallbackZone,
+        String fallbackCardId
+    ) {
+        Map<String, Object> row = jdbcTemplate.query(
+            """
+            SELECT mc.id AS card_instance_id,
+                   mc.card_id,
+                   mc.zone,
+                   c.name,
+                   c.card_type,
+                   c.image_url,
+                   m.level_type
+            FROM match_cards mc
+            LEFT JOIN cards c ON c.card_id = mc.card_id
+            LEFT JOIN member_cards m ON m.card_id = mc.card_id
+            WHERE mc.match_id = ?
+              AND mc.owner_user_id = ?
+              AND mc.id = ?
+            LIMIT 1
+            """,
+            rs -> {
+                if (!rs.next()) {
+                    return null;
+                }
+                Map<String, Object> value = new LinkedHashMap<>();
+                value.put("cardInstanceId", rs.getLong("card_instance_id"));
+                value.put("cardId", rs.getString("card_id"));
+                value.put("zone", normalizeZone(rs.getString("zone")));
+                value.put("name", rs.getString("name"));
+                value.put("cardType", rs.getString("card_type"));
+                value.put("imageUrl", rs.getString("image_url"));
+                value.put("levelType", rs.getString("level_type"));
+                return value;
+            },
+            matchId,
+            ownerUserId,
+            cardInstanceId
+        );
+        if (row != null) {
+            if (!viewerUserId.equals(ownerUserId)) {
+                row.put("zone", null);
+            }
+            return row;
+        }
+        Map<String, Object> fallback = new LinkedHashMap<>();
+        fallback.put("cardInstanceId", cardInstanceId);
+        fallback.put("cardId", fallbackCardId);
+        fallback.put("zone", normalizeZone(fallbackZone));
+        fallback.put("name", null);
+        fallback.put("cardType", null);
+        fallback.put("imageUrl", null);
+        fallback.put("levelType", null);
+        return fallback;
+    }
+
+    private Map<String, Object> mergeEffectSummaryForChecks(
+        Map<String, Object> primary,
+        List<Map<String, Object>> additionalEffects
+    ) {
+        if ((additionalEffects == null || additionalEffects.isEmpty()) && primary != null) {
+            return primary;
+        }
+        Map<String, Object> merged = new LinkedHashMap<>();
+        List<Object> executed = new ArrayList<>();
+        if (primary != null) {
+            executed.add(primary);
+        }
+        if (additionalEffects != null) {
+            executed.addAll(additionalEffects);
+        }
+        merged.put("executedEffects", executed);
+        return merged;
+    }
+
+    private List<Map<String, Object>> buildTriggeredResolutionOrder(
+        String firstStep,
+        int firstPriority,
+        Map<String, Object> firstSummary,
+        String secondStep,
+        int secondPriority,
+        Map<String, Object> secondSummary
+    ) {
+        List<Map<String, Object>> order = new ArrayList<>();
+        Map<String, Object> first = new LinkedHashMap<>();
+        first.put("step", firstStep);
+        first.put("priority", firstPriority);
+        first.put("applied", firstSummary != null);
+        order.add(first);
+
+        Map<String, Object> second = new LinkedHashMap<>();
+        second.put("step", secondStep);
+        second.put("priority", secondPriority);
+        second.put("applied", secondSummary != null);
+        order.add(second);
+        return order;
+    }
+
+    private String toJson(Map<String, Object> payload) {
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("無法序列化效果確認內容", e);
+        }
+    }
+
+    private String normalizeZone(Object value) {
+        if (value == null) {
+            return "";
+        }
+        return String.valueOf(value).trim().toUpperCase(Locale.ROOT);
+    }
+
+    private String asString(Object value) {
+        if (value == null) {
+            return null;
+        }
+        String text = String.valueOf(value);
+        return StringUtils.hasText(text) ? text : null;
+    }
+
+    private Long asLong(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        try {
+            return Long.parseLong(String.valueOf(value));
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private int asInt(Object value) {
+        if (value == null) {
+            return 0;
+        }
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value));
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+
+    private boolean toBoolean(Object value) {
+        if (value == null) {
+            return false;
+        }
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        return Boolean.parseBoolean(String.valueOf(value));
+    }
+
+    private List<String> toStringList(Object value) {
+        if (value instanceof List<?> list) {
+            List<String> result = new ArrayList<>();
+            for (Object item : list) {
+                String text = asString(item);
+                if (StringUtils.hasText(text)) {
+                    result.add(text);
+                }
+            }
+            return result;
+        }
+        return List.of();
+    }
+
+    private List<Long> toLongList(Object value) {
+        if (value instanceof List<?> list) {
+            List<Long> result = new ArrayList<>();
+            for (Object item : list) {
+                Long parsed = asLong(item);
+                if (parsed != null) {
+                    result.add(parsed);
+                }
+            }
+            return result;
+        }
+        return List.of();
+    }
+
+    private record PendingInteractionDecision(
+        Long decisionId,
+        String decisionType
+    ) {
+    }
+}
