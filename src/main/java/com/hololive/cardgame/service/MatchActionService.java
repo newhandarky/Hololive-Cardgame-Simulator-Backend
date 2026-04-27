@@ -91,6 +91,7 @@ public class MatchActionService {
     private final EndTurnApplicationService endTurnApplicationService;
     private final BloomApplicationService bloomApplicationService;
     private final CollabApplicationService collabApplicationService;
+    private final AttachCheerApplicationService attachCheerApplicationService;
     private final CollabEffectResolutionService collabEffectResolutionService;
     private final BloomEffectResolutionService bloomEffectResolutionService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
@@ -122,6 +123,7 @@ public class MatchActionService {
         EndTurnApplicationService endTurnApplicationService,
         BloomApplicationService bloomApplicationService,
         CollabApplicationService collabApplicationService,
+        AttachCheerApplicationService attachCheerApplicationService,
         CollabEffectResolutionService collabEffectResolutionService,
         BloomEffectResolutionService bloomEffectResolutionService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
@@ -147,6 +149,7 @@ public class MatchActionService {
         this.endTurnApplicationService = endTurnApplicationService;
         this.bloomApplicationService = bloomApplicationService;
         this.collabApplicationService = collabApplicationService;
+        this.attachCheerApplicationService = attachCheerApplicationService;
         this.collabEffectResolutionService = collabEffectResolutionService;
         this.bloomEffectResolutionService = bloomEffectResolutionService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
@@ -2228,10 +2231,6 @@ public class MatchActionService {
      */
     @Transactional
     public void attachCheer(Long matchId, Long userId, AttachCheerActionRequest request) {
-        ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN));
-        if (context.blockedByPendingInteraction()) {
-            return;
-        }
         Long cheerCardInstanceId = requirePositiveId(
             request == null ? null : request.getCheerCardInstanceId(),
             "cheerCardInstanceId"
@@ -2240,85 +2239,39 @@ public class MatchActionService {
             request == null ? null : request.getTargetHolomemCardInstanceId(),
             "targetHolomemCardInstanceId"
         );
-
-        Long matchHolomemId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND match_card_id = ?
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
+        int requestedTurnNumber = loadRequestedTurnNumberSnapshot(matchId);
+        AttachCheerAction action = AttachCheerAction.fromApi(
             matchId,
             userId,
-            targetHolomemCardInstanceId
-        );
-        if (matchHolomemId == null) {
-            throw new IllegalArgumentException("找不到要附加 Cheer 的 Holomen");
-        }
-
-        Map<String, Object> cheerCard = loadOwnedCardInstance(matchId, userId, cheerCardInstanceId);
-        String sourceZone = normalizeZone(cheerCard.get("zone"));
-        if (!CHEER_SOURCE_ZONES.contains(sourceZone)) {
-            throw new IllegalStateException("Cheer 只能從 HAND 或 CHEER_DECK 附加");
-        }
-        String cheerCardId = asString(cheerCard.get("card_id"));
-        Integer cheerCount = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM cheer_cards WHERE card_id = ?",
-            Integer.class,
-            cheerCardId
-        );
-        if (cheerCount == null || cheerCount == 0) {
-            throw new IllegalStateException("指定卡片不是 Cheer 卡");
-        }
-
-        int updated = jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET zone = 'STAGE',
-                order_index = NULL,
-                is_face_down = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('HAND','CHEER_DECK')
-            """,
             cheerCardInstanceId,
-            matchId,
-            userId
+            targetHolomemCardInstanceId,
+            requestedTurnNumber,
+            null
         );
-        if (updated != 1) {
-            throw new IllegalStateException("附加 Cheer 失敗，請重新整理對戰狀態");
-        }
+        AttachCheerValidationContext validationContext = attachCheerApplicationService.validate(action);
+        AttachCheerResolutionResult result = attachCheerApplicationService.resolveState(action, validationContext);
+        attachCheerApplicationService.dispatchResolvedEvents(action, result);
 
-        jdbcTemplate.update(
-            """
-            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
-            VALUES (?, ?, ?, FALSE)
-            """,
-            matchHolomemId,
-            cheerCardInstanceId,
-            cheerCardId
-        );
-
-        context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
+        result.match().setCurrentPhase(MatchPhase.MAIN.name());
+        touchUpdatedAt(result.match());
+        matchRepository.saveAndFlush(result.match());
 
         appendAction(
-            context.match,
+            result.match(),
             userId,
             "ATTACH_CHEER",
             toJson(
                 Map.of(
-                    "cheerCardInstanceId", cheerCardInstanceId,
-                    "cheerCardId", cheerCardId,
-                    "targetHolomemCardInstanceId", targetHolomemCardInstanceId
+                    "cheerCardInstanceId", result.cheerCardInstanceId(),
+                    "cheerCardId", result.cheerCardId(),
+                    "sourceFromZone", result.sourceZone(),
+                    "targetHolomemId", result.targetHolomemId(),
+                    "targetHolomemCardInstanceId", result.targetHolomemCardInstanceId(),
+                    "attachmentId", result.attachmentId(),
+                    "idempotencyKey", action.idempotencyKey()
                 )
             ),
-            context.turnNumber
+            result.turnNumber()
         );
     }
 
