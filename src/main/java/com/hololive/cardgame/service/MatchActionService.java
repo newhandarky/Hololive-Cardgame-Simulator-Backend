@@ -1796,6 +1796,7 @@ public class MatchActionService {
         CollabResolutionResult resolutionResult = collabApplicationService.resolveState(action, validationContext);
         CollabSourceHolomemSnapshot currentHolomem = validationContext.sourceHolomem();
         CollabEffectResolution effectResolution = collabEffectResolutionService.resolve(action, resolutionResult);
+        collabApplicationService.dispatchResolvedEvents(action, resolutionResult, effectResolution);
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("cardInstanceId", cardInstanceId);

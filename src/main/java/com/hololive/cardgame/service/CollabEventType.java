@@ -1,0 +1,9 @@
+package com.hololive.cardgame.service;
+
+public enum CollabEventType {
+    COLLAB_REQUEST_ACCEPTED,
+    COLLAB_RESOLVED,
+    COLLAB_EFFECT_PREVIEW_CREATED,
+    COLLAB_GIFT_PREVIEW_CREATED,
+    COLLAB_TRIGGER_CONFIRM_REQUIRED
+}

@@ -18,7 +18,15 @@ class CollabApplicationServiceTest {
     private final CollabLegacyResolutionBridge bridge = mock(CollabLegacyResolutionBridge.class);
     private final CollabActionValidator validator = mock(CollabActionValidator.class);
     private final CollabActionResolver resolver = mock(CollabActionResolver.class);
-    private final CollabApplicationService service = new CollabApplicationService(bridge, validator, resolver);
+    private final CollabEventFactory eventFactory = mock(CollabEventFactory.class);
+    private final CollabTriggerDispatcher triggerDispatcher = mock(CollabTriggerDispatcher.class);
+    private final CollabApplicationService service = new CollabApplicationService(
+        bridge,
+        validator,
+        resolver,
+        eventFactory,
+        triggerDispatcher
+    );
 
     @Test
     void validateShouldReturnContextWhenValidatorAllowsAction() {
