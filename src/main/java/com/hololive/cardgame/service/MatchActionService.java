@@ -89,6 +89,7 @@ public class MatchActionService {
     private final MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService;
     private final MatchTurnLifecycleService matchTurnLifecycleService;
     private final EndTurnApplicationService endTurnApplicationService;
+    private final BloomApplicationService bloomApplicationService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -116,6 +117,7 @@ public class MatchActionService {
         MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService,
         MatchTurnLifecycleService matchTurnLifecycleService,
         EndTurnApplicationService endTurnApplicationService,
+        BloomApplicationService bloomApplicationService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
@@ -137,6 +139,7 @@ public class MatchActionService {
         this.matchTurnEffectMaintenanceService = matchTurnEffectMaintenanceService;
         this.matchTurnLifecycleService = matchTurnLifecycleService;
         this.endTurnApplicationService = endTurnApplicationService;
+        this.bloomApplicationService = bloomApplicationService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -373,125 +376,21 @@ public class MatchActionService {
             request == null ? null : request.getTargetHolomemCardInstanceId(),
             "targetHolomemCardInstanceId"
         );
-
-        Map<String, Object> bloomCard = loadOwnedCardInstance(matchId, userId, bloomCardInstanceId);
-        String sourceZone = normalizeZone(bloomCard.get("zone"));
-        if (!"HAND".equals(sourceZone)) {
-            throw new IllegalStateException("BLOOM 卡必須從手牌使用");
-        }
-        String bloomCardId = asString(bloomCard.get("card_id"));
-        Map<String, Object> bloomCardSpec = loadMemberCardSpec(bloomCardId);
-        if (bloomCardSpec == null) {
-            throw new IllegalStateException("只有 MEMBER 卡可以執行 BLOOM");
-        }
-        String bloomCardName = asString(bloomCardSpec.get("name"));
-        String bloomLevel = normalizeLevel(asString(bloomCardSpec.get("level_type")));
-        int bloomHp = asInt(bloomCardSpec.get("hp"));
-        if (isSpecialOrUnbloomableLevel(bloomLevel)) {
-            throw new IllegalStateException("此卡不可作為 BLOOM 卡");
-        }
-        if (bloomHp <= 0) {
-            throw new IllegalStateException("BLOOM 卡片缺少有效 HP");
-        }
-
-        BloomTarget target = loadOwnedBloomTarget(matchId, userId, targetHolomemCardInstanceId);
-        if (target == null) {
-            throw new GameRuleException(GameErrorCode.BLOOM_NO_TARGET, "找不到要 BLOOM 的目標 Holomem");
-        }
-        if (isStageActionLocked(matchId, userId, context.turnNumber, "BLOOM", target.zone(), target.holomemId())) {
-            throw new GameRuleException(GameErrorCode.STAGE_ACTION_LOCKED, "目前效果限制：不可 Bloom");
-        }
-        if (isSpecialOrUnbloomableLevel(target.topLevelType())) {
-            throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "Spot Holomem 不能作為 BLOOM 目標");
-        }
-        if (target.enteredTurnNumber() == context.turnNumber) {
-            throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "本回合剛上場的 Holomem 不能 BLOOM");
-        }
-        Long extraBloomAllowanceId = null;
-        if (target.lastBloomTurn() != null && target.lastBloomTurn() == context.turnNumber) {
-            extraBloomAllowanceId = findExtraBloomAllowanceId(
-                matchId,
-                userId,
-                context.turnNumber,
-                target.holomemId()
-            );
-            if (extraBloomAllowanceId == null) {
-                throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "此 Holomem 本回合已執行過 BLOOM");
-            }
-        }
-        if (!StringUtils.hasText(target.topCardName()) || !target.topCardName().equals(bloomCardName)) {
-            throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "BLOOM 需要與目標 Holomem 同名");
-        }
-        boolean bloomLevelOverrideApplied = false;
-        if (!isBloomLevelNextStep(target.topLevelType(), bloomLevel)) {
-            boolean canIgnoreBloomLevel = canIgnoreBloomLevelByPassiveGift(
-                matchId,
-                userId,
-                target,
-                bloomLevel,
-                bloomCardName
-            );
-            if (!canIgnoreBloomLevel) {
-                throw new GameRuleException(
-                    GameErrorCode.BLOOM_INVALID_TARGET,
-                    "BLOOM 只能依序遞進：DEBUT→FIRST、FIRST→SECOND、SECOND→BUZZ"
-                );
-            }
-            bloomLevelOverrideApplied = true;
-        }
-        if (bloomHp < target.damageTaken()) {
-            throw new GameRuleException(GameErrorCode.BLOOM_INVALID_TARGET, "BLOOM 卡 HP 不足以承受目標目前傷害");
-        }
-
-        int moved = jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET zone = 'STAGE',
-                order_index = NULL,
-                is_face_down = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'HAND'
-            """,
-            bloomCardInstanceId,
+        BloomAction action = BloomAction.fromApi(
             matchId,
-            userId
-        );
-        if (moved != 1) {
-            throw new IllegalStateException("BLOOM 失敗：卡片移動異常");
-        }
-
-        recordHolomemStackCard(target.holomemId(), bloomCardInstanceId);
-        int updated = jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET match_card_id = ?,
-                card_id = ?,
-                current_level = ?,
-                last_bloom_turn = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-            """,
+            userId,
             bloomCardInstanceId,
-            bloomCardId,
-            bloomLevel,
+            targetHolomemCardInstanceId,
             context.turnNumber,
-            target.holomemId(),
-            matchId,
-            userId
+            null
         );
-        if (updated != 1) {
-            throw new IllegalStateException("BLOOM 失敗：目標 Holomem 更新異常");
-        }
-        if (extraBloomAllowanceId != null) {
-            consumeExtraBloomAllowance(extraBloomAllowanceId, matchId, userId);
-        }
-
-        int stackDepth = countHolomemStackDepth(target.holomemId());
+        BloomValidationContext validationContext = bloomApplicationService.validate(action);
+        BloomResolutionResult stateResolution = bloomApplicationService.resolveState(action, validationContext);
+        BloomTargetSnapshot target = validationContext.target();
+        String bloomCardId = stateResolution.sourceCardId();
+        String bloomLevel = stateResolution.sourceLevelType();
+        boolean bloomLevelOverrideApplied = stateResolution.bloomLevelOverrideApplied();
+        int stackDepth = stateResolution.stackDepth();
         Map<String, Object> passiveGiftSummary = matchTriggeredCardEffectService.applyPassiveGiftExtraBloomAllowanceOnBloom(
             matchId,
             userId,
@@ -572,6 +471,28 @@ public class MatchActionService {
             toJson(payload),
             context.turnNumber
         );
+        BloomResolutionResult resolutionResult = new BloomResolutionResult(
+            context.match,
+            userId,
+            context.turnNumber,
+            bloomCardInstanceId,
+            bloomCardId,
+            bloomLevel,
+            target.holomemId(),
+            targetHolomemCardInstanceId,
+            target.topCardId(),
+            target.topLevelType(),
+            target.zone(),
+            target.damageTaken(),
+            stackDepth,
+            bloomLevelOverrideApplied,
+            target.extraBloomAllowanceId(),
+            passiveGiftSummary,
+            bloomEffectSummary,
+            triggerSummary,
+            triggerConfirmDecision == null ? null : triggerConfirmDecision.decisionId()
+        );
+        bloomApplicationService.dispatchResolvedEvents(action, resolutionResult);
         if (!bloomPreview.hasEffect()) {
             if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, bloomEffectSummary)) {
                 touchUpdatedAt(context.match);
