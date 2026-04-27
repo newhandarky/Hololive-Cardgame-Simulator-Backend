@@ -90,6 +90,7 @@ public class MatchActionService {
     private final MatchTurnLifecycleService matchTurnLifecycleService;
     private final EndTurnApplicationService endTurnApplicationService;
     private final BloomApplicationService bloomApplicationService;
+    private final CollabApplicationService collabApplicationService;
     private final BloomEffectResolutionService bloomEffectResolutionService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
@@ -119,6 +120,7 @@ public class MatchActionService {
         MatchTurnLifecycleService matchTurnLifecycleService,
         EndTurnApplicationService endTurnApplicationService,
         BloomApplicationService bloomApplicationService,
+        CollabApplicationService collabApplicationService,
         BloomEffectResolutionService bloomEffectResolutionService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
@@ -142,6 +144,7 @@ public class MatchActionService {
         this.matchTurnLifecycleService = matchTurnLifecycleService;
         this.endTurnApplicationService = endTurnApplicationService;
         this.bloomApplicationService = bloomApplicationService;
+        this.collabApplicationService = collabApplicationService;
         this.bloomEffectResolutionService = bloomEffectResolutionService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
@@ -1686,6 +1689,10 @@ public class MatchActionService {
         if (!Set.of("CENTER", "COLLAB").contains(targetZone)) {
             throw new IllegalArgumentException("targetZone 只支援 CENTER 或 COLLAB");
         }
+        if ("COLLAB".equals(targetZone)) {
+            executeCollabAction(matchId, userId, context, cardInstanceId);
+            return;
+        }
         if (isStageActionLocked(matchId, userId, context.turnNumber, "MOVE_STAGE", null, null)) {
             throw new GameRuleException(GameErrorCode.STAGE_ACTION_LOCKED, "目前效果限制：不可移動");
         }
@@ -1876,6 +1883,115 @@ public class MatchActionService {
                 matchRepository.saveAndFlush(context.match);
             }
             enqueueLifeLossSendCheerInteractions(context.match, matchId, collabEffectSummary, context.turnNumber);
+        }
+    }
+
+    private void executeCollabAction(Long matchId, Long userId, ActionContext context, Long cardInstanceId) {
+        CollabAction action = CollabAction.fromApi(matchId, userId, cardInstanceId, context.turnNumber, null);
+        CollabValidationContext validationContext = collabApplicationService.validate(action);
+        CollabResolutionResult resolutionResult = collabApplicationService.resolveState(action, validationContext);
+        CollabSourceHolomemSnapshot currentHolomem = validationContext.sourceHolomem();
+
+        Map<String, Object> collabEffectSummary = null;
+        List<Map<String, Object>> collabGiftTriggeredEffects = List.of();
+        Map<String, Object> collabGiftEffectSummary = null;
+        Map<String, Object> collabTriggerSummary = null;
+        MatchEffectService.TriggeredEffectPreview collabPreview = null;
+        FollowupInteractionDecision collabTriggerConfirmDecision = null;
+
+        collabPreview = matchTriggeredCardEffectService.previewCollabTriggeredEffect(
+            matchId,
+            userId,
+            currentHolomem.cardId(),
+            cardInstanceId
+        );
+        collabEffectSummary = buildTriggeredEffectDeferredSummary("COLLAB", collabPreview);
+        collabGiftTriggeredEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnCollab(
+            matchId,
+            userId,
+            cardInstanceId,
+            context.turnNumber
+        );
+        if (!collabGiftTriggeredEffects.isEmpty()) {
+            collabGiftEffectSummary = buildGiftTriggeredEffectDeferredSummary(collabGiftTriggeredEffects);
+        }
+        collabTriggerSummary = matchEventHookService.onHolomemCollab(
+            matchId,
+            userId,
+            currentHolomem.cardId(),
+            cardInstanceId
+        );
+        if (collabPreview.hasEffect() || !collabGiftTriggeredEffects.isEmpty()) {
+            collabTriggerConfirmDecision = createCollabTriggeredEffectConfirmPendingInteraction(
+                matchId,
+                userId,
+                cardInstanceId,
+                currentHolomem.cardId(),
+                collabPreview,
+                collabGiftTriggeredEffects,
+                context.turnNumber
+            );
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("cardInstanceId", cardInstanceId);
+        payload.put("cardId", currentHolomem.cardId());
+        payload.put("sourceZone", resolutionResult.sourceZone());
+        payload.put("targetZone", resolutionResult.targetZone());
+        payload.put("idempotencyKey", action.idempotencyKey());
+        if (resolutionResult.holopowerCardInstanceId() != null) {
+            payload.put("holopowerCardInstanceId", resolutionResult.holopowerCardInstanceId());
+        }
+        if (collabEffectSummary != null) {
+            payload.put("collabEffect", collabEffectSummary);
+        }
+        if (collabGiftEffectSummary != null && toBoolean(collabGiftEffectSummary.get("deferred"))) {
+            payload.put("collabGiftEffect", collabGiftEffectSummary);
+        }
+        if (collabTriggerConfirmDecision != null) {
+            putFollowupDecisionPayload(payload, collabTriggerConfirmDecision);
+        }
+        if (collabTriggerSummary != null) {
+            payload.put("triggerSummary", collabTriggerSummary);
+        }
+        payload.put(
+            "triggerResolutionOrder",
+            buildTriggeredResolutionOrder(
+                "COLLAB_TRIGGER",
+                100,
+                mergeEffectSummaryForChecks(
+                    collabEffectSummary,
+                    collabGiftEffectSummary == null ? List.of() : List.of(collabGiftEffectSummary)
+                ),
+                "COLLAB_EVENT_HOOK",
+                200,
+                collabTriggerSummary
+            )
+        );
+        appendAction(resolutionResult.match(), userId, "COLLAB", toJson(payload), context.turnNumber);
+        if (collabEffectSummary != null && (collabPreview == null || !collabPreview.hasEffect())) {
+            if (evaluateCardEffectMatchFinish(resolutionResult.match(), userId, context.turnNumber, collabEffectSummary)) {
+                touchUpdatedAt(resolutionResult.match());
+                matchRepository.saveAndFlush(resolutionResult.match());
+            } else if (
+                hasLifeReduced(collabEffectSummary) &&
+                    evaluateLifeDefeat(resolutionResult.match(), userId, context.turnNumber)
+            ) {
+                touchUpdatedAt(resolutionResult.match());
+                matchRepository.saveAndFlush(resolutionResult.match());
+            } else if (
+                hasHolomemDowned(collabEffectSummary) &&
+                    evaluateNoHolomemDefeat(resolutionResult.match(), userId, context.turnNumber)
+            ) {
+                touchUpdatedAt(resolutionResult.match());
+                matchRepository.saveAndFlush(resolutionResult.match());
+            }
+            enqueueLifeLossSendCheerInteractions(
+                resolutionResult.match(),
+                matchId,
+                collabEffectSummary,
+                context.turnNumber
+            );
         }
     }
 
