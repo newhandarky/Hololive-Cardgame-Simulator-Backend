@@ -88,6 +88,7 @@ public class MatchActionService {
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
     private final MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService;
     private final MatchTurnLifecycleService matchTurnLifecycleService;
+    private final EndTurnApplicationService endTurnApplicationService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -114,6 +115,7 @@ public class MatchActionService {
         MatchTriggeredCombatEffectService matchTriggeredCombatEffectService,
         MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService,
         MatchTurnLifecycleService matchTurnLifecycleService,
+        EndTurnApplicationService endTurnApplicationService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
@@ -134,6 +136,7 @@ public class MatchActionService {
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
         this.matchTurnEffectMaintenanceService = matchTurnEffectMaintenanceService;
         this.matchTurnLifecycleService = matchTurnLifecycleService;
+        this.endTurnApplicationService = endTurnApplicationService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -4502,46 +4505,24 @@ public class MatchActionService {
      */
     @Transactional
     public void endTurn(Long matchId, Long userId) {
-        ActionContext context = loadActionContext(
+        EndTurnAction action = EndTurnAction.fromLegacyApi(
             matchId,
             userId,
-            Set.of(MatchPhase.END)
+            loadRequestedTurnNumberSnapshot(matchId)
         );
-        if (context.blockedByPendingInteraction()) {
-            return;
+        endTurnApplicationService.handle(action);
+    }
+
+    private int loadRequestedTurnNumberSnapshot(Long matchId) {
+        if (matchId == null) {
+            return 0;
         }
-        List<String> missingActions = new ArrayList<>();
-        if (!hasDrawTurnAction(matchId, userId, context.turnNumber)) {
-            missingActions.add("抽卡");
-        }
-        if (canPerformTurnCheerAction(matchId, userId) && !hasTurnCheerAction(matchId, userId, context.turnNumber)) {
-            missingActions.add("發送吶喊");
-        }
-        if (!missingActions.isEmpty()) {
-            throw new GameRuleException(
-                GameErrorCode.TURN_ACTIONS_INCOMPLETE,
-                "回合尚未完成：" + String.join("、", missingActions) + "。請先完成後再結束回合"
-            );
-        }
-        int clearedEffectCount = matchTurnEffectMaintenanceService.clearExpiredTurnEffects(matchId, context.turnNumber);
-        int resetRestedCount = matchTurnLifecycleService.resetRestedHolomemsForTurnStart(
-            matchId,
-            context.opponentUserId,
-            context.turnNumber
+        Integer turnNumber = jdbcTemplate.queryForObject(
+            "SELECT turn_number FROM matches WHERE id = ?",
+            Integer.class,
+            matchId
         );
-        Map<String, Object> centerReplenishSummary = matchTurnLifecycleService.resolveEndTurnCenterReplenishCycle(
-            matchId,
-            userId
-        );
-        matchTurnLifecycleService.completeEndTurn(
-            context.match,
-            userId,
-            context.opponentUserId,
-            context.turnNumber,
-            clearedEffectCount,
-            resetRestedCount,
-            centerReplenishSummary
-        );
+        return turnNumber == null ? 0 : turnNumber;
     }
 
     /**

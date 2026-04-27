@@ -109,6 +109,39 @@ public class MatchTurnLifecycleService {
         }
     }
 
+    public void appendEndTurnAction(
+        MatchEntity match,
+        Long actingUserId,
+        int turnNumber,
+        Map<String, Object> payload
+    ) {
+        appendAction(match, actingUserId, "END_TURN", toJson(payload), turnNumber);
+    }
+
+    public void appendInteractionPendingAction(
+        MatchEntity match,
+        Long userId,
+        int turnNumber,
+        Long interactionId,
+        String interactionType,
+        String sourceActionType
+    ) {
+        if (match == null || interactionId == null || interactionId <= 0) {
+            return;
+        }
+        Map<String, Object> interactionPayload = new LinkedHashMap<>();
+        interactionPayload.put("interactionId", interactionId);
+        interactionPayload.put("interactionType", interactionType);
+        interactionPayload.put("sourceActionType", sourceActionType);
+        appendAction(
+            match,
+            userId,
+            "INTERACTION_PENDING",
+            toJson(interactionPayload),
+            turnNumber
+        );
+    }
+
     public void completeOpeningSetup(MatchEntity match, Long userId, int turnNumber) {
         if (match == null || userId == null) {
             throw new IllegalArgumentException("OPENING_SETUP_DONE 結算流程缺少必要參數");
@@ -457,7 +490,7 @@ public class MatchTurnLifecycleService {
         return summary;
     }
 
-    private Long createTurnStartPendingInteraction(Long matchId, Long userId, int turnNumber) {
+    public Long createTurnStartPendingInteraction(Long matchId, Long userId, int turnNumber) {
         if (matchId == null || userId == null || userId <= 0) {
             return null;
         }
