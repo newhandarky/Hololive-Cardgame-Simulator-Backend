@@ -83,6 +83,7 @@ public class MatchActionService {
     private final PendingDownEventContextExtractor pendingDownEventContextExtractor;
     private final AttackPostTriggerSectionBuilder attackPostTriggerSectionBuilder;
     private final AttackPostTriggerConfirmMessageBuilder attackPostTriggerConfirmMessageBuilder;
+    private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -173,6 +174,7 @@ public class MatchActionService {
         this.pendingDownEventContextExtractor = new PendingDownEventContextExtractor();
         this.attackPostTriggerSectionBuilder = new AttackPostTriggerSectionBuilder();
         this.attackPostTriggerConfirmMessageBuilder = new AttackPostTriggerConfirmMessageBuilder();
+        this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5640,41 +5642,7 @@ public class MatchActionService {
     }
 
     private List<Map<String, Object>> buildGiftTriggerPayloads(List<Map<String, Object>> giftTriggeredEffects) {
-        List<Map<String, Object>> giftTriggers = new ArrayList<>();
-        if (giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
-            return giftTriggers;
-        }
-        for (Map<String, Object> trigger : giftTriggeredEffects) {
-            if (trigger == null || trigger.isEmpty()) {
-                continue;
-            }
-            Map<String, Object> triggerPayload = new LinkedHashMap<>();
-            triggerPayload.put("triggerType", normalizeZone(trigger.get("triggerType")));
-            triggerPayload.put("sourceCardInstanceId", asLong(trigger.get("sourceCardInstanceId")));
-            triggerPayload.put("triggerTargetCardInstanceId", asLong(trigger.get("triggerTargetCardInstanceId")));
-            triggerPayload.put("giftHolderHolomemId", asLong(trigger.get("giftHolderHolomemId")));
-            triggerPayload.put("giftHolderCardInstanceId", asLong(trigger.get("giftHolderCardInstanceId")));
-            triggerPayload.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
-            triggerPayload.put("giftHolderZone", asString(trigger.get("giftHolderZone")));
-            triggerPayload.put(
-                "giftHolderAttachedCheerCardInstanceIds",
-                toLongList(trigger.get("giftHolderAttachedCheerCardInstanceIds"))
-            );
-            triggerPayload.put("giftHolderAttachedCheerCardIds", toStringList(trigger.get("giftHolderAttachedCheerCardIds")));
-            triggerPayload.put("giftHolderStackCardInstanceIds", toLongList(trigger.get("giftHolderStackCardInstanceIds")));
-            triggerPayload.put("giftHolderStackCardIds", toStringList(trigger.get("giftHolderStackCardIds")));
-            triggerPayload.put("selectionRequired", toBoolean(trigger.get("selectionRequired")));
-            triggerPayload.put("selectionEffectType", asString(trigger.get("selectionEffectType")));
-            triggerPayload.put("selectionMinSelect", asInt(trigger.get("selectionMinSelect")));
-            triggerPayload.put("selectionMaxSelect", asInt(trigger.get("selectionMaxSelect")));
-            triggerPayload.put(
-                "selectionCandidateCardInstanceIds",
-                toLongList(trigger.get("selectionCandidateCardInstanceIds"))
-            );
-            triggerPayload.put("rawText", asString(trigger.get("rawText")));
-            giftTriggers.add(triggerPayload);
-        }
-        return giftTriggers;
+        return giftTriggerPendingPayloadBuilder.buildGiftTriggerPayloads(giftTriggeredEffects);
     }
 
     private void appendGiftSelectionPendingContext(
