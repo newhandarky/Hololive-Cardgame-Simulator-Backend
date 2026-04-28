@@ -7285,7 +7285,7 @@ public class MatchActionService {
      * 更新 match.updatedAt 時戳。
      */
     private void touchUpdatedAt(MatchEntity match) {
-        match.setUpdatedAt(LocalDateTime.now());
+        matchTimestampService.touchUpdatedAt(match);
     }
 
     private record ActionContext(
