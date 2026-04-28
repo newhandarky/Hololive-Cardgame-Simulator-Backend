@@ -97,6 +97,7 @@ public class MatchActionService {
     private final AttackDefenderGiftFollowupService attackDefenderGiftFollowupService;
     private final AttackPostTriggerPendingService attackPostTriggerPendingService;
     private final AttackRestAndPayloadService attackRestAndPayloadService;
+    private final AttackActionLogService attackActionLogService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -171,6 +172,7 @@ public class MatchActionService {
         this.attackDefenderGiftFollowupService = attackDefenderGiftFollowupService;
         this.attackPostTriggerPendingService = new AttackPostTriggerPendingService(new AttackArtPendingDecisionCreator());
         this.attackRestAndPayloadService = new AttackRestAndPayloadService();
+        this.attackActionLogService = new AttackActionLogService(new AttackArtActionWriter());
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -2511,13 +2513,12 @@ public class MatchActionService {
         );
         Map<String, Object> payload = restAndPayloadResult.payload();
 
-        appendAction(
-            context.match,
+        attackActionLogService.appendAttackArt(AttackActionLogContext.attackArt(
+            matchId,
             userId,
-            "ATTACK_ART",
-            toJson(payload),
-            context.turnNumber
-        );
+            context.turnNumber,
+            toJson(payload)
+        ));
         Map<String, Object> effectSummaryForChecks = restAndPayloadResult.effectSummaryForChecks();
         if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, effectSummaryForChecks)) {
             touchUpdatedAt(context.match);
@@ -5774,6 +5775,32 @@ public class MatchActionService {
         }
     }
 
+    private class AttackArtActionWriter implements AttackActionLogService.AttackActionWriter {
+
+        @Override
+        public AttackActionLogResult appendAction(
+            Long matchId,
+            Long userId,
+            String actionType,
+            String payloadJson,
+            int turnNumber
+        ) {
+            MatchActionEntity action = MatchActionService.this.appendAction(
+                matchId,
+                userId,
+                actionType,
+                payloadJson,
+                turnNumber
+            );
+            return new AttackActionLogResult(
+                action.getId(),
+                action.getActionOrder(),
+                action.getActionType(),
+                action.getPayload()
+            );
+        }
+    }
+
     /**
      * 建立 ATTACK_ART 後續觸發確認互動（Gift + Down Event）。
      */
@@ -7464,22 +7491,32 @@ public class MatchActionService {
     /**
      * 寫入一筆 match_actions 紀錄並自動計算 action_order。
      */
-    private void appendAction(
+    private MatchActionEntity appendAction(
         MatchEntity match,
         Long userId,
         String actionType,
         String payload,
         int turnNumber
     ) {
+        return appendAction(match.getId(), userId, actionType, payload, turnNumber);
+    }
+
+    private MatchActionEntity appendAction(
+        Long matchId,
+        Long userId,
+        String actionType,
+        String payload,
+        int turnNumber
+    ) {
         MatchActionEntity action = new MatchActionEntity();
-        action.setMatchId(match.getId());
+        action.setMatchId(matchId);
         action.setUserId(userId);
         action.setActionType(actionType);
         action.setPayload(payload);
         action.setTurnNumber(turnNumber);
-        action.setActionOrder(matchActionRepository.findMaxActionOrderByTurn(match.getId(), turnNumber) + 1);
+        action.setActionOrder(matchActionRepository.findMaxActionOrderByTurn(matchId, turnNumber) + 1);
         action.setExecutedAt(LocalDateTime.now());
-        matchActionRepository.save(action);
+        return matchActionRepository.save(action);
     }
 
     /**
