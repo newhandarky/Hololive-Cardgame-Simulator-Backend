@@ -14,6 +14,4 @@ interface AttackArtApplicationAdapterDependencies {
 
     List<Map<String, Object>> loadSelfDownedFanSupportSnapshots(Long matchId, Long ownerUserId, Long holderHolomemId);
 
-    List<Map<String, Object>> extractExecutedEffectSummaries(Map<String, Object> effectSummary);
-
 }

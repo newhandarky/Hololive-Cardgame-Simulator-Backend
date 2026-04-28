@@ -21,6 +21,7 @@ class AttackArtApplicationAdapterFactory {
     private final AttackActionLogService attackActionLogService;
     private final AttackPayloadJsonService attackPayloadJsonService;
     private final AttackPendingDecisionConversionService attackPendingDecisionConversionService;
+    private final AttackEffectSummaryExtractor attackEffectSummaryExtractor;
     private final AttackFinishCheckService attackFinishCheckService;
     private final AttackEffectFollowupService attackEffectFollowupService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
@@ -41,6 +42,7 @@ class AttackArtApplicationAdapterFactory {
         AttackActionLogService attackActionLogService,
         AttackPayloadJsonService attackPayloadJsonService,
         AttackPendingDecisionConversionService attackPendingDecisionConversionService,
+        AttackEffectSummaryExtractor attackEffectSummaryExtractor,
         AttackFinishCheckService attackFinishCheckService,
         AttackEffectFollowupService attackEffectFollowupService,
         MatchEffectCombatModifierService matchEffectCombatModifierService,
@@ -60,6 +62,7 @@ class AttackArtApplicationAdapterFactory {
         this.attackActionLogService = attackActionLogService;
         this.attackPayloadJsonService = attackPayloadJsonService;
         this.attackPendingDecisionConversionService = attackPendingDecisionConversionService;
+        this.attackEffectSummaryExtractor = attackEffectSummaryExtractor;
         this.attackFinishCheckService = attackFinishCheckService;
         this.attackEffectFollowupService = attackEffectFollowupService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
@@ -644,7 +647,7 @@ class AttackArtApplicationAdapterFactory {
             additionalEffectSummaries.addAll(postDamageResult.officialCardArtExtraEffects());
             additionalEffectSummaries.addAll(postDamageResult.officialOshiArtReactiveEffects());
             additionalEffectSummaries.addAll(
-                dependencies.extractExecutedEffectSummaries(defenderGiftResult.officialOshiSelfDownedSummary())
+                attackEffectSummaryExtractor.extractExecutedEffectSummaries(defenderGiftResult.officialOshiSelfDownedSummary())
             );
             additionalEffectSummaries.add(downStage.result().artDownTriggeredEffectSummary());
             if (!preDamageResult.hbp02040LifeLoss().isEmpty()) {

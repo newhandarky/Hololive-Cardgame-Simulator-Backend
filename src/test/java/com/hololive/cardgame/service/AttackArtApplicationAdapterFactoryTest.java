@@ -34,6 +34,7 @@ class AttackArtApplicationAdapterFactoryTest {
     private final AttackPayloadJsonService attackPayloadJsonService = mock(AttackPayloadJsonService.class);
     private final AttackPendingDecisionConversionService attackPendingDecisionConversionService =
         new AttackPendingDecisionConversionService();
+    private final AttackEffectSummaryExtractor attackEffectSummaryExtractor = new AttackEffectSummaryExtractor();
     private final AttackFinishCheckService attackFinishCheckService = mock(AttackFinishCheckService.class);
     private final AttackEffectFollowupService attackEffectFollowupService = mock(AttackEffectFollowupService.class);
     private final MatchEffectCombatModifierService matchEffectCombatModifierService =
@@ -126,7 +127,6 @@ class AttackArtApplicationAdapterFactoryTest {
         );
         when(dependencies.hasAvailableArtAttacker(100L, 10L, 3)).thenReturn(false);
         when(jdbcTemplate.update(anyString(), any(), any(), any())).thenReturn(1);
-        when(dependencies.extractExecutedEffectSummaries(Map.of())).thenReturn(List.of());
         when(attackPayloadJsonService.toJson(any())).thenReturn("{\"artTotalDamage\":50}");
         when(attackActionLogService.appendAttackArt(any())).thenReturn(
             new AttackActionLogResult(7001L, 1, AttackActionLogService.ACTION_TYPE_ATTACK_ART, "{}")
@@ -147,6 +147,7 @@ class AttackArtApplicationAdapterFactoryTest {
             attackActionLogService,
             attackPayloadJsonService,
             attackPendingDecisionConversionService,
+            attackEffectSummaryExtractor,
             attackFinishCheckService,
             attackEffectFollowupService,
             matchEffectCombatModifierService,

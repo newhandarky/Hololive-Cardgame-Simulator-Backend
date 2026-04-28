@@ -1,7 +1,5 @@
 package com.hololive.cardgame.service;
 
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -13,6 +11,7 @@ public class AttackEffectFollowupService {
     private final DamagePreventionResolver damagePreventionResolver;
     private final OfficialCardArtExtraResolver officialCardArtExtraResolver;
     private final OfficialOshiArtReactiveResolver officialOshiArtReactiveResolver;
+    private final AttackEffectSummaryExtractor effectSummaryExtractor;
 
     public AttackEffectFollowupService(
         HoloxRevealResolver holoxRevealResolver,
@@ -28,6 +27,7 @@ public class AttackEffectFollowupService {
         this.damagePreventionResolver = damagePreventionResolver;
         this.officialCardArtExtraResolver = officialCardArtExtraResolver;
         this.officialOshiArtReactiveResolver = officialOshiArtReactiveResolver;
+        this.effectSummaryExtractor = new AttackEffectSummaryExtractor();
     }
 
     public AttackEffectFollowupResult resolvePreDamage(AttackEffectFollowupContext context) {
@@ -78,12 +78,14 @@ public class AttackEffectFollowupService {
         }
 
         Map<String, Object> officialCardArtExtraSummary = officialCardArtExtraResolver.resolve(context);
-        List<Map<String, Object>> officialCardArtExtraEffects = extractExecutedEffectSummaries(officialCardArtExtraSummary);
+        List<Map<String, Object>> officialCardArtExtraEffects =
+            effectSummaryExtractor.extractExecutedEffectSummaries(officialCardArtExtraSummary);
         Map<String, Object> officialOshiArtReactiveSummary = officialOshiArtReactiveResolver.resolve(
             context,
             officialCardArtExtraSummary
         );
-        List<Map<String, Object>> officialOshiArtReactiveEffects = extractExecutedEffectSummaries(officialOshiArtReactiveSummary);
+        List<Map<String, Object>> officialOshiArtReactiveEffects =
+            effectSummaryExtractor.extractExecutedEffectSummaries(officialOshiArtReactiveSummary);
 
         return new AttackEffectPostDamageResult(
             officialCardArtExtraSummary,
@@ -105,30 +107,6 @@ public class AttackEffectFollowupService {
             }
         }
         return null;
-    }
-
-    private List<Map<String, Object>> extractExecutedEffectSummaries(Map<String, Object> effectSummary) {
-        if (effectSummary == null || effectSummary.isEmpty()) {
-            return List.of();
-        }
-        Object executed = effectSummary.get("executedEffects");
-        if (!(executed instanceof List<?> list) || list.isEmpty()) {
-            return List.of();
-        }
-        List<Map<String, Object>> summaries = new ArrayList<>();
-        for (Object effect : list) {
-            if (effect instanceof Map<?, ?> effectMap) {
-                Map<String, Object> casted = new LinkedHashMap<>();
-                for (Map.Entry<?, ?> entry : effectMap.entrySet()) {
-                    if (entry.getKey() == null) {
-                        continue;
-                    }
-                    casted.put(entry.getKey().toString(), entry.getValue());
-                }
-                summaries.add(casted);
-            }
-        }
-        return summaries;
     }
 
     public record HoloxRevealResult(

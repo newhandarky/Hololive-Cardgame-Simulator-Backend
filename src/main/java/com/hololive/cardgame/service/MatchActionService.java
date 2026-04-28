@@ -100,6 +100,7 @@ public class MatchActionService {
     private final AttackActionLogService attackActionLogService;
     private final AttackPayloadJsonService attackPayloadJsonService;
     private final AttackPendingDecisionConversionService attackPendingDecisionConversionService;
+    private final AttackEffectSummaryExtractor attackEffectSummaryExtractor;
     private final AttackFinishCheckService attackFinishCheckService;
     private final AttackEffectFollowupService attackEffectFollowupService;
     private final AttackArtApplicationService attackArtApplicationService;
@@ -181,6 +182,7 @@ public class MatchActionService {
         this.attackActionLogService = new AttackActionLogService(new AttackArtActionWriter());
         this.attackPayloadJsonService = new AttackPayloadJsonService(objectMapper);
         this.attackPendingDecisionConversionService = new AttackPendingDecisionConversionService();
+        this.attackEffectSummaryExtractor = new AttackEffectSummaryExtractor();
         this.attackPerformanceAvailabilityService = new AttackPerformanceAvailabilityService(jdbcTemplate);
         this.attackFinishCheckService = new AttackFinishCheckService(
             this::evaluateCardEffectMatchFinish,
@@ -210,6 +212,7 @@ public class MatchActionService {
             this.attackActionLogService,
             this.attackPayloadJsonService,
             this.attackPendingDecisionConversionService,
+            this.attackEffectSummaryExtractor,
             this.attackFinishCheckService,
             this.attackEffectFollowupService,
             this.matchEffectCombatModifierService,
@@ -252,11 +255,6 @@ public class MatchActionService {
                 Long holderHolomemId
             ) {
                 return matchGiftTriggerService.loadSelfDownedFanSupportSnapshots(matchId, ownerUserId, holderHolomemId);
-            }
-
-            @Override
-            public List<Map<String, Object>> extractExecutedEffectSummaries(Map<String, Object> effectSummary) {
-                return MatchActionService.this.extractExecutedEffectSummaries(effectSummary);
             }
 
         };
