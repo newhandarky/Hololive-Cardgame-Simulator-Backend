@@ -186,7 +186,8 @@ public class MatchActionService {
         this.attackEffectFollowupService = new AttackEffectFollowupService(
             new AttackHoloxRevealResolver(),
             new AttackHbp02039SupportRecoveryResolver(),
-            new AttackHbp02040LifeLossResolver()
+            new AttackHbp02040LifeLossResolver(),
+            new AttackDefenderDamagePreventionResolver()
         );
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
@@ -2328,30 +2329,31 @@ public class MatchActionService {
         if (totalDamage <= 0) {
             throw new IllegalStateException("此藝能目前未解析出可造成的傷害");
         }
-        Map<String, Object> defenderDamageReceivedGiftSummary = null;
-        if (hasOpponentHolomem && targetHolomem != null) {
-            defenderDamageReceivedGiftSummary = matchTriggeredCombatEffectService.resolveTriggeredGiftDamagePrevention(
+        AttackEffectDamagePreventionResult damagePreventionResult = attackEffectFollowupService.resolveDamagePrevention(
+            AttackEffectDamagePreventionContext.attackArt(
                 matchId,
-                context.opponentUserId,
                 userId,
+                context.opponentUserId,
                 attackerCardInstanceId,
                 effectiveTargetCardInstanceId,
                 context.turnNumber,
-                totalDamage
+                totalDamage,
+                hasOpponentHolomem,
+                targetHolomem != null
+            )
+        );
+        Map<String, Object> defenderDamageReceivedGiftSummary = damagePreventionResult.actionLogRequired()
+            ? damagePreventionResult.defenderDamageReceivedGiftSummary()
+            : null;
+        if (damagePreventionResult.actionLogRequired()) {
+            appendAction(
+                context.match,
+                context.opponentUserId,
+                "GIFT_TRIGGER",
+                toJson(defenderDamageReceivedGiftSummary),
+                context.turnNumber
             );
-            if (defenderDamageReceivedGiftSummary != null && !defenderDamageReceivedGiftSummary.isEmpty()) {
-                appendAction(
-                    context.match,
-                    context.opponentUserId,
-                    "GIFT_TRIGGER",
-                    toJson(defenderDamageReceivedGiftSummary),
-                    context.turnNumber
-                );
-                Integer damageAfterGift = asInt(defenderDamageReceivedGiftSummary.get("damageAfter"));
-                if (damageAfterGift != null) {
-                    totalDamage = Math.max(damageAfterGift, 0);
-                }
-            }
+            totalDamage = damagePreventionResult.adjustedDamage();
         }
         AttackDamageApplicationResult damageApplicationResult = attackDamageApplicationService.applyDamage(
             AttackDamageApplicationContext.attackArt(
@@ -5778,6 +5780,22 @@ public class MatchActionService {
                 context.attackerCardId(),
                 context.artName(),
                 toHoloxSlotRevealSummary(holoxSlotRevealSummary)
+            );
+        }
+    }
+
+    private class AttackDefenderDamagePreventionResolver implements AttackEffectFollowupService.DamagePreventionResolver {
+
+        @Override
+        public Map<String, Object> resolve(AttackEffectDamagePreventionContext context) {
+            return matchTriggeredCombatEffectService.resolveTriggeredGiftDamagePrevention(
+                context.matchId(),
+                context.defenderUserId(),
+                context.attackerUserId(),
+                context.attackerCardInstanceId(),
+                context.effectiveTargetCardInstanceId(),
+                context.turnNumber(),
+                context.totalDamage()
             );
         }
     }

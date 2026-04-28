@@ -20,10 +20,13 @@ class AttackEffectFollowupServiceTest {
         mock(AttackEffectFollowupService.Hbp02039SupportRecoveryResolver.class);
     private final AttackEffectFollowupService.Hbp02040LifeLossResolver hbp02040LifeLossResolver =
         mock(AttackEffectFollowupService.Hbp02040LifeLossResolver.class);
+    private final AttackEffectFollowupService.DamagePreventionResolver damagePreventionResolver =
+        mock(AttackEffectFollowupService.DamagePreventionResolver.class);
     private final AttackEffectFollowupService service = new AttackEffectFollowupService(
         holoxRevealResolver,
         hbp02039SupportRecoveryResolver,
-        hbp02040LifeLossResolver
+        hbp02040LifeLossResolver,
+        damagePreventionResolver
     );
 
     @Test
@@ -90,6 +93,59 @@ class AttackEffectFollowupServiceTest {
             .hasMessageContaining("attack effect followup");
     }
 
+    @Test
+    void resolveDamagePreventionShouldSkipWhenThereIsNoTargetHolomem() {
+        AttackEffectDamagePreventionResult result = service.resolveDamagePrevention(
+            damagePreventionContext(false, false, 80)
+        );
+
+        assertThat(result.defenderDamageReceivedGiftSummary()).isEmpty();
+        assertThat(result.adjustedDamage()).isEqualTo(80);
+        assertThat(result.actionLogRequired()).isFalse();
+    }
+
+    @Test
+    void resolveDamagePreventionShouldReturnAdjustedDamageAndSummary() {
+        AttackEffectDamagePreventionContext context = damagePreventionContext(true, true, 90);
+        Map<String, Object> summary = summary("effectType", "DAMAGE_PREVENTION", "damageAfter", 50);
+        when(damagePreventionResolver.resolve(context)).thenReturn(summary);
+
+        AttackEffectDamagePreventionResult result = service.resolveDamagePrevention(context);
+
+        assertThat(result.defenderDamageReceivedGiftSummary()).isEqualTo(summary);
+        assertThat(result.adjustedDamage()).isEqualTo(50);
+        assertThat(result.actionLogRequired()).isTrue();
+    }
+
+    @Test
+    void resolveDamagePreventionShouldClampNegativeAdjustedDamage() {
+        AttackEffectDamagePreventionContext context = damagePreventionContext(true, true, 30);
+        when(damagePreventionResolver.resolve(context)).thenReturn(summary("damageAfter", -20));
+
+        AttackEffectDamagePreventionResult result = service.resolveDamagePrevention(context);
+
+        assertThat(result.adjustedDamage()).isZero();
+        assertThat(result.actionLogRequired()).isTrue();
+    }
+
+    @Test
+    void resolveDamagePreventionShouldKeepOriginalDamageWhenSummaryHasNoDamageAfter() {
+        AttackEffectDamagePreventionContext context = damagePreventionContext(true, true, 70);
+        when(damagePreventionResolver.resolve(context)).thenReturn(summary("effectType", "DAMAGE_PREVENTION"));
+
+        AttackEffectDamagePreventionResult result = service.resolveDamagePrevention(context);
+
+        assertThat(result.adjustedDamage()).isEqualTo(70);
+        assertThat(result.actionLogRequired()).isTrue();
+    }
+
+    @Test
+    void resolveDamagePreventionShouldRejectMissingContext() {
+        assertThatThrownBy(() -> service.resolveDamagePrevention(null))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("attack effect damage prevention");
+    }
+
     private AttackEffectFollowupContext context() {
         return AttackEffectFollowupContext.preDamage(
             100L,
@@ -100,6 +156,24 @@ class AttackEffectFollowupServiceTest {
             "HBP02-039",
             "ホロックスロット",
             "デッキの上から3枚を公開"
+        );
+    }
+
+    private AttackEffectDamagePreventionContext damagePreventionContext(
+        boolean hasOpponentHolomem,
+        boolean hasTargetHolomem,
+        int totalDamage
+    ) {
+        return AttackEffectDamagePreventionContext.attackArt(
+            100L,
+            10L,
+            20L,
+            3001L,
+            4001L,
+            3,
+            totalDamage,
+            hasOpponentHolomem,
+            hasTargetHolomem
         );
     }
 
