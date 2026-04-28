@@ -77,6 +77,7 @@ public class MatchActionService {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final MatchPayloadJsonService matchPayloadJsonService;
+    private final GiftTriggerActionPayloadExtractor giftTriggerActionPayloadExtractor;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -161,6 +162,7 @@ public class MatchActionService {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.matchPayloadJsonService = new MatchPayloadJsonService(objectMapper);
+        this.giftTriggerActionPayloadExtractor = new GiftTriggerActionPayloadExtractor();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5264,32 +5266,9 @@ public class MatchActionService {
         int turnNumber,
         Map<String, Object> effectSummary
     ) {
-        if (effectSummary == null) {
-            return;
-        }
-        String sourceActionType = normalizeZone(effectSummary.get("sourceActionType"));
-        Object triggeredGifts = effectSummary.get("triggeredGifts");
-        if ("ATTACK_ART_POST_TRIGGER".equals(sourceActionType)) {
-            Object nestedGift = effectSummary.get("gift");
-            if (nestedGift instanceof Map<?, ?> map) {
-                triggeredGifts = castToMap(map).get("triggeredGifts");
-            }
-        } else if ("COLLAB".equals(sourceActionType)) {
-            Object nestedGift = effectSummary.get("gift");
-            if (nestedGift instanceof Map<?, ?> map) {
-                triggeredGifts = castToMap(map).get("triggeredGifts");
-            }
-        } else if (!"GIFT".equals(sourceActionType)) {
-            return;
-        }
-        if (!(triggeredGifts instanceof List<?> list) || list.isEmpty()) {
-            return;
-        }
-        for (Object value : list) {
-            if (!(value instanceof Map<?, ?> map)) {
-                continue;
-            }
-            appendAction(match, userId, "GIFT_TRIGGER", toJson(castToMap(map)), turnNumber);
+        List<Map<String, Object>> payloads = giftTriggerActionPayloadExtractor.extractTriggeredGiftPayloads(effectSummary);
+        for (Map<String, Object> payload : payloads) {
+            appendAction(match, userId, "GIFT_TRIGGER", toJson(payload), turnNumber);
         }
     }
 
