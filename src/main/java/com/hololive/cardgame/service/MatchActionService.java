@@ -180,7 +180,7 @@ public class MatchActionService {
         this.attackDefenderGiftFollowupService = attackDefenderGiftFollowupService;
         this.attackPostTriggerPendingService = new AttackPostTriggerPendingService(new AttackArtPendingDecisionCreator());
         this.attackRestAndPayloadService = new AttackRestAndPayloadService();
-        this.attackActionLogService = new AttackActionLogService(new AttackArtActionWriter());
+        this.attackActionLogService = new AttackActionLogService(new AttackActionWriterAdapter(matchActionRepository));
         this.attackPayloadJsonService = new AttackPayloadJsonService(objectMapper);
         this.attackPendingDecisionConversionService = new AttackPendingDecisionConversionService();
         this.attackEffectSummaryExtractor = new AttackEffectSummaryExtractor();
@@ -5611,32 +5611,6 @@ public class MatchActionService {
                 context.defenderGiftTriggeredEffects(),
                 context.turnNumber()
             ));
-        }
-    }
-
-    private class AttackArtActionWriter implements AttackActionLogService.AttackActionWriter {
-
-        @Override
-        public AttackActionLogResult appendAction(
-            Long matchId,
-            Long userId,
-            String actionType,
-            String payloadJson,
-            int turnNumber
-        ) {
-            MatchActionEntity action = MatchActionService.this.appendAction(
-                matchId,
-                userId,
-                actionType,
-                payloadJson,
-                turnNumber
-            );
-            return new AttackActionLogResult(
-                action.getId(),
-                action.getActionOrder(),
-                action.getActionType(),
-                action.getPayload()
-            );
         }
     }
 
