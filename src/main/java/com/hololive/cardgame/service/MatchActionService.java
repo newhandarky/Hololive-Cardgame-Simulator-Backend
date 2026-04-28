@@ -98,6 +98,7 @@ public class MatchActionService {
     private final AttackPostTriggerPendingService attackPostTriggerPendingService;
     private final AttackRestAndPayloadService attackRestAndPayloadService;
     private final AttackActionLogService attackActionLogService;
+    private final AttackFinishCheckService attackFinishCheckService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -173,6 +174,14 @@ public class MatchActionService {
         this.attackPostTriggerPendingService = new AttackPostTriggerPendingService(new AttackArtPendingDecisionCreator());
         this.attackRestAndPayloadService = new AttackRestAndPayloadService();
         this.attackActionLogService = new AttackActionLogService(new AttackArtActionWriter());
+        this.attackFinishCheckService = new AttackFinishCheckService(
+            this::evaluateCardEffectMatchFinish,
+            (match, actorUserId, turnNumber, effectSummary) -> evaluateLifeDefeat(match, actorUserId, turnNumber),
+            (match, actorUserId, turnNumber, effectSummary) -> evaluateNoHolomemDefeat(match, actorUserId, turnNumber),
+            this::hasLifeReduced,
+            this::hasHolomemDowned,
+            this::saveFinishedMatch
+        );
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -2520,18 +2529,12 @@ public class MatchActionService {
             toJson(payload)
         ));
         Map<String, Object> effectSummaryForChecks = restAndPayloadResult.effectSummaryForChecks();
-        if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, effectSummaryForChecks)) {
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-        } else if (hasLifeReduced(effectSummaryForChecks) && evaluateLifeDefeat(context.match, userId, context.turnNumber)) {
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-        } else if (
-            hasHolomemDowned(effectSummaryForChecks) && evaluateNoHolomemDefeat(context.match, userId, context.turnNumber)
-        ) {
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-        }
+        attackFinishCheckService.resolve(AttackFinishCheckContext.attackArt(
+            context.match,
+            userId,
+            context.turnNumber,
+            effectSummaryForChecks
+        ));
         enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummaryForChecks, context.turnNumber);
     }
 
@@ -4634,6 +4637,11 @@ public class MatchActionService {
         }
         finishMatchByDefeat(match, loserUserId, reason, turnNumber);
         return true;
+    }
+
+    private void saveFinishedMatch(MatchEntity match) {
+        touchUpdatedAt(match);
+        matchRepository.saveAndFlush(match);
     }
 
     /**
