@@ -18,7 +18,4 @@ interface AttackArtApplicationAdapterDependencies {
 
     List<Map<String, Object>> extractExecutedEffectSummaries(Map<String, Object> effectSummary);
 
-    FollowupInteractionDecision toFollowupInteractionDecision(AttackPendingDecision decision);
-
-    AttackPendingDecision toAttackPendingDecision(FollowupInteractionDecision decision);
 }

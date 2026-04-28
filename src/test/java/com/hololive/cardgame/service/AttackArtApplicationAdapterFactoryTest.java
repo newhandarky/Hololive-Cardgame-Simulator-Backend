@@ -32,6 +32,8 @@ class AttackArtApplicationAdapterFactoryTest {
         mock(AttackPostTriggerPendingService.class);
     private final AttackActionLogService attackActionLogService = mock(AttackActionLogService.class);
     private final AttackPayloadJsonService attackPayloadJsonService = mock(AttackPayloadJsonService.class);
+    private final AttackPendingDecisionConversionService attackPendingDecisionConversionService =
+        new AttackPendingDecisionConversionService();
     private final AttackFinishCheckService attackFinishCheckService = mock(AttackFinishCheckService.class);
     private final AttackEffectFollowupService attackEffectFollowupService = mock(AttackEffectFollowupService.class);
     private final MatchEffectCombatModifierService matchEffectCombatModifierService =
@@ -145,6 +147,7 @@ class AttackArtApplicationAdapterFactoryTest {
             attackRestAndPayloadService,
             attackActionLogService,
             attackPayloadJsonService,
+            attackPendingDecisionConversionService,
             attackFinishCheckService,
             attackEffectFollowupService,
             matchEffectCombatModifierService,

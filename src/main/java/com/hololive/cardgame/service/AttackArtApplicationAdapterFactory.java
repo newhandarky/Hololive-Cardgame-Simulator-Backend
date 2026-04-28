@@ -20,6 +20,7 @@ class AttackArtApplicationAdapterFactory {
     private final AttackRestAndPayloadService attackRestAndPayloadService;
     private final AttackActionLogService attackActionLogService;
     private final AttackPayloadJsonService attackPayloadJsonService;
+    private final AttackPendingDecisionConversionService attackPendingDecisionConversionService;
     private final AttackFinishCheckService attackFinishCheckService;
     private final AttackEffectFollowupService attackEffectFollowupService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
@@ -39,6 +40,7 @@ class AttackArtApplicationAdapterFactory {
         AttackRestAndPayloadService attackRestAndPayloadService,
         AttackActionLogService attackActionLogService,
         AttackPayloadJsonService attackPayloadJsonService,
+        AttackPendingDecisionConversionService attackPendingDecisionConversionService,
         AttackFinishCheckService attackFinishCheckService,
         AttackEffectFollowupService attackEffectFollowupService,
         MatchEffectCombatModifierService matchEffectCombatModifierService,
@@ -57,6 +59,7 @@ class AttackArtApplicationAdapterFactory {
         this.attackRestAndPayloadService = attackRestAndPayloadService;
         this.attackActionLogService = attackActionLogService;
         this.attackPayloadJsonService = attackPayloadJsonService;
+        this.attackPendingDecisionConversionService = attackPendingDecisionConversionService;
         this.attackFinishCheckService = attackFinishCheckService;
         this.attackEffectFollowupService = attackEffectFollowupService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
@@ -545,8 +548,8 @@ class AttackArtApplicationAdapterFactory {
             );
             return new AttackApplicationPendingStage(
                 result,
-                dependencies.toFollowupInteractionDecision(result.postTriggerConfirmDecision()),
-                dependencies.toFollowupInteractionDecision(result.defenderGiftConfirmDecision())
+                attackPendingDecisionConversionService.toFollowupInteractionDecision(result.postTriggerConfirmDecision()),
+                attackPendingDecisionConversionService.toFollowupInteractionDecision(result.defenderGiftConfirmDecision())
             );
         }
     }
@@ -681,8 +684,8 @@ class AttackArtApplicationAdapterFactory {
                     pendingResult.defenderGiftEffectSummary(),
                     hasNextPerformanceAction,
                     damageApplicationStage.lostLifeCardInstanceId(),
-                    dependencies.toAttackPendingDecision(pendingStage.postTriggerConfirmDecision()),
-                    dependencies.toAttackPendingDecision(pendingStage.defenderGiftConfirmDecision()),
+                    attackPendingDecisionConversionService.toAttackPendingDecision(pendingStage.postTriggerConfirmDecision()),
+                    attackPendingDecisionConversionService.toAttackPendingDecision(pendingStage.defenderGiftConfirmDecision()),
                     additionalEffectSummaries
                 )
             );

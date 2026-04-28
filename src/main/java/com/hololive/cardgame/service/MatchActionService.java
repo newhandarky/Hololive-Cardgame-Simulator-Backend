@@ -99,6 +99,7 @@ public class MatchActionService {
     private final AttackRestAndPayloadService attackRestAndPayloadService;
     private final AttackActionLogService attackActionLogService;
     private final AttackPayloadJsonService attackPayloadJsonService;
+    private final AttackPendingDecisionConversionService attackPendingDecisionConversionService;
     private final AttackFinishCheckService attackFinishCheckService;
     private final AttackEffectFollowupService attackEffectFollowupService;
     private final AttackArtApplicationService attackArtApplicationService;
@@ -179,6 +180,7 @@ public class MatchActionService {
         this.attackRestAndPayloadService = new AttackRestAndPayloadService();
         this.attackActionLogService = new AttackActionLogService(new AttackArtActionWriter());
         this.attackPayloadJsonService = new AttackPayloadJsonService(objectMapper);
+        this.attackPendingDecisionConversionService = new AttackPendingDecisionConversionService();
         this.attackPerformanceAvailabilityService = new AttackPerformanceAvailabilityService(jdbcTemplate);
         this.attackFinishCheckService = new AttackFinishCheckService(
             this::evaluateCardEffectMatchFinish,
@@ -207,6 +209,7 @@ public class MatchActionService {
             this.attackRestAndPayloadService,
             this.attackActionLogService,
             this.attackPayloadJsonService,
+            this.attackPendingDecisionConversionService,
             this.attackFinishCheckService,
             this.attackEffectFollowupService,
             this.matchEffectCombatModifierService,
@@ -261,15 +264,6 @@ public class MatchActionService {
                 return MatchActionService.this.extractExecutedEffectSummaries(effectSummary);
             }
 
-            @Override
-            public FollowupInteractionDecision toFollowupInteractionDecision(AttackPendingDecision decision) {
-                return MatchActionService.this.toFollowupInteractionDecision(decision);
-            }
-
-            @Override
-            public AttackPendingDecision toAttackPendingDecision(FollowupInteractionDecision decision) {
-                return MatchActionService.this.toAttackPendingDecision(decision);
-            }
         };
     }
 
@@ -5504,20 +5498,6 @@ public class MatchActionService {
         return null;
     }
 
-    private FollowupInteractionDecision toFollowupInteractionDecision(AttackPendingDecision decision) {
-        if (decision == null) {
-            return null;
-        }
-        return new FollowupInteractionDecision(decision.decisionId(), decision.decisionType());
-    }
-
-    private AttackPendingDecision toAttackPendingDecision(FollowupInteractionDecision decision) {
-        if (decision == null) {
-            return null;
-        }
-        return new AttackPendingDecision(decision.decisionId(), decision.decisionType());
-    }
-
     private <T> T requireAttackStage(Object stageResult, Class<T> type, String stageName) {
         if (type.isInstance(stageResult)) {
             return type.cast(stageResult);
@@ -5637,7 +5617,7 @@ public class MatchActionService {
                 context.attackerCardId(),
                 context.giftTriggeredEffects()
             );
-            return toAttackPendingDecision(createAttackArtPostTriggerConfirmPendingInteraction(
+            return attackPendingDecisionConversionService.toAttackPendingDecision(createAttackArtPostTriggerConfirmPendingInteraction(
                 context.matchId(),
                 context.attackerUserId(),
                 context.attackerCardInstanceId(),
@@ -5661,7 +5641,7 @@ public class MatchActionService {
                 context.downedTargetCardId(),
                 context.defenderGiftTriggeredEffects()
             );
-            return toAttackPendingDecision(createGiftTriggeredEffectConfirmPendingInteraction(
+            return attackPendingDecisionConversionService.toAttackPendingDecision(createGiftTriggeredEffectConfirmPendingInteraction(
                 context.matchId(),
                 context.defenderUserId(),
                 context.downedTargetCardInstanceId(),
