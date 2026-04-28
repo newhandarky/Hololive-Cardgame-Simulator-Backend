@@ -31,6 +31,7 @@ class AttackArtApplicationAdapterFactoryTest {
     private final AttackPostTriggerPendingService attackPostTriggerPendingService =
         mock(AttackPostTriggerPendingService.class);
     private final AttackActionLogService attackActionLogService = mock(AttackActionLogService.class);
+    private final AttackPayloadJsonService attackPayloadJsonService = mock(AttackPayloadJsonService.class);
     private final AttackFinishCheckService attackFinishCheckService = mock(AttackFinishCheckService.class);
     private final AttackEffectFollowupService attackEffectFollowupService = mock(AttackEffectFollowupService.class);
     private final MatchEffectCombatModifierService matchEffectCombatModifierService =
@@ -58,6 +59,7 @@ class AttackArtApplicationAdapterFactoryTest {
             jdbcTemplate,
             dependencies,
             matchRepository,
+            attackPayloadJsonService,
             attackActionLogService,
             attackFinishCheckService
         );
@@ -70,7 +72,7 @@ class AttackArtApplicationAdapterFactoryTest {
         order.verify(dependencies).hasAvailableArtAttacker(100L, 10L, 3);
         order.verify(dependencies).touchUpdatedAt(match);
         order.verify(matchRepository).saveAndFlush(match);
-        order.verify(dependencies).toJson(any());
+        order.verify(attackPayloadJsonService).toJson(any());
         order.verify(attackActionLogService).appendAttackArt(any(AttackActionLogContext.class));
         order.verify(attackFinishCheckService).resolve(any(AttackFinishCheckContext.class));
     }
@@ -124,7 +126,7 @@ class AttackArtApplicationAdapterFactoryTest {
         when(dependencies.hasAvailableArtAttacker(100L, 10L, 3)).thenReturn(false);
         when(jdbcTemplate.update(anyString(), any(), any(), any())).thenReturn(1);
         when(dependencies.extractExecutedEffectSummaries(Map.of())).thenReturn(List.of());
-        when(dependencies.toJson(any())).thenReturn("{\"artTotalDamage\":50}");
+        when(attackPayloadJsonService.toJson(any())).thenReturn("{\"artTotalDamage\":50}");
         when(attackActionLogService.appendAttackArt(any())).thenReturn(
             new AttackActionLogResult(7001L, 1, AttackActionLogService.ACTION_TYPE_ATTACK_ART, "{}")
         );
@@ -142,6 +144,7 @@ class AttackArtApplicationAdapterFactoryTest {
             attackPostTriggerPendingService,
             attackRestAndPayloadService,
             attackActionLogService,
+            attackPayloadJsonService,
             attackFinishCheckService,
             attackEffectFollowupService,
             matchEffectCombatModifierService,

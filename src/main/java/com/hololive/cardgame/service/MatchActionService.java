@@ -98,6 +98,7 @@ public class MatchActionService {
     private final AttackPostTriggerPendingService attackPostTriggerPendingService;
     private final AttackRestAndPayloadService attackRestAndPayloadService;
     private final AttackActionLogService attackActionLogService;
+    private final AttackPayloadJsonService attackPayloadJsonService;
     private final AttackFinishCheckService attackFinishCheckService;
     private final AttackEffectFollowupService attackEffectFollowupService;
     private final AttackArtApplicationService attackArtApplicationService;
@@ -177,6 +178,7 @@ public class MatchActionService {
         this.attackPostTriggerPendingService = new AttackPostTriggerPendingService(new AttackArtPendingDecisionCreator());
         this.attackRestAndPayloadService = new AttackRestAndPayloadService();
         this.attackActionLogService = new AttackActionLogService(new AttackArtActionWriter());
+        this.attackPayloadJsonService = new AttackPayloadJsonService(objectMapper);
         this.attackPerformanceAvailabilityService = new AttackPerformanceAvailabilityService(jdbcTemplate);
         this.attackFinishCheckService = new AttackFinishCheckService(
             this::evaluateCardEffectMatchFinish,
@@ -204,6 +206,7 @@ public class MatchActionService {
             this.attackPostTriggerPendingService,
             this.attackRestAndPayloadService,
             this.attackActionLogService,
+            this.attackPayloadJsonService,
             this.attackFinishCheckService,
             this.attackEffectFollowupService,
             this.matchEffectCombatModifierService,
@@ -226,12 +229,7 @@ public class MatchActionService {
         return new AttackArtApplicationAdapterDependencies() {
             @Override
             public void appendGiftTriggerAction(MatchEntity match, Long userId, Map<String, Object> payload, int turnNumber) {
-                appendAction(match, userId, "GIFT_TRIGGER", toJson(payload), turnNumber);
-            }
-
-            @Override
-            public String toJson(Map<String, Object> payload) {
-                return MatchActionService.this.toJson(payload);
+                appendAction(match, userId, "GIFT_TRIGGER", attackPayloadJsonService.toJson(payload), turnNumber);
             }
 
             @Override

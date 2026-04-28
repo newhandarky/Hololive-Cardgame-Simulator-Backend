@@ -19,6 +19,7 @@ class AttackArtApplicationAdapterFactory {
     private final AttackPostTriggerPendingService attackPostTriggerPendingService;
     private final AttackRestAndPayloadService attackRestAndPayloadService;
     private final AttackActionLogService attackActionLogService;
+    private final AttackPayloadJsonService attackPayloadJsonService;
     private final AttackFinishCheckService attackFinishCheckService;
     private final AttackEffectFollowupService attackEffectFollowupService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
@@ -37,6 +38,7 @@ class AttackArtApplicationAdapterFactory {
         AttackPostTriggerPendingService attackPostTriggerPendingService,
         AttackRestAndPayloadService attackRestAndPayloadService,
         AttackActionLogService attackActionLogService,
+        AttackPayloadJsonService attackPayloadJsonService,
         AttackFinishCheckService attackFinishCheckService,
         AttackEffectFollowupService attackEffectFollowupService,
         MatchEffectCombatModifierService matchEffectCombatModifierService,
@@ -54,6 +56,7 @@ class AttackArtApplicationAdapterFactory {
         this.attackPostTriggerPendingService = attackPostTriggerPendingService;
         this.attackRestAndPayloadService = attackRestAndPayloadService;
         this.attackActionLogService = attackActionLogService;
+        this.attackPayloadJsonService = attackPayloadJsonService;
         this.attackFinishCheckService = attackFinishCheckService;
         this.attackEffectFollowupService = attackEffectFollowupService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
@@ -700,7 +703,7 @@ class AttackArtApplicationAdapterFactory {
                 context.matchId(),
                 context.attackerUserId(),
                 context.turnNumber(),
-                dependencies.toJson(restPayloadStage.result().payload())
+                attackPayloadJsonService.toJson(restPayloadStage.result().payload())
             ));
             return restPayloadStage.result().payload();
         }

@@ -8,8 +8,6 @@ interface AttackArtApplicationAdapterDependencies {
 
     void appendGiftTriggerAction(MatchEntity match, Long userId, Map<String, Object> payload, int turnNumber);
 
-    String toJson(Map<String, Object> payload);
-
     boolean hasAvailableArtAttacker(Long matchId, Long userId, int turnNumber);
 
     void touchUpdatedAt(MatchEntity match);
