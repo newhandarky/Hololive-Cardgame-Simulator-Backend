@@ -80,6 +80,7 @@ public class MatchActionService {
     private final GiftTriggerActionPayloadExtractor giftTriggerActionPayloadExtractor;
     private final GiftTriggerActionWriter giftTriggerActionWriter;
     private final PendingGiftTriggerContextExtractor pendingGiftTriggerContextExtractor;
+    private final PendingDownEventContextExtractor pendingDownEventContextExtractor;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -167,6 +168,7 @@ public class MatchActionService {
         this.giftTriggerActionPayloadExtractor = new GiftTriggerActionPayloadExtractor();
         this.giftTriggerActionWriter = new GiftTriggerActionWriter(matchActionRepository, matchPayloadJsonService);
         this.pendingGiftTriggerContextExtractor = new PendingGiftTriggerContextExtractor();
+        this.pendingDownEventContextExtractor = new PendingDownEventContextExtractor();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5285,21 +5287,7 @@ public class MatchActionService {
      * 從 pending context 解析 down event context。
      */
     private Map<String, Object> extractDownEventContext(JsonNode contextNode) {
-        if (contextNode == null || contextNode.isNull()) {
-            return null;
-        }
-        JsonNode downEventNode = contextNode.get("downEvent");
-        if (downEventNode == null || downEventNode.isNull() || !downEventNode.isObject()) {
-            return null;
-        }
-        Map<String, Object> downEvent = new LinkedHashMap<>();
-        downEvent.put("downedOwnerUserId", extractJsonLong(downEventNode, "downedOwnerUserId"));
-        downEvent.put("downedCardId", extractJsonText(downEventNode, "downedCardId"));
-        downEvent.put("downedStageZone", extractJsonText(downEventNode, "downedStageZone"));
-        downEvent.put("turnNumber", asInt(extractJsonLong(downEventNode, "turnNumber")));
-        downEvent.put("rawText", extractJsonText(downEventNode, "rawText"));
-        downEvent.put("requestedLifeLoss", asInt(extractJsonLong(downEventNode, "requestedLifeLoss")));
-        return downEvent;
+        return pendingDownEventContextExtractor.extractDownEventContext(contextNode);
     }
 
     private Map<String, Object> buildInteractionSourceCardPayload(
