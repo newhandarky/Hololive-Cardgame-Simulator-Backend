@@ -76,6 +76,7 @@ public class MatchActionService {
     private final MatchActionRepository matchActionRepository;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
+    private final MatchPayloadJsonService matchPayloadJsonService;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -159,6 +160,7 @@ public class MatchActionService {
         this.matchActionRepository = matchActionRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.matchPayloadJsonService = new MatchPayloadJsonService(objectMapper);
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -7173,11 +7175,7 @@ public class MatchActionService {
      * 將 payload map 序列化為 JSON 字串，失敗時回傳空物件字串。
      */
     private String toJson(Map<String, Object> payload) {
-        try {
-            return objectMapper.writeValueAsString(payload);
-        } catch (Exception ex) {
-            return "{}";
-        }
+        return matchPayloadJsonService.toJson(payload);
     }
 
     /**
