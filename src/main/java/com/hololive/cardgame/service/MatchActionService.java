@@ -94,6 +94,7 @@ public class MatchActionService {
     private final AttackDamageService attackDamageService;
     private final AttackDamageApplicationService attackDamageApplicationService;
     private final AttackDownService attackDownService;
+    private final AttackDefenderGiftFollowupService attackDefenderGiftFollowupService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -132,6 +133,7 @@ public class MatchActionService {
         AttackDamageService attackDamageService,
         AttackDamageApplicationService attackDamageApplicationService,
         AttackDownService attackDownService,
+        AttackDefenderGiftFollowupService attackDefenderGiftFollowupService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
@@ -164,6 +166,7 @@ public class MatchActionService {
         this.attackDamageService = attackDamageService;
         this.attackDamageApplicationService = attackDamageApplicationService;
         this.attackDownService = attackDownService;
+        this.attackDefenderGiftFollowupService = attackDefenderGiftFollowupService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -2347,7 +2350,7 @@ public class MatchActionService {
                 hasOpponentHolomem
             )
         );
-        Map<String, Object> artSummary = damageApplicationResult.artSummary();
+        Map<String, Object> artSummary = new LinkedHashMap<>(damageApplicationResult.artSummary());
         Long lostLifeCardInstanceId = damageApplicationResult.lostLifeCardInstanceId();
         Map<String, Object> officialCardArtExtraSummary = applyOfficialCardArtExtraEffects(
             matchId,
@@ -2390,47 +2393,28 @@ public class MatchActionService {
         Map<String, Object> officialOshiSelfDownedSummary = Map.of();
         List<Map<String, Object>> giftTriggeredEffects = new ArrayList<>(attackDownResult.giftTriggeredEffects());
         Map<String, Object> artDownTriggeredEffectSummary = attackDownResult.artDownTriggeredEffectSummary();
-        List<Map<String, Object>> defenderGiftTriggeredEffects = new ArrayList<>();
         String downedTargetCardId = targetHolomem == null ? null : targetHolomem.cardId();
         String downedTargetZone = targetHolomem == null ? null : targetHolomem.zone();
-        if (attackDownResult.hasDownedHolomem()) {
-            officialOshiSelfDownedSummary = applyOfficialOshiSelfDownedEffects(
+        AttackDefenderGiftFollowupResult defenderGiftFollowupResult =
+            attackDefenderGiftFollowupService.resolveFollowup(AttackDefenderGiftFollowupContext.attackArt(
                 matchId,
                 context.opponentUserId,
                 userId,
                 context.turnNumber,
+                attackDownResult.hasDownedHolomem(),
+                effectiveTargetCardInstanceId,
+                downedTargetCardId,
+                downedTargetZone,
                 targetHolomem,
                 defenderSelfDownedHolderSnapshot,
+                defenderSelfDownedFanSupportSnapshots,
                 artSummary
-            );
-            defenderGiftTriggeredEffects.addAll(
-                matchGiftTriggerService.previewGiftTriggeredEffectsOnSelfDowned(
-                    matchId,
-                    context.opponentUserId,
-                    effectiveTargetCardInstanceId,
-                    downedTargetZone,
-                    context.turnNumber,
-                    defenderSelfDownedHolderSnapshot
-                )
-            );
-            defenderGiftTriggeredEffects.addAll(
-                matchGiftTriggerService.previewGiftTriggeredEffectsOnAllyDowned(
-                    matchId,
-                    context.opponentUserId,
-                    effectiveTargetCardInstanceId,
-                    downedTargetZone,
-                    context.turnNumber
-                )
-            );
-            defenderGiftTriggeredEffects.addAll(
-                previewHbp01124FanTriggeredEffectsOnSelfDowned(
-                    effectiveTargetCardInstanceId,
-                    downedTargetZone,
-                    defenderSelfDownedHolderSnapshot,
-                    defenderSelfDownedFanSupportSnapshots
-                )
-            );
-        }
+            ));
+        officialOshiSelfDownedSummary = defenderGiftFollowupResult.officialOshiSelfDownedSummary();
+        List<Map<String, Object>> defenderGiftTriggeredEffects =
+            new ArrayList<>(defenderGiftFollowupResult.defenderGiftTriggeredEffects());
+        downedTargetCardId = defenderGiftFollowupResult.downedTargetCardId();
+        downedTargetZone = defenderGiftFollowupResult.downedTargetZone();
         FollowupInteractionDecision postTriggerConfirmDecision = null;
         FollowupInteractionDecision defenderGiftConfirmDecision = null;
         Map<String, Object> downEventPreview = attackDownResult.downEventPreview();
@@ -2737,53 +2721,6 @@ public class MatchActionService {
         );
     }
 
-    private List<Map<String, Object>> previewHbp01124FanTriggeredEffectsOnSelfDowned(
-        Long downedCardInstanceId,
-        String downedStageZone,
-        Map<String, Object> holderSnapshot,
-        List<Map<String, Object>> fanSupportSnapshots
-    ) {
-        if (holderSnapshot == null || holderSnapshot.isEmpty() || fanSupportSnapshots == null || fanSupportSnapshots.isEmpty()) {
-            return List.of();
-        }
-        Long holderHolomemId = asLong(holderSnapshot.get("holomem_id"));
-        List<Long> attachedCheerCardInstanceIds = toLongList(holderSnapshot.get("attached_cheer_card_instance_ids"));
-        List<String> attachedCheerCardIds = toStringList(holderSnapshot.get("attached_cheer_card_ids"));
-        List<Long> stackCardInstanceIds = toLongList(holderSnapshot.get("stack_card_instance_ids"));
-        List<String> stackCardIds = toStringList(holderSnapshot.get("stack_card_ids"));
-        List<Map<String, Object>> previews = new ArrayList<>();
-        for (Map<String, Object> supportSnapshot : fanSupportSnapshots) {
-            Long supportCardInstanceId = asLong(supportSnapshot.get("supportCardInstanceId"));
-            String supportCardId = asString(supportSnapshot.get("supportCardId"));
-            String rawText = asString(supportSnapshot.get("rawText"));
-            if ("HBP01-124".equals(supportCardId)) {
-                rawText = "相手のターンで、このファンが付いているホロメンがダウンした時、このファンが付いているホロメンのエール1枚を、自分の他のホロメンに付け替える。";
-            }
-            if (supportCardInstanceId == null || supportCardInstanceId <= 0 || !StringUtils.hasText(rawText)) {
-                continue;
-            }
-            Map<String, Object> preview = new LinkedHashMap<>();
-            preview.put("triggerType", "SELF_DOWNED");
-            preview.put("giftHolderHolomemId", holderHolomemId);
-            preview.put("giftHolderCardInstanceId", supportCardInstanceId);
-            preview.put("giftHolderCardId", supportCardId);
-            preview.put("giftHolderZone", normalizeZone(downedStageZone));
-            preview.put("sourceCardInstanceId", downedCardInstanceId);
-            preview.put("triggerTargetCardInstanceId", downedCardInstanceId);
-            preview.put("rawText", rawText);
-            preview.put("requestedEffects", List.of("REATTACH"));
-            preview.put("executedEffects", List.of());
-            preview.put("unsupportedEffects", List.of());
-            preview.put("skippedEffects", List.of());
-            preview.put("giftHolderAttachedCheerCardInstanceIds", attachedCheerCardInstanceIds);
-            preview.put("giftHolderAttachedCheerCardIds", attachedCheerCardIds);
-            preview.put("giftHolderStackCardInstanceIds", stackCardInstanceIds);
-            preview.put("giftHolderStackCardIds", stackCardIds);
-            previews.add(preview);
-        }
-        return previews;
-    }
-
     private Map<String, Object> archiveOneAttachedCheerForArtExtra(
         Long matchId,
         Long userId,
@@ -3050,170 +2987,6 @@ public class MatchActionService {
         return summary;
     }
 
-    private Map<String, Object> applyOfficialOshiSelfDownedEffects(
-        Long matchId,
-        Long defenderUserId,
-        Long attackerUserId,
-        int turnNumber,
-        AttackTargetHolomem downedTarget,
-        Map<String, Object> holderSnapshot,
-        Map<String, Object> artSummary
-    ) {
-        String oshiCardId = loadPlayerOshiCardId(matchId, defenderUserId);
-        if (!StringUtils.hasText(oshiCardId) || downedTarget == null || holderSnapshot == null || holderSnapshot.isEmpty()) {
-            return Map.of();
-        }
-        List<Map<String, Object>> executed = new ArrayList<>();
-        if ("HBP01-004".equals(oshiCardId)) {
-            Map<String, Object> hbp01004 = applyHbp01004OshiSelfDownedReattach(
-                matchId,
-                defenderUserId,
-                attackerUserId,
-                holderSnapshot
-            );
-            if (!hbp01004.isEmpty()) {
-                executed.add(hbp01004);
-            }
-        }
-        if ("HBP01-006".equals(oshiCardId)) {
-            Map<String, Object> hbp01006 = applyHbp01006OshiSelfDownedReturnStack(
-                matchId,
-                defenderUserId,
-                attackerUserId,
-                downedTarget,
-                holderSnapshot,
-                artSummary
-            );
-            if (!hbp01006.isEmpty()) {
-                executed.add(hbp01006);
-            }
-        }
-        if (executed.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", "OSHI_REACTIVE_SELF_DOWNED_EFFECTS");
-        summary.put("oshiCardId", oshiCardId);
-        summary.put("executedEffects", executed);
-        summary.put("applied", true);
-        return summary;
-    }
-
-    private Map<String, Object> applyHbp01004OshiSelfDownedReattach(
-        Long matchId,
-        Long defenderUserId,
-        Long attackerUserId,
-        Map<String, Object> holderSnapshot
-    ) {
-        if (Objects.equals(defenderUserId, attackerUserId) || !canUseOshiSkill(matchId, defenderUserId, "NORMAL", 2)) {
-            return Map.of();
-        }
-        Long downedHolomemId = asLong(holderSnapshot.get("holomem_id"));
-        Long targetHolomemId = loadFirstOwnOtherHolomemId(matchId, defenderUserId, downedHolomemId);
-        if (targetHolomemId == null) {
-            return Map.of();
-        }
-        List<Long> movableGreenCheerIds = filterCheerCardInstanceIdsByColor(
-            matchId,
-            defenderUserId,
-            toLongList(holderSnapshot.get("attached_cheer_card_instance_ids")),
-            "GREEN"
-        );
-        if (movableGreenCheerIds.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, Object> holopowerPayment = consumeHolopowerCostToArchive(matchId, defenderUserId, 2);
-        markOshiSkillUsed(matchId, defenderUserId, "NORMAL");
-        List<String> movedCheerCardIds = new ArrayList<>();
-        List<Long> movedCheerRowIds = new ArrayList<>();
-        for (Long cheerCardInstanceId : movableGreenCheerIds) {
-            String cheerCardId = moveCheerCardInstanceToHolomem(matchId, defenderUserId, cheerCardInstanceId, targetHolomemId);
-            if (StringUtils.hasText(cheerCardId)) {
-                movedCheerCardIds.add(cheerCardId);
-                Long rowId = loadAttachedCheerRowId(targetHolomemId, cheerCardInstanceId);
-                if (rowId != null) {
-                    movedCheerRowIds.add(rowId);
-                }
-            }
-        }
-        if (movedCheerCardIds.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, Object> reattach = new LinkedHashMap<>();
-        reattach.put("effectType", "REATTACH");
-        reattach.put("moveRequested", movableGreenCheerIds.size());
-        reattach.put("moveApplied", movedCheerCardIds.size());
-        reattach.put("targetHolomemId", targetHolomemId);
-        reattach.put("movedCheerCardIds", movedCheerCardIds);
-        reattach.put("movedCheerRowIds", movedCheerRowIds);
-        reattach.put("sourceMode", "DOWNED_GREEN_CHEER");
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", "OSHI_SKILL_TRIGGER");
-        summary.put("oshiCardId", "HBP01-004");
-        summary.put("skillType", "NORMAL");
-        summary.put("skillName", "野兎たち～");
-        summary.put("triggerType", "SELF_DOWNED");
-        summary.put("holopowerCost", 2);
-        summary.put("holopowerPayment", holopowerPayment);
-        summary.put("executedEffects", List.of(reattach));
-        summary.put("applied", true);
-        return summary;
-    }
-
-    private Map<String, Object> applyHbp01006OshiSelfDownedReturnStack(
-        Long matchId,
-        Long defenderUserId,
-        Long attackerUserId,
-        AttackTargetHolomem downedTarget,
-        Map<String, Object> holderSnapshot,
-        Map<String, Object> artSummary
-    ) {
-        if (
-            Objects.equals(defenderUserId, attackerUserId)
-                || downedTarget == null
-                || !"RED".equals(normalizeZone(downedTarget.mainColor()))
-                || !canUseOshiSkill(matchId, defenderUserId, "SP", 2)
-        ) {
-            return Map.of();
-        }
-        List<Long> stackCardInstanceIds = toLongList(holderSnapshot.get("stack_card_instance_ids"));
-        if (stackCardInstanceIds.isEmpty()) {
-            Long matchCardInstanceId = asLong(holderSnapshot.get("match_card_id"));
-            if (matchCardInstanceId != null && matchCardInstanceId > 0) {
-                stackCardInstanceIds = List.of(matchCardInstanceId);
-            }
-        }
-        if (stackCardInstanceIds.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, Object> holopowerPayment = consumeHolopowerCostToArchive(matchId, defenderUserId, 2);
-        markOshiSkillUsed(matchId, defenderUserId, "SP");
-        Long restoredLifeCardInstanceId = restoreLostLifeFromArtSummary(matchId, defenderUserId, artSummary);
-        List<Long> returnedStackCardInstanceIds = moveArchivedCardsToHand(matchId, defenderUserId, stackCardInstanceIds);
-
-        Map<String, Object> returnToHand = new LinkedHashMap<>();
-        returnToHand.put("effectType", "RETURN_TO_HAND");
-        returnToHand.put("moveRequested", stackCardInstanceIds.size());
-        returnToHand.put("moveApplied", returnedStackCardInstanceIds.size());
-        returnToHand.put("movedCardInstanceIds", returnedStackCardInstanceIds);
-        returnToHand.put("sourceMode", "DOWNED_HOLOMEM_STACK");
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", "OSHI_SKILL_TRIGGER");
-        summary.put("oshiCardId", "HBP01-006");
-        summary.put("skillType", "SP");
-        summary.put("skillName", "Rise from the ashes");
-        summary.put("triggerType", "SELF_DOWNED");
-        summary.put("holopowerCost", 2);
-        summary.put("holopowerPayment", holopowerPayment);
-        summary.put("restoredLifeCardInstanceId", restoredLifeCardInstanceId);
-        summary.put("lifeLossModifier", restoredLifeCardInstanceId == null ? 0 : -1);
-        summary.put("executedEffects", List.of(returnToHand));
-        summary.put("applied", true);
-        return summary;
-    }
-
     private String loadPlayerOshiCardId(Long matchId, Long userId) {
         if (matchId == null || userId == null) {
             return null;
@@ -3319,265 +3092,6 @@ public class MatchActionService {
             matchId,
             opponentUserId
         );
-    }
-
-    private Long loadFirstOwnOtherHolomemId(Long matchId, Long ownerUserId, Long excludedHolomemId) {
-        if (matchId == null || ownerUserId == null) {
-            return null;
-        }
-        return jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('CENTER', 'COLLAB', 'BACK')
-              AND (? IS NULL OR id <> ?)
-            ORDER BY CASE zone WHEN 'CENTER' THEN 1 WHEN 'COLLAB' THEN 2 WHEN 'BACK' THEN 3 ELSE 9 END, id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            ownerUserId,
-            excludedHolomemId,
-            excludedHolomemId
-        );
-    }
-
-    private List<Long> filterCheerCardInstanceIdsByColor(
-        Long matchId,
-        Long ownerUserId,
-        List<Long> cheerCardInstanceIds,
-        String color
-    ) {
-        if (matchId == null || ownerUserId == null || cheerCardInstanceIds == null || cheerCardInstanceIds.isEmpty()) {
-            return List.of();
-        }
-        String normalizedColor = normalizeZone(color);
-        List<Long> matched = new ArrayList<>();
-        for (Long cheerCardInstanceId : cheerCardInstanceIds) {
-            if (cheerCardInstanceId == null || cheerCardInstanceId <= 0) {
-                continue;
-            }
-            String cardColor = jdbcTemplate.query(
-                """
-                SELECT cc.color
-                FROM match_cards mc
-                JOIN cheer_cards cc ON cc.card_id = mc.card_id
-                WHERE mc.id = ?
-                  AND mc.match_id = ?
-                  AND mc.owner_user_id = ?
-                LIMIT 1
-                """,
-                rs -> rs.next() ? rs.getString("color") : null,
-                cheerCardInstanceId,
-                matchId,
-                ownerUserId
-            );
-            if (normalizedColor.equals(normalizeZone(cardColor))) {
-                matched.add(cheerCardInstanceId);
-            }
-        }
-        return matched;
-    }
-
-    private String moveCheerCardInstanceToHolomem(
-        Long matchId,
-        Long ownerUserId,
-        Long cheerCardInstanceId,
-        Long targetHolomemId
-    ) {
-        if (matchId == null || ownerUserId == null || cheerCardInstanceId == null || targetHolomemId == null) {
-            return null;
-        }
-        String cheerCardId = jdbcTemplate.query(
-            """
-            SELECT card_id
-            FROM match_cards
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('ARCHIVE', 'STAGE')
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getString("card_id") : null,
-            cheerCardInstanceId,
-            matchId,
-            ownerUserId
-        );
-        if (!StringUtils.hasText(cheerCardId)) {
-            return null;
-        }
-        jdbcTemplate.update(
-            """
-            DELETE FROM match_holomem_cheers c
-            USING match_holomems h
-            WHERE c.match_holomem_id = h.id
-              AND c.match_card_id = ?
-              AND h.match_id = ?
-              AND h.owner_user_id = ?
-            """,
-            cheerCardInstanceId,
-            matchId,
-            ownerUserId
-        );
-        int moved = jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET zone = 'STAGE',
-                order_index = NULL,
-                is_face_down = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('ARCHIVE', 'STAGE')
-            """,
-            cheerCardInstanceId,
-            matchId,
-            ownerUserId
-        );
-        if (moved != 1) {
-            return null;
-        }
-        jdbcTemplate.update(
-            """
-            INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
-            VALUES (?, ?, ?, FALSE)
-            """,
-            targetHolomemId,
-            cheerCardInstanceId,
-            cheerCardId
-        );
-        return cheerCardId;
-    }
-
-    private Long loadAttachedCheerRowId(Long targetHolomemId, Long cheerCardInstanceId) {
-        if (targetHolomemId == null || cheerCardInstanceId == null) {
-            return null;
-        }
-        return jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_holomem_cheers
-            WHERE match_holomem_id = ?
-              AND match_card_id = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            targetHolomemId,
-            cheerCardInstanceId
-        );
-    }
-
-    private Long restoreLostLifeFromArtSummary(Long matchId, Long ownerUserId, Map<String, Object> artSummary) {
-        if (matchId == null || ownerUserId == null || artSummary == null || artSummary.isEmpty()) {
-            return null;
-        }
-        Long lostLifeCardInstanceId = asLong(artSummary.get("lostLifeCardInstanceId"));
-        if (lostLifeCardInstanceId == null || lostLifeCardInstanceId <= 0) {
-            List<Long> ids = toLongList(artSummary.get("lostLifeCardInstanceIds"));
-            if (!ids.isEmpty()) {
-                lostLifeCardInstanceId = ids.get(0);
-            }
-        }
-        if (lostLifeCardInstanceId == null || lostLifeCardInstanceId <= 0) {
-            return null;
-        }
-        Integer nextLifeOrder = jdbcTemplate.queryForObject(
-            """
-            SELECT COALESCE(MIN(order_index), 1) - 1
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'LIFE'
-            """,
-            Integer.class,
-            matchId,
-            ownerUserId
-        );
-        int restored = jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET zone = 'LIFE',
-                order_index = ?,
-                is_face_down = TRUE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'ARCHIVE'
-            """,
-            nextLifeOrder == null ? 0 : nextLifeOrder,
-            lostLifeCardInstanceId,
-            matchId,
-            ownerUserId
-        );
-        if (restored != 1) {
-            return null;
-        }
-        jdbcTemplate.update(
-            """
-            UPDATE match_players
-            SET current_life = COALESCE(current_life, 0) + 1,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE match_id = ?
-              AND user_id = ?
-            """,
-            matchId,
-            ownerUserId
-        );
-        artSummary.put("lifeReduced", false);
-        artSummary.put("lostLifeCardInstanceId", null);
-        artSummary.put("lostLifeCardInstanceIds", List.of());
-        return lostLifeCardInstanceId;
-    }
-
-    private List<Long> moveArchivedCardsToHand(Long matchId, Long ownerUserId, List<Long> cardInstanceIds) {
-        if (matchId == null || ownerUserId == null || cardInstanceIds == null || cardInstanceIds.isEmpty()) {
-            return List.of();
-        }
-        Integer nextHandOrder = jdbcTemplate.queryForObject(
-            """
-            SELECT COALESCE(MAX(order_index), 0) + 1
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'HAND'
-            """,
-            Integer.class,
-            matchId,
-            ownerUserId
-        );
-        int order = nextHandOrder == null ? 1 : nextHandOrder;
-        List<Long> moved = new ArrayList<>();
-        for (Long cardInstanceId : cardInstanceIds) {
-            if (cardInstanceId == null || cardInstanceId <= 0) {
-                continue;
-            }
-            int updated = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'HAND',
-                    order_index = ?,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'ARCHIVE'
-                """,
-                order++,
-                cardInstanceId,
-                matchId,
-                ownerUserId
-            );
-            if (updated == 1) {
-                moved.add(cardInstanceId);
-            }
-        }
-        return moved;
     }
 
     /**
