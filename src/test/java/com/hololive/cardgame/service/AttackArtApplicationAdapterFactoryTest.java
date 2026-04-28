@@ -39,6 +39,7 @@ class AttackArtApplicationAdapterFactoryTest {
     private final AttackEffectFollowupService attackEffectFollowupService = mock(AttackEffectFollowupService.class);
     private final AttackPerformanceAvailabilityService attackPerformanceAvailabilityService =
         mock(AttackPerformanceAvailabilityService.class);
+    private final MatchTimestampService matchTimestampService = mock(MatchTimestampService.class);
     private final MatchEffectCombatModifierService matchEffectCombatModifierService =
         mock(MatchEffectCombatModifierService.class);
     private final MatchGiftTriggerService matchGiftTriggerService = mock(MatchGiftTriggerService.class);
@@ -63,8 +64,9 @@ class AttackArtApplicationAdapterFactoryTest {
         InOrder order = inOrder(
             jdbcTemplate,
             attackPerformanceAvailabilityService,
-            dependencies,
+            matchTimestampService,
             matchRepository,
+            dependencies,
             attackPayloadJsonService,
             attackActionLogService,
             attackFinishCheckService
@@ -76,7 +78,7 @@ class AttackArtApplicationAdapterFactoryTest {
             eq(10L)
         );
         order.verify(attackPerformanceAvailabilityService).hasAvailableArtAttacker(100L, 10L, 3);
-        order.verify(dependencies).touchUpdatedAt(match);
+        order.verify(matchTimestampService).touchUpdatedAt(match);
         order.verify(matchRepository).saveAndFlush(match);
         order.verify(attackPayloadJsonService).toJson(any());
         order.verify(attackActionLogService).appendAttackArt(any(AttackActionLogContext.class));
@@ -154,6 +156,7 @@ class AttackArtApplicationAdapterFactoryTest {
             attackFinishCheckService,
             attackEffectFollowupService,
             attackPerformanceAvailabilityService,
+            matchTimestampService,
             matchEffectCombatModifierService,
             matchGiftTriggerService,
             jdbcTemplate,

@@ -101,6 +101,7 @@ public class MatchActionService {
     private final AttackPayloadJsonService attackPayloadJsonService;
     private final AttackPendingDecisionConversionService attackPendingDecisionConversionService;
     private final AttackEffectSummaryExtractor attackEffectSummaryExtractor;
+    private final MatchTimestampService matchTimestampService;
     private final AttackFinishCheckService attackFinishCheckService;
     private final AttackEffectFollowupService attackEffectFollowupService;
     private final AttackArtApplicationService attackArtApplicationService;
@@ -183,6 +184,7 @@ public class MatchActionService {
         this.attackPayloadJsonService = new AttackPayloadJsonService(objectMapper);
         this.attackPendingDecisionConversionService = new AttackPendingDecisionConversionService();
         this.attackEffectSummaryExtractor = new AttackEffectSummaryExtractor();
+        this.matchTimestampService = new MatchTimestampService();
         this.attackPerformanceAvailabilityService = new AttackPerformanceAvailabilityService(jdbcTemplate);
         this.attackFinishCheckService = new AttackFinishCheckService(
             this::evaluateCardEffectMatchFinish,
@@ -216,6 +218,7 @@ public class MatchActionService {
             this.attackFinishCheckService,
             this.attackEffectFollowupService,
             this.attackPerformanceAvailabilityService,
+            this.matchTimestampService,
             this.matchEffectCombatModifierService,
             matchGiftTriggerService,
             jdbcTemplate,
@@ -235,13 +238,8 @@ public class MatchActionService {
     private AttackArtApplicationAdapterDependencies createAttackArtApplicationAdapterDependencies() {
         return new AttackArtApplicationAdapterDependencies() {
             @Override
-            public void appendGiftTriggerAction(MatchEntity match, Long userId, Map<String, Object> payload, int turnNumber) {
-                appendAction(match, userId, "GIFT_TRIGGER", attackPayloadJsonService.toJson(payload), turnNumber);
-            }
-
-            @Override
-            public void touchUpdatedAt(MatchEntity match) {
-                MatchActionService.this.touchUpdatedAt(match);
+            public void appendGiftTriggerAction(Long matchId, Long userId, Map<String, Object> payload, int turnNumber) {
+                appendAction(matchId, userId, "GIFT_TRIGGER", attackPayloadJsonService.toJson(payload), turnNumber);
             }
 
         };

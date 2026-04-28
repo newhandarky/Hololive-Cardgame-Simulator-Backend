@@ -25,6 +25,7 @@ class AttackArtApplicationAdapterFactory {
     private final AttackFinishCheckService attackFinishCheckService;
     private final AttackEffectFollowupService attackEffectFollowupService;
     private final AttackPerformanceAvailabilityService attackPerformanceAvailabilityService;
+    private final MatchTimestampService matchTimestampService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final JdbcTemplate jdbcTemplate;
@@ -47,6 +48,7 @@ class AttackArtApplicationAdapterFactory {
         AttackFinishCheckService attackFinishCheckService,
         AttackEffectFollowupService attackEffectFollowupService,
         AttackPerformanceAvailabilityService attackPerformanceAvailabilityService,
+        MatchTimestampService matchTimestampService,
         MatchEffectCombatModifierService matchEffectCombatModifierService,
         MatchGiftTriggerService matchGiftTriggerService,
         JdbcTemplate jdbcTemplate,
@@ -68,6 +70,7 @@ class AttackArtApplicationAdapterFactory {
         this.attackFinishCheckService = attackFinishCheckService;
         this.attackEffectFollowupService = attackEffectFollowupService;
         this.attackPerformanceAvailabilityService = attackPerformanceAvailabilityService;
+        this.matchTimestampService = matchTimestampService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.jdbcTemplate = jdbcTemplate;
@@ -348,7 +351,7 @@ class AttackArtApplicationAdapterFactory {
                 : null;
             if (result.actionLogRequired()) {
                 dependencies.appendGiftTriggerAction(
-                    context.match(),
+                    context.matchId(),
                     context.defenderUserId(),
                     defenderDamageReceivedGiftSummary,
                     context.turnNumber()
@@ -639,7 +642,7 @@ class AttackArtApplicationAdapterFactory {
                 context.turnNumber()
             );
             context.match().setCurrentPhase(MatchPhase.PERFORMANCE.name());
-            dependencies.touchUpdatedAt(context.match());
+            matchTimestampService.touchUpdatedAt(context.match());
             matchRepository.saveAndFlush(context.match());
 
             AttackEffectPostDamageResult postDamageResult = postDamageStage.result();
