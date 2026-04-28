@@ -35,6 +35,13 @@ class AttackCostServiceTest {
     }
 
     @Test
+    void parseCostStrictShouldRejectMalformedJson() {
+        assertThatThrownBy(() -> service.parseCostStrict("{not-json"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("attack cost JSON");
+    }
+
+    @Test
     void applyReductionShouldNotAllowNegativeCost() {
         Map<String, Integer> result = service.applyReduction(
             Map.of("RED", 1, "COLORLESS", 2),

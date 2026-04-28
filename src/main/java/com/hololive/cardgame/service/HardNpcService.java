@@ -1,7 +1,5 @@
 package com.hololive.cardgame.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hololive.cardgame.dto.BloomActionRequest;
 import com.hololive.cardgame.dto.GameStateResponse;
 import com.hololive.cardgame.dto.MoveStageHolomemActionRequest;
@@ -44,7 +42,7 @@ public class HardNpcService {
     private final MatchRepository matchRepository;
     private final UserRepository userRepository;
     private final JdbcTemplate jdbcTemplate;
-    private final ObjectMapper objectMapper;
+    private final AttackCostService attackCostService;
 
     /**
      * 建立 Hard NPC 服務，注入對戰流程所需的服務與資料存取元件。
@@ -56,7 +54,7 @@ public class HardNpcService {
         MatchRepository matchRepository,
         UserRepository userRepository,
         JdbcTemplate jdbcTemplate,
-        ObjectMapper objectMapper
+        AttackCostService attackCostService
     ) {
         this.lobbyMatchService = lobbyMatchService;
         this.matchActionService = matchActionService;
@@ -64,7 +62,7 @@ public class HardNpcService {
         this.matchRepository = matchRepository;
         this.userRepository = userRepository;
         this.jdbcTemplate = jdbcTemplate;
-        this.objectMapper = objectMapper;
+        this.attackCostService = attackCostService;
     }
 
     /**
@@ -1161,70 +1159,27 @@ public class HardNpcService {
         if (matchHolomemId == null || matchHolomemId <= 0) {
             return false;
         }
-        Map<String, Integer> required = parseCostMap(costJson);
+        Map<String, Integer> required;
+        try {
+            required = attackCostService.parseCostStrict(costJson);
+        } catch (IllegalArgumentException ex) {
+            return false;
+        }
         if (required.isEmpty()) {
             return true;
         }
-        Map<String, Integer> available = jdbcTemplate.query(
-            """
-            SELECT cc.color, COUNT(*) AS cnt
-            FROM match_holomem_cheers mhc
-            JOIN cheer_cards cc ON cc.card_id = mhc.cheer_card_id
-            WHERE mhc.match_holomem_id = ?
-            GROUP BY cc.color
-            """,
-            rs -> {
-                Map<String, Integer> rows = new LinkedHashMap<>();
-                while (rs.next()) {
-                    rows.put(normalize(rs.getString("color")), rs.getInt("cnt"));
-                }
-                return rows;
-            },
-            matchHolomemId
-        );
-        int totalAvailable = available.values().stream().mapToInt(Integer::intValue).sum();
-        int usedColored = 0;
-        for (Map.Entry<String, Integer> entry : required.entrySet()) {
-            String color = normalize(entry.getKey());
-            if ("COLORLESS".equals(color)) {
-                continue;
-            }
-            int req = Math.max(entry.getValue(), 0);
-            int have = Math.max(available.getOrDefault(color, 0), 0);
-            if (have < req) {
-                return false;
-            }
-            usedColored += req;
-        }
-        int requiredColorless = Math.max(required.getOrDefault("COLORLESS", 0), 0);
-        return totalAvailable - usedColored >= requiredColorless;
-    }
-
-    /**
-     * 將 cost_cheer_json 解析為 {COLOR -> requiredCount}。
-     * 解析失敗時回傳不可支付的保守值，避免 NPC 誤判可行動。
-     */
-    private Map<String, Integer> parseCostMap(String costJson) {
-        Map<String, Integer> result = new LinkedHashMap<>();
-        if (costJson == null || costJson.isBlank()) {
-            return result;
-        }
         try {
-            JsonNode node = objectMapper.readTree(costJson);
-            if (node == null || !node.isObject()) {
-                return result;
-            }
-            node.fields().forEachRemaining(entry -> {
-                int value = entry.getValue() == null ? 0 : Math.max(entry.getValue().asInt(0), 0);
-                if (value > 0) {
-                    result.put(normalize(entry.getKey()), value);
-                }
-            });
-        } catch (Exception ignored) {
-            // keep safe default: unknown format -> treat as unpayable by NPC
-            return Map.of("COLORLESS", Integer.MAX_VALUE);
+            attackCostService.resolvePayment(AttackCostPaymentContext.preview(
+                null,
+                null,
+                matchHolomemId,
+                required,
+                Map.of()
+            ));
+            return true;
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return false;
         }
-        return result;
     }
 
     /**

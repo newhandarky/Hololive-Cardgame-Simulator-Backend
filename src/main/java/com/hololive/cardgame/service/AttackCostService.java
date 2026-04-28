@@ -23,6 +23,17 @@ public class AttackCostService {
     }
 
     public Map<String, Integer> parseCost(String costCheerJsonText) {
+        if (!StringUtils.hasText(costCheerJsonText)) {
+            return new LinkedHashMap<>();
+        }
+        try {
+            return parseCostStrict(costCheerJsonText);
+        } catch (Exception ignored) {
+            return Map.of();
+        }
+    }
+
+    public Map<String, Integer> parseCostStrict(String costCheerJsonText) {
         Map<String, Integer> cost = new LinkedHashMap<>();
         if (!StringUtils.hasText(costCheerJsonText)) {
             return cost;
@@ -39,8 +50,8 @@ public class AttackCostService {
                     cost.put(color, required);
                 }
             });
-        } catch (Exception ignored) {
-            return Map.of();
+        } catch (Exception ex) {
+            throw new IllegalArgumentException("attack cost JSON 格式錯誤", ex);
         }
         return cost;
     }
