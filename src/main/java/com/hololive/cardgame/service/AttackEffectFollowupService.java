@@ -36,7 +36,7 @@ public class AttackEffectFollowupService {
         }
 
         HoloxRevealResult holoxRevealResult = holoxRevealResolver.resolve(context);
-        Object holoxSlotRevealSummary = holoxRevealResult == null ? null : holoxRevealResult.summary();
+        HoloxSlotRevealSummary holoxSlotRevealSummary = holoxRevealResult == null ? null : holoxRevealResult.summary();
         Map<String, Object> hbp02039SupportRecovery = hbp02039SupportRecoveryResolver.resolve(
             context,
             holoxSlotRevealSummary
@@ -132,7 +132,7 @@ public class AttackEffectFollowupService {
     }
 
     public record HoloxRevealResult(
-        Object summary,
+        HoloxSlotRevealSummary summary,
         int artBonus
     ) {
     }
@@ -142,11 +142,11 @@ public class AttackEffectFollowupService {
     }
 
     public interface Hbp02039SupportRecoveryResolver {
-        Map<String, Object> resolve(AttackEffectFollowupContext context, Object holoxSlotRevealSummary);
+        Map<String, Object> resolve(AttackEffectFollowupContext context, HoloxSlotRevealSummary holoxSlotRevealSummary);
     }
 
     public interface Hbp02040LifeLossResolver {
-        Map<String, Object> resolve(AttackEffectFollowupContext context, Object holoxSlotRevealSummary);
+        Map<String, Object> resolve(AttackEffectFollowupContext context, HoloxSlotRevealSummary holoxSlotRevealSummary);
     }
 
     public interface DamagePreventionResolver {

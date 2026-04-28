@@ -39,7 +39,7 @@ class AttackEffectFollowupServiceTest {
     @Test
     void resolvePreDamageShouldResolveHoloxBeforeHbpFollowups() {
         AttackEffectFollowupContext context = context();
-        Object holoxSummary = summary("revealApplied", true);
+        HoloxSlotRevealSummary holoxSummary = HoloxSlotRevealSummary.empty();
         when(holoxRevealResolver.resolve(context)).thenReturn(new HoloxRevealResult(holoxSummary, 40));
 
         service.resolvePreDamage(context);
@@ -57,7 +57,7 @@ class AttackEffectFollowupServiceTest {
     @Test
     void resolvePreDamageShouldUseHoloxArtBonus() {
         AttackEffectFollowupContext context = context();
-        Object holoxSummary = summary("revealApplied", true);
+        HoloxSlotRevealSummary holoxSummary = HoloxSlotRevealSummary.empty();
         when(holoxRevealResolver.resolve(context)).thenReturn(new HoloxRevealResult(holoxSummary, 60));
 
         AttackEffectFollowupResult result = service.resolvePreDamage(context);
@@ -69,7 +69,7 @@ class AttackEffectFollowupServiceTest {
     @Test
     void resolvePreDamageShouldReturnHbpSummaries() {
         AttackEffectFollowupContext context = context();
-        Object holoxSummary = summary("revealApplied", true);
+        HoloxSlotRevealSummary holoxSummary = HoloxSlotRevealSummary.empty();
         Map<String, Object> recovery = summary("effectType", "HBP02039_SUPPORT_RECOVERY");
         Map<String, Object> lifeLoss = summary("effectType", "HBP02040_LIFE_LOSS");
         when(holoxRevealResolver.resolve(context)).thenReturn(new HoloxRevealResult(holoxSummary, 20));

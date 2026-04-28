@@ -5,7 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 public record AttackEffectFollowupResult(
-    Object holoxSlotRevealSummary,
+    HoloxSlotRevealSummary holoxSlotRevealSummary,
     Map<String, Object> hbp02039SupportRecovery,
     Map<String, Object> hbp02040LifeLoss,
     int artBonus

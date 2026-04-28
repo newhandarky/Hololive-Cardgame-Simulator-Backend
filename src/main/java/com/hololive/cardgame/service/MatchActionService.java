@@ -255,11 +255,6 @@ public class MatchActionService {
             }
 
             @Override
-            public HoloxSlotRevealSummary toHoloxSlotRevealSummary(Object summary) {
-                return MatchActionService.this.toHoloxSlotRevealSummary(summary);
-            }
-
-            @Override
             public List<Map<String, Object>> extractExecutedEffectSummaries(Map<String, Object> effectSummary) {
                 return MatchActionService.this.extractExecutedEffectSummaries(effectSummary);
             }
@@ -3131,12 +3126,6 @@ public class MatchActionService {
         return usedCount != null && usedCount > 0;
     }
 
-    private HoloxSlotRevealSummary toHoloxSlotRevealSummary(Object summary) {
-        return summary instanceof HoloxSlotRevealSummary holoxSlotRevealSummary
-            ? holoxSlotRevealSummary
-            : HoloxSlotRevealSummary.empty();
-    }
-
     /**
      * 結束目前回合並交棒給對手。
      * 會先驗證必要回合動作（抽牌、吶喊）是否完成，再重置狀態與建立對手 TURN_START 互動。
@@ -5522,13 +5511,13 @@ public class MatchActionService {
     private class AttackHbp02039SupportRecoveryResolver implements AttackEffectFollowupService.Hbp02039SupportRecoveryResolver {
 
         @Override
-        public Map<String, Object> resolve(AttackEffectFollowupContext context, Object holoxSlotRevealSummary) {
+        public Map<String, Object> resolve(AttackEffectFollowupContext context, HoloxSlotRevealSummary holoxSlotRevealSummary) {
             return applyHbp02039HoloxSupportRecovery(
                 context.matchId(),
                 context.attackerUserId(),
                 context.attackerCardId(),
                 context.artName(),
-                toHoloxSlotRevealSummary(holoxSlotRevealSummary)
+                holoxSlotRevealSummary == null ? HoloxSlotRevealSummary.empty() : holoxSlotRevealSummary
             );
         }
     }
@@ -5536,7 +5525,7 @@ public class MatchActionService {
     private class AttackHbp02040LifeLossResolver implements AttackEffectFollowupService.Hbp02040LifeLossResolver {
 
         @Override
-        public Map<String, Object> resolve(AttackEffectFollowupContext context, Object holoxSlotRevealSummary) {
+        public Map<String, Object> resolve(AttackEffectFollowupContext context, HoloxSlotRevealSummary holoxSlotRevealSummary) {
             return applyHbp02040HoloxLifeLoss(
                 context.matchId(),
                 context.attackerUserId(),
@@ -5545,7 +5534,7 @@ public class MatchActionService {
                 context.attackerHolomemId(),
                 context.attackerCardId(),
                 context.artName(),
-                toHoloxSlotRevealSummary(holoxSlotRevealSummary)
+                holoxSlotRevealSummary == null ? HoloxSlotRevealSummary.empty() : holoxSlotRevealSummary
             );
         }
     }

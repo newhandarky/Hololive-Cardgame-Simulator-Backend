@@ -84,7 +84,6 @@ class AttackArtApplicationAdapterFactoryTest {
         when(attackEffectFollowupService.resolvePreDamage(any())).thenReturn(
             new AttackEffectFollowupResult(null, Map.of(), Map.of(), 0)
         );
-        when(dependencies.toHoloxSlotRevealSummary(null)).thenReturn(HoloxSlotRevealSummary.empty());
         when(attackCostService.parseCost("{}")).thenReturn(emptyCost);
         when(matchEffectCombatModifierService.resolvePassiveGiftArtCheerCostReduction(100L, 10L, 501L, "雨のマントラ"))
             .thenReturn(emptyCost);

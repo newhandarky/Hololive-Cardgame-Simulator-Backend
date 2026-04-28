@@ -14,8 +14,6 @@ interface AttackArtApplicationAdapterDependencies {
 
     List<Map<String, Object>> loadSelfDownedFanSupportSnapshots(Long matchId, Long ownerUserId, Long holderHolomemId);
 
-    HoloxSlotRevealSummary toHoloxSlotRevealSummary(Object summary);
-
     List<Map<String, Object>> extractExecutedEffectSummaries(Map<String, Object> effectSummary);
 
 }

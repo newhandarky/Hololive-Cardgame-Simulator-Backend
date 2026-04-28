@@ -198,7 +198,7 @@ class AttackArtApplicationAdapterFactory {
             );
             return new AttackApplicationPreDamageStage(
                 result,
-                dependencies.toHoloxSlotRevealSummary(result.holoxSlotRevealSummary())
+                result.holoxSlotRevealSummary() == null ? HoloxSlotRevealSummary.empty() : result.holoxSlotRevealSummary()
             );
         }
     }
