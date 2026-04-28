@@ -79,6 +79,7 @@ public class MatchActionService {
     private final MatchPayloadJsonService matchPayloadJsonService;
     private final GiftTriggerActionPayloadExtractor giftTriggerActionPayloadExtractor;
     private final GiftTriggerActionWriter giftTriggerActionWriter;
+    private final PendingGiftTriggerContextExtractor pendingGiftTriggerContextExtractor;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -165,6 +166,7 @@ public class MatchActionService {
         this.matchPayloadJsonService = new MatchPayloadJsonService(objectMapper);
         this.giftTriggerActionPayloadExtractor = new GiftTriggerActionPayloadExtractor();
         this.giftTriggerActionWriter = new GiftTriggerActionWriter(matchActionRepository, matchPayloadJsonService);
+        this.pendingGiftTriggerContextExtractor = new PendingGiftTriggerContextExtractor();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5276,54 +5278,7 @@ public class MatchActionService {
      * 從 pending context 解析 Gift trigger list。
      */
     private List<Map<String, Object>> extractGiftTriggerContexts(JsonNode contextNode) {
-        if (contextNode == null || contextNode.isNull()) {
-            return List.of();
-        }
-        JsonNode triggersNode = contextNode.get("giftTriggers");
-        if (triggersNode == null || !triggersNode.isArray()) {
-            return List.of();
-        }
-        List<Map<String, Object>> triggers = new ArrayList<>();
-        for (JsonNode node : triggersNode) {
-            if (node == null || !node.isObject()) {
-                continue;
-            }
-            Map<String, Object> trigger = new LinkedHashMap<>();
-            trigger.put("triggerType", extractJsonText(node, "triggerType"));
-            trigger.put("sourceCardInstanceId", extractJsonLong(node, "sourceCardInstanceId"));
-            trigger.put("triggerTargetCardInstanceId", extractJsonLong(node, "triggerTargetCardInstanceId"));
-            trigger.put("giftHolderHolomemId", extractJsonLong(node, "giftHolderHolomemId"));
-            trigger.put("giftHolderCardInstanceId", extractJsonLong(node, "giftHolderCardInstanceId"));
-            trigger.put("giftHolderCardId", extractJsonText(node, "giftHolderCardId"));
-            trigger.put("giftHolderZone", extractJsonText(node, "giftHolderZone"));
-            trigger.put(
-                "giftHolderAttachedCheerCardInstanceIds",
-                extractJsonLongList(node, "giftHolderAttachedCheerCardInstanceIds")
-            );
-            trigger.put(
-                "giftHolderAttachedCheerCardIds",
-                extractJsonTextList(node, "giftHolderAttachedCheerCardIds")
-            );
-            trigger.put(
-                "giftHolderStackCardInstanceIds",
-                extractJsonLongList(node, "giftHolderStackCardInstanceIds")
-            );
-            trigger.put(
-                "giftHolderStackCardIds",
-                extractJsonTextList(node, "giftHolderStackCardIds")
-            );
-            trigger.put("selectionRequired", extractJsonBoolean(node, "selectionRequired"));
-            trigger.put("selectionEffectType", extractJsonText(node, "selectionEffectType"));
-            trigger.put("selectionMinSelect", extractJsonLong(node, "selectionMinSelect"));
-            trigger.put("selectionMaxSelect", extractJsonLong(node, "selectionMaxSelect"));
-            trigger.put(
-                "selectionCandidateCardInstanceIds",
-                extractJsonLongList(node, "selectionCandidateCardInstanceIds")
-            );
-            trigger.put("rawText", extractJsonText(node, "rawText"));
-            triggers.add(trigger);
-        }
-        return triggers;
+        return pendingGiftTriggerContextExtractor.extractGiftTriggerContexts(contextNode);
     }
 
     /**
