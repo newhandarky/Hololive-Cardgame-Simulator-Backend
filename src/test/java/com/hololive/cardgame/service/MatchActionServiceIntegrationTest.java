@@ -24793,6 +24793,38 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         assertThat(triggerPayloadText).contains("HBP01-027");
         assertThat(triggerPayloadText).containsPattern("\"diceRoll\"\\s*:\\s*1");
         assertThat(triggerPayloadText).containsPattern("\"preventedDamage\"\\s*:\\s*true");
+
+        Integer giftTriggerActionOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT action_order
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'DAMAGE_RECEIVED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+        Integer attackArtActionOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT action_order
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+              AND payload -> 'defenderDamageReceivedGift' ->> 'preventedDamage' = 'true'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        assertThat(giftTriggerActionOrder).isLessThan(attackArtActionOrder);
     }
 
     @Test
