@@ -3,6 +3,7 @@ package com.hololive.cardgame.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hololive.cardgame.dto.AttachCheerActionRequest;
@@ -9647,7 +9648,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
     }
 
     @Test
-    void attackArtShouldApplyDamageToOpponentHolomemAndRestAttacker() {
+    void attackArtShouldApplyDamageToOpponentHolomemAndRestAttacker() throws Exception {
         StartedMatchContext context = createStartedMatch("attack-damage-host", "attack-damage-guest");
         Long matchId = context.matchId();
         Long hostId = context.hostId();
@@ -9866,6 +9867,59 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
 
         assertThat(guestDamageTaken).isEqualTo(110);
         assertThat(attackerRested).isTrue();
+
+        String payloadText = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId,
+            hostId
+        );
+        JsonNode payload = new ObjectMapper().readTree(payloadText);
+        assertThat(payload.fieldNames())
+            .toIterable()
+            .contains(
+                "attackerCardInstanceId",
+                "attackerCardId",
+                "attackerZone",
+                "targetCardInstanceId",
+                "artName",
+                "artBaseCost",
+                "artCost",
+                "costPayment",
+                "artBaseDamage",
+                "artTotalDamage",
+                "effect",
+                "defenderDamageReceivedGift",
+                "artDownTriggeredEffects",
+                "postTriggerEffects",
+                "defenderGiftEffects",
+                "hasNextPerformanceAction"
+            );
+        assertThat(payload.path("attackerCardInstanceId").asLong()).isEqualTo(hostCardInstanceId);
+        assertThat(payload.path("attackerCardId").asText()).isEqualTo(hostCardId);
+        assertThat(payload.path("attackerZone").asText()).isEqualTo("CENTER");
+        assertThat(payload.path("targetCardInstanceId").asLong()).isEqualTo(guestCardInstanceId);
+        assertThat(payload.path("artName").asText()).isEqualTo("測試藝能 60");
+        assertThat(payload.path("artBaseCost").path("COLORLESS").asInt()).isEqualTo(1);
+        assertThat(payload.path("artCost").path("COLORLESS").asInt()).isEqualTo(1);
+        assertThat(payload.path("costPayment").path("paidTotal").asInt()).isEqualTo(1);
+        assertThat(payload.path("costPayment").path("consumed").asBoolean()).isFalse();
+        assertThat(payload.path("artBaseDamage").asInt()).isEqualTo(60);
+        assertThat(payload.path("artTotalDamage").asInt()).isEqualTo(110);
+        assertThat(payload.path("effect").isObject()).isTrue();
+        assertThat(payload.path("defenderDamageReceivedGift").isNull()).isTrue();
+        assertThat(payload.path("artDownTriggeredEffects").isObject()).isTrue();
+        assertThat(payload.path("postTriggerEffects").isObject()).isTrue();
+        assertThat(payload.path("defenderGiftEffects").isObject()).isTrue();
+        assertThat(payload.path("hasNextPerformanceAction").asBoolean()).isTrue();
     }
 
     @Test
