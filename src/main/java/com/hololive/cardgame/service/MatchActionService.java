@@ -222,8 +222,7 @@ public class MatchActionService {
             this.matchEffectCombatModifierService,
             matchGiftTriggerService,
             jdbcTemplate,
-            matchRepository,
-            createAttackArtApplicationAdapterDependencies()
+            matchRepository
         ).create();
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
@@ -233,16 +232,6 @@ public class MatchActionService {
         this.matchEventHookService = matchEventHookService;
         this.gameActionExecutor = gameActionExecutor;
         this.diceService = diceService;
-    }
-
-    private AttackArtApplicationAdapterDependencies createAttackArtApplicationAdapterDependencies() {
-        return new AttackArtApplicationAdapterDependencies() {
-            @Override
-            public void appendGiftTriggerAction(Long matchId, Long userId, Map<String, Object> payload, int turnNumber) {
-                appendAction(matchId, userId, "GIFT_TRIGGER", attackPayloadJsonService.toJson(payload), turnNumber);
-            }
-
-        };
     }
 
     /**

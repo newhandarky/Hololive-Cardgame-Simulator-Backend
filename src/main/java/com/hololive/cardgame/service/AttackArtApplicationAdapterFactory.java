@@ -30,7 +30,6 @@ class AttackArtApplicationAdapterFactory {
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final JdbcTemplate jdbcTemplate;
     private final MatchRepository matchRepository;
-    private final AttackArtApplicationAdapterDependencies dependencies;
 
     AttackArtApplicationAdapterFactory(
         AttackCostService attackCostService,
@@ -52,8 +51,7 @@ class AttackArtApplicationAdapterFactory {
         MatchEffectCombatModifierService matchEffectCombatModifierService,
         MatchGiftTriggerService matchGiftTriggerService,
         JdbcTemplate jdbcTemplate,
-        MatchRepository matchRepository,
-        AttackArtApplicationAdapterDependencies dependencies
+        MatchRepository matchRepository
     ) {
         this.attackCostService = attackCostService;
         this.attackTargetService = attackTargetService;
@@ -75,7 +73,6 @@ class AttackArtApplicationAdapterFactory {
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.jdbcTemplate = jdbcTemplate;
         this.matchRepository = matchRepository;
-        this.dependencies = dependencies;
     }
 
     AttackArtApplicationService create() {
@@ -350,12 +347,12 @@ class AttackArtApplicationAdapterFactory {
                 ? result.defenderDamageReceivedGiftSummary()
                 : null;
             if (result.actionLogRequired()) {
-                dependencies.appendGiftTriggerAction(
+                attackActionLogService.appendGiftTrigger(AttackActionLogContext.attackArt(
                     context.matchId(),
                     context.defenderUserId(),
-                    defenderDamageReceivedGiftSummary,
-                    context.turnNumber()
-                );
+                    context.turnNumber(),
+                    attackPayloadJsonService.toJson(defenderDamageReceivedGiftSummary)
+                ));
             }
             return new AttackApplicationDamagePreventionStage(
                 result,

@@ -45,8 +45,6 @@ class AttackArtApplicationAdapterFactoryTest {
     private final MatchGiftTriggerService matchGiftTriggerService = mock(MatchGiftTriggerService.class);
     private final JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
     private final MatchRepository matchRepository = mock(MatchRepository.class);
-    private final AttackArtApplicationAdapterDependencies dependencies =
-        mock(AttackArtApplicationAdapterDependencies.class);
     private final AttackRestAndPayloadService attackRestAndPayloadService = new AttackRestAndPayloadService();
 
     @Test
@@ -66,7 +64,6 @@ class AttackArtApplicationAdapterFactoryTest {
             attackPerformanceAvailabilityService,
             matchTimestampService,
             matchRepository,
-            dependencies,
             attackPayloadJsonService,
             attackActionLogService,
             attackFinishCheckService
@@ -160,8 +157,7 @@ class AttackArtApplicationAdapterFactoryTest {
             matchEffectCombatModifierService,
             matchGiftTriggerService,
             jdbcTemplate,
-            matchRepository,
-            dependencies
+            matchRepository
         );
     }
 

@@ -68,10 +68,46 @@ class AttackActionLogServiceTest {
     }
 
     @Test
+    void appendGiftTriggerShouldUseGiftTriggerActionType() {
+        AttackActionLogContext context = context("{\"effectType\":\"DAMAGE_PREVENTION\"}");
+        AttackActionLogResult expected = new AttackActionLogResult(
+            7003L,
+            6,
+            AttackActionLogService.ACTION_TYPE_GIFT_TRIGGER,
+            context.payloadJson()
+        );
+        when(actionWriter.appendAction(
+            context.matchId(),
+            context.userId(),
+            AttackActionLogService.ACTION_TYPE_GIFT_TRIGGER,
+            context.payloadJson(),
+            context.turnNumber()
+        )).thenReturn(expected);
+
+        AttackActionLogResult result = service.appendGiftTrigger(context);
+
+        assertThat(result).isEqualTo(expected);
+        verify(actionWriter).appendAction(
+            context.matchId(),
+            context.userId(),
+            AttackActionLogService.ACTION_TYPE_GIFT_TRIGGER,
+            context.payloadJson(),
+            context.turnNumber()
+        );
+    }
+
+    @Test
     void appendAttackArtShouldRejectMissingContext() {
         assertThatThrownBy(() -> service.appendAttackArt(null))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("attack action log");
+    }
+
+    @Test
+    void appendGiftTriggerShouldRejectMissingContext() {
+        assertThatThrownBy(() -> service.appendGiftTrigger(null))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("attack gift trigger action log");
     }
 
     private AttackActionLogContext context(String payloadJson) {
