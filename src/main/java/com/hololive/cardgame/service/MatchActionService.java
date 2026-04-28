@@ -81,6 +81,7 @@ public class MatchActionService {
     private final GiftTriggerActionWriter giftTriggerActionWriter;
     private final PendingGiftTriggerContextExtractor pendingGiftTriggerContextExtractor;
     private final PendingDownEventContextExtractor pendingDownEventContextExtractor;
+    private final AttackPostTriggerSectionBuilder attackPostTriggerSectionBuilder;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -169,6 +170,7 @@ public class MatchActionService {
         this.giftTriggerActionWriter = new GiftTriggerActionWriter(matchActionRepository, matchPayloadJsonService);
         this.pendingGiftTriggerContextExtractor = new PendingGiftTriggerContextExtractor();
         this.pendingDownEventContextExtractor = new PendingDownEventContextExtractor();
+        this.attackPostTriggerSectionBuilder = new AttackPostTriggerSectionBuilder();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5625,39 +5627,7 @@ public class MatchActionService {
         List<Map<String, Object>> giftTriggeredEffects,
         Map<String, Object> downEventPreview
     ) {
-        List<Map<String, Object>> sections = new ArrayList<>();
-        if (downEventPreview != null && !downEventPreview.isEmpty()) {
-            Map<String, Object> downSection = new LinkedHashMap<>();
-            downSection.put("sectionType", "DOWN_EVENT");
-            downSection.put("title", "Down Event");
-            downSection.put("requestedLifeLoss", asInt(downEventPreview.get("requestedLifeLoss")));
-            downSection.put("downedCardId", asString(downEventPreview.get("downedCardId")));
-            downSection.put("rawText", asString(downEventPreview.get("rawText")));
-            sections.add(downSection);
-        }
-        if (giftTriggeredEffects != null && !giftTriggeredEffects.isEmpty()) {
-            List<Map<String, Object>> giftItems = new ArrayList<>();
-            for (Map<String, Object> trigger : giftTriggeredEffects) {
-                if (trigger == null || trigger.isEmpty()) {
-                    continue;
-                }
-                Map<String, Object> item = new LinkedHashMap<>();
-                item.put("triggerType", normalizeZone(trigger.get("triggerType")));
-                item.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
-                item.put("rawText", asString(trigger.get("rawText")));
-                item.put("requestedEffects", toStringList(trigger.get("requestedEffects")));
-                giftItems.add(item);
-            }
-            if (!giftItems.isEmpty()) {
-                Map<String, Object> giftSection = new LinkedHashMap<>();
-                giftSection.put("sectionType", "GIFT");
-                giftSection.put("title", "Gift");
-                giftSection.put("count", giftItems.size());
-                giftSection.put("items", giftItems);
-                sections.add(giftSection);
-            }
-        }
-        return sections;
+        return attackPostTriggerSectionBuilder.buildAttackArtPostTriggerSections(giftTriggeredEffects, downEventPreview);
     }
 
     /**
