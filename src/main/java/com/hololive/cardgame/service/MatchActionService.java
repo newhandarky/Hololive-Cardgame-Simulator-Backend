@@ -101,6 +101,7 @@ public class MatchActionService {
     private final AttackFinishCheckService attackFinishCheckService;
     private final AttackEffectFollowupService attackEffectFollowupService;
     private final AttackArtApplicationService attackArtApplicationService;
+    private final AttackPerformanceAvailabilityService attackPerformanceAvailabilityService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -176,6 +177,7 @@ public class MatchActionService {
         this.attackPostTriggerPendingService = new AttackPostTriggerPendingService(new AttackArtPendingDecisionCreator());
         this.attackRestAndPayloadService = new AttackRestAndPayloadService();
         this.attackActionLogService = new AttackActionLogService(new AttackArtActionWriter());
+        this.attackPerformanceAvailabilityService = new AttackPerformanceAvailabilityService(jdbcTemplate);
         this.attackFinishCheckService = new AttackFinishCheckService(
             this::evaluateCardEffectMatchFinish,
             (match, actorUserId, turnNumber, effectSummary) -> evaluateLifeDefeat(match, actorUserId, turnNumber),
@@ -234,7 +236,7 @@ public class MatchActionService {
 
             @Override
             public boolean hasAvailableArtAttacker(Long matchId, Long userId, int turnNumber) {
-                return MatchActionService.this.hasAvailableArtAttacker(matchId, userId, turnNumber);
+                return attackPerformanceAvailabilityService.hasAvailableArtAttacker(matchId, userId, turnNumber);
             }
 
             @Override
@@ -2310,7 +2312,7 @@ public class MatchActionService {
         if (!Set.of("CENTER", "COLLAB").contains(attackerZone)) {
             throw new IllegalStateException("目前僅支援由 CENTER 或 COLLAB 發動藝能");
         }
-        if (countArtUsedByZoneThisTurn(matchId, userId, context.turnNumber, attackerZone) > 0) {
+        if (attackPerformanceAvailabilityService.countArtUsedByZoneThisTurn(matchId, userId, context.turnNumber, attackerZone) > 0) {
             throw new IllegalStateException("本回合 " + attackerZone + " 已使用過藝能");
         }
         if (toBoolean(attacker.get("is_rested"))) {
@@ -6947,55 +6949,6 @@ public class MatchActionService {
             turnNumber
         );
         return usedCount != null && usedCount > 0;
-    }
-
-    /**
-     * 統計本回合指定區位的 ATTACK_ART 使用次數。
-     */
-    private int countArtUsedByZoneThisTurn(Long matchId, Long userId, int turnNumber, String zone) {
-        String normalizedZone = normalizeZone(zone);
-        Integer used = jdbcTemplate.query(
-            """
-            SELECT COUNT(*)
-            FROM match_actions ma
-            WHERE ma.match_id = ?
-              AND ma.user_id = ?
-              AND ma.turn_number = ?
-              AND ma.action_type = 'ATTACK_ART'
-              AND UPPER(COALESCE(ma.payload ->> 'attackerZone', '')) = ?
-            """,
-            rs -> rs.next() ? rs.getInt(1) : 0,
-            matchId,
-            userId,
-            turnNumber,
-            normalizedZone
-        );
-        return used == null ? 0 : used;
-    }
-
-    /**
-     * 判斷是否仍有可發動藝能的攻擊者（決定是否維持 PERFORMANCE phase）。
-     */
-    private boolean hasAvailableArtAttacker(Long matchId, Long userId, int turnNumber) {
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-            """
-            SELECT zone, is_rested
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('CENTER', 'COLLAB')
-            """,
-            matchId,
-            userId
-        );
-        for (Map<String, Object> row : rows) {
-            String zone = normalizeZone(row.get("zone"));
-            boolean rested = toBoolean(row.get("is_rested"));
-            if (!rested && countArtUsedByZoneThisTurn(matchId, userId, turnNumber, zone) == 0) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
