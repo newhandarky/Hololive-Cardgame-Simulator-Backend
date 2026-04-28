@@ -7,6 +7,8 @@ import java.util.Map;
 
 public class AttackRestAndPayloadService {
 
+    private static final String DECISION_TYPE_LOOK_TOP_DECK = "LOOK_TOP_DECK";
+
     public AttackRestAndPayloadResult resolve(AttackRestAndPayloadContext context) {
         if (context == null) {
             throw new IllegalArgumentException("attack rest and payload 缺少必要上下文");
@@ -57,6 +59,9 @@ public class AttackRestAndPayloadService {
         }
         payload.put("pendingInteractionDecisionId", decision.decisionId());
         payload.put("pendingInteractionDecisionType", decision.decisionType());
+        if (DECISION_TYPE_LOOK_TOP_DECK.equals(decision.decisionType())) {
+            payload.put("pendingLookTopDeckDecisionId", decision.decisionId());
+        }
     }
 
     private void putDefenderPendingDecisionPayload(Map<String, Object> payload, AttackPendingDecision decision) {

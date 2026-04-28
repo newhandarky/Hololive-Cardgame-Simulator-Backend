@@ -99,13 +99,14 @@ class AttackRestAndPayloadServiceTest {
     @Test
     void resolveShouldWritePendingDecisionPayloadKeys() {
         AttackRestAndPayloadResult result = service.resolve(contextBuilder()
-            .postTriggerConfirmDecision(new AttackPendingDecision(301L, "ATTACK_ART_POST_TRIGGER"))
+            .postTriggerConfirmDecision(new AttackPendingDecision(301L, "LOOK_TOP_DECK"))
             .defenderGiftConfirmDecision(new AttackPendingDecision(401L, "GIFT"))
             .build());
 
         assertThat(result.payload())
             .containsEntry("pendingInteractionDecisionId", 301L)
-            .containsEntry("pendingInteractionDecisionType", "ATTACK_ART_POST_TRIGGER")
+            .containsEntry("pendingInteractionDecisionType", "LOOK_TOP_DECK")
+            .containsEntry("pendingLookTopDeckDecisionId", 301L)
             .containsEntry("defenderPendingInteractionDecisionId", 401L)
             .containsEntry("defenderPendingInteractionDecisionType", "GIFT");
     }
@@ -226,7 +227,7 @@ class AttackRestAndPayloadServiceTest {
                 1,
                 Map.of("RED", 1),
                 Map.of("RED", 1),
-                Map.of("applied", false),
+                Map.of("RED", 0),
                 Map.of("paidTotal", 1),
                 damagePayloadFields,
                 holoxReveal,

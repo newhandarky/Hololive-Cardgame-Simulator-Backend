@@ -96,6 +96,7 @@ public class MatchActionService {
     private final AttackDownService attackDownService;
     private final AttackDefenderGiftFollowupService attackDefenderGiftFollowupService;
     private final AttackPostTriggerPendingService attackPostTriggerPendingService;
+    private final AttackRestAndPayloadService attackRestAndPayloadService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -169,6 +170,7 @@ public class MatchActionService {
         this.attackDownService = attackDownService;
         this.attackDefenderGiftFollowupService = attackDefenderGiftFollowupService;
         this.attackPostTriggerPendingService = new AttackPostTriggerPendingService(new AttackArtPendingDecisionCreator());
+        this.attackRestAndPayloadService = new AttackRestAndPayloadService();
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -2463,61 +2465,6 @@ public class MatchActionService {
         touchUpdatedAt(context.match);
         matchRepository.saveAndFlush(context.match);
 
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("attackerCardInstanceId", attackerCardInstanceId);
-        payload.put("attackerCardId", attackerCardId);
-        payload.put("attackerZone", attackerZone);
-        payload.put("targetCardInstanceId", effectiveTargetCardInstanceId);
-        payload.put("passiveGiftTargetRestrictionToCollab", targetResult.passiveGiftTargetRestrictionToCollab());
-        payload.put("passiveGiftTargetRestrictionApplied", targetResult.passiveGiftTargetRestrictionApplied());
-        payload.put("damageRedirectApplied", targetResult.damageRedirectApplied());
-        payload.put("targetMainColor", targetHolomem == null ? null : targetHolomem.mainColor());
-        payload.put("artName", asString(art.get("name")));
-        payload.put("artOrderIndex", art.get("order_index"));
-        payload.put("artBaseCost", baseRequiredCheerCost);
-        payload.put("artCost", requiredCheerCost);
-        payload.put("passiveGiftArtCostReduction", passiveGiftArtCostReduction);
-        payload.put("costPayment", costSummary);
-        payload.putAll(damageResult.toPayloadFields());
-        if (holoxSlotRevealSummary.revealApplied()) {
-            payload.put("holoxReveal", holoxSlotRevealSummary.toPayload());
-        }
-        if (!hbp02039SupportRecovery.isEmpty()) {
-            payload.put("hbp02039SupportRecovery", hbp02039SupportRecovery);
-        }
-        if (!hbp02040LifeLoss.isEmpty()) {
-            payload.put("hbp02040LifeLoss", hbp02040LifeLoss);
-        }
-        payload.put("defenderDamageReceivedGift", defenderDamageReceivedGiftSummary);
-        payload.put("artTotalDamage", totalDamage);
-        payload.put("effect", artSummary);
-        if (!officialCardArtExtraSummary.isEmpty()) {
-            payload.put("officialCardArtExtra", officialCardArtExtraSummary);
-        }
-        if (!officialOshiArtReactiveSummary.isEmpty()) {
-            payload.put("officialOshiArtReactive", officialOshiArtReactiveSummary);
-        }
-        if (!officialOshiSelfDownedSummary.isEmpty()) {
-            payload.put("officialOshiSelfDowned", officialOshiSelfDownedSummary);
-        }
-        payload.put("artDownTriggeredEffects", artDownTriggeredEffectSummary);
-        payload.put("postTriggerEffects", postTriggerEffectSummary);
-        payload.put("defenderGiftEffects", defenderGiftEffectSummary);
-        payload.put("hasNextPerformanceAction", hasNextPerformanceAction);
-        payload.put("lostLifeCardInstanceId", lostLifeCardInstanceId);
-        putFollowupDecisionPayload(payload, postTriggerConfirmDecision);
-        if (defenderGiftConfirmDecision != null) {
-            payload.put("defenderPendingInteractionDecisionId", defenderGiftConfirmDecision.decisionId());
-            payload.put("defenderPendingInteractionDecisionType", defenderGiftConfirmDecision.decisionType());
-        }
-
-        appendAction(
-            context.match,
-            userId,
-            "ATTACK_ART",
-            toJson(payload),
-            context.turnNumber
-        );
         List<Map<String, Object>> additionalEffectSummaries = new ArrayList<>();
         additionalEffectSummaries.addAll(officialCardArtExtraEffects);
         additionalEffectSummaries.addAll(officialOshiArtReactiveEffects);
@@ -2526,10 +2473,52 @@ public class MatchActionService {
         if (!hbp02040LifeLoss.isEmpty()) {
             additionalEffectSummaries.add(hbp02040LifeLoss);
         }
-        Map<String, Object> effectSummaryForChecks = mergeEffectSummaryForChecks(
-            artSummary,
-            additionalEffectSummaries
+        AttackRestAndPayloadResult restAndPayloadResult = attackRestAndPayloadService.resolve(
+            AttackRestAndPayloadContext.attackArt(
+                attackerCardInstanceId,
+                attackerCardId,
+                attackerZone,
+                effectiveTargetCardInstanceId,
+                targetResult.passiveGiftTargetRestrictionToCollab(),
+                targetResult.passiveGiftTargetRestrictionApplied(),
+                targetResult.damageRedirectApplied(),
+                targetHolomem == null ? null : targetHolomem.mainColor(),
+                asString(art.get("name")),
+                art.get("order_index"),
+                baseRequiredCheerCost,
+                requiredCheerCost,
+                passiveGiftArtCostReduction,
+                costSummary,
+                damageResult.toPayloadFields(),
+                holoxSlotRevealSummary.revealApplied() ? holoxSlotRevealSummary.toPayload() : Map.of(),
+                hbp02039SupportRecovery,
+                hbp02040LifeLoss,
+                defenderDamageReceivedGiftSummary,
+                totalDamage,
+                artSummary,
+                officialCardArtExtraSummary,
+                officialOshiArtReactiveSummary,
+                officialOshiSelfDownedSummary,
+                artDownTriggeredEffectSummary,
+                postTriggerEffectSummary,
+                defenderGiftEffectSummary,
+                hasNextPerformanceAction,
+                lostLifeCardInstanceId,
+                toAttackPendingDecision(postTriggerConfirmDecision),
+                toAttackPendingDecision(defenderGiftConfirmDecision),
+                additionalEffectSummaries
+            )
         );
+        Map<String, Object> payload = restAndPayloadResult.payload();
+
+        appendAction(
+            context.match,
+            userId,
+            "ATTACK_ART",
+            toJson(payload),
+            context.turnNumber
+        );
+        Map<String, Object> effectSummaryForChecks = restAndPayloadResult.effectSummaryForChecks();
         if (evaluateCardEffectMatchFinish(context.match, userId, context.turnNumber, effectSummaryForChecks)) {
             touchUpdatedAt(context.match);
             matchRepository.saveAndFlush(context.match);
