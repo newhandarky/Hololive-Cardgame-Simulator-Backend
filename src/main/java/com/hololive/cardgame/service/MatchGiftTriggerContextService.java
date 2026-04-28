@@ -194,6 +194,42 @@ final class MatchGiftTriggerContextService {
         );
     }
 
+    List<Map<String, Object>> loadSelfDownedFanSupportSnapshots(
+        Long matchId,
+        Long ownerUserId,
+        Long holderHolomemId
+    ) {
+        if (matchId == null || ownerUserId == null || holderHolomemId == null) {
+            return List.of();
+        }
+        return jdbcTemplate.query(
+            """
+            SELECT hs.match_card_id AS support_card_instance_id,
+                   hs.support_card_id,
+                   COALESCE(sc.effect_json ->> 'rawText', '') AS raw_text
+            FROM match_holomem_supports hs
+            JOIN support_cards sc ON sc.card_id = hs.support_card_id
+            JOIN match_cards mc ON mc.id = hs.match_card_id
+            WHERE hs.match_holomem_id = ?
+              AND hs.support_type = 'FAN'
+              AND hs.support_card_id = 'HBP01-124'
+              AND mc.match_id = ?
+              AND mc.owner_user_id = ?
+            ORDER BY hs.id
+            """,
+            (rs, rowNum) -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("supportCardInstanceId", rs.getLong("support_card_instance_id"));
+                row.put("supportCardId", rs.getString("support_card_id"));
+                row.put("rawText", rs.getString("raw_text"));
+                return row;
+            },
+            holderHolomemId,
+            matchId,
+            ownerUserId
+        );
+    }
+
     void appendStoredGiftExecutionContext(ObjectNode giftNode, Map<String, Object> storedTriggerContext) {
         if (giftNode == null || storedTriggerContext == null || storedTriggerContext.isEmpty()) {
             return;

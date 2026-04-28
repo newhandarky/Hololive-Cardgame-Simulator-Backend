@@ -463,6 +463,14 @@ public class MatchGiftTriggerService {
         return giftTriggerContextService.loadGiftHolderSnapshot(matchId, userId, giftHolderHolomemId);
     }
 
+    public List<Map<String, Object>> loadSelfDownedFanSupportSnapshots(
+        Long matchId,
+        Long ownerUserId,
+        Long holderHolomemId
+    ) {
+        return giftTriggerContextService.loadSelfDownedFanSupportSnapshots(matchId, ownerUserId, holderHolomemId);
+    }
+
     private List<Map<String, Object>> executeGiftTrigger(GiftTriggerRequest request) {
         return applyGiftTriggeredEffectsByTrigger(request, true, resolveSourceContext(request));
     }
