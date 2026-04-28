@@ -39,8 +39,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -71,8 +69,6 @@ public class MatchActionService {
     private static final String SUPPORT_TYPE_TOOL = "TOOL";
     private static final String SUPPORT_TYPE_FAN = "FAN";
     private static final String SUPPORT_TYPE_OTHER = "OTHER";
-    private static final Pattern NUMBER_PATTERN = Pattern.compile("(\\d+)");
-    private static final Pattern ART_CRITICAL_PATTERN = Pattern.compile("([赤青黄緑紫白])\\s*[+＋]\\s*(\\d+)");
     private static final int OPENING_HAND_SIZE = 7;
 
     private final MatchRepository matchRepository;
@@ -96,6 +92,7 @@ public class MatchActionService {
     private final PlayCardEffectResolutionService playCardEffectResolutionService;
     private final AttackCostService attackCostService;
     private final AttackTargetService attackTargetService;
+    private final AttackDamageService attackDamageService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -132,6 +129,7 @@ public class MatchActionService {
         PlayCardEffectResolutionService playCardEffectResolutionService,
         AttackCostService attackCostService,
         AttackTargetService attackTargetService,
+        AttackDamageService attackDamageService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
@@ -162,6 +160,7 @@ public class MatchActionService {
         this.playCardEffectResolutionService = playCardEffectResolutionService;
         this.attackCostService = attackCostService;
         this.attackTargetService = attackTargetService;
+        this.attackDamageService = attackDamageService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -2220,20 +2219,6 @@ public class MatchActionService {
         if (art == null) {
             throw new IllegalStateException("找不到可使用的藝能");
         }
-        int baseDamage = resolveArtDamage(asString(art.get("effect_json_text")));
-        int attachedSupportArtBonus = matchEffectCombatModifierService.resolveAttachedSupportArtBonus(
-            matchId,
-            asLong(attacker.get("id"))
-        );
-        // 藝能本身也可能帶有「依附著 Cheer 數量放大本次傷害」的文案。
-        // 這類效果不是 stage 上另一張卡提供的 aura，而是本次藝能自己的條件，因此獨立計算。
-        int artTextDamageBonus = matchEffectCombatModifierService.resolveArtTextDamageBonus(
-            matchId,
-            userId,
-            context.turnNumber,
-            asLong(attacker.get("id")),
-            asString(art.get("effect_json_text"))
-        );
         HoloxSlotRevealSummary holoxSlotRevealSummary = resolveHoloxSlotRevealSummary(
             matchId,
             userId,
@@ -2258,8 +2243,6 @@ public class MatchActionService {
             holoxSlotRevealSummary
         );
         int holoxRevealArtBonus = holoxSlotRevealSummary.artBonus();
-        // 常駐 Gift 的藝能加成可能依目標站位變化，先預設 0，待目標確定後再計算。
-        int passiveGiftArtBonus = 0;
         Map<String, Integer> baseRequiredCheerCost = attackCostService.parseCost(asString(art.get("cost_cheer_json_text")));
         Map<String, Integer> passiveGiftArtCostReduction =
             matchEffectCombatModifierService.resolvePassiveGiftArtCheerCostReduction(
@@ -2267,12 +2250,6 @@ public class MatchActionService {
             userId,
             asLong(attacker.get("id")),
             asString(art.get("name"))
-        );
-        int turnArtDamageModifier = resolveTurnArtDamageModifier(
-            matchId,
-            userId,
-            context.turnNumber,
-            asLong(attacker.get("id"))
         );
         Map<String, Integer> requiredCheerCost = attackCostService.applyReduction(
             baseRequiredCheerCost,
@@ -2314,53 +2291,21 @@ public class MatchActionService {
             );
         }
         Long effectiveTargetCardInstanceId = targetResult.effectiveTargetCardInstanceId();
-        ArtCritical artCritical = resolveArtCritical(asString(art.get("effect_json_text")));
-        int criticalBonus = 0;
-        boolean criticalApplied = false;
-        if (artCritical != null && artCritical.bonus() > 0) {
-            String targetColor = targetHolomem == null ? "" : targetHolomem.mainColor();
-            if (artCritical.color().equals(targetColor)) {
-                criticalApplied = true;
-                criticalBonus = artCritical.bonus();
-            }
-        }
-        int turnIncomingDamageReduction = hasOpponentHolomem
-            ? resolveIncomingDamageReduction(matchId, context.opponentUserId, context.turnNumber)
-            : 0;
-        // 受擊方自己的常駐 Gift 也可能直接改寫這次實際傷害。
-        // 例如 `HSD07-009` 這種「這張卡自己受傷 -10」不是 turn effect，
-        // 因此要在這裡和 turn-based modifier 分開計算，避免兩種來源混成同一個 state 模型。
-        int passiveGiftIncomingDamageReduction = hasOpponentHolomem && targetHolomem != null
-            ? matchEffectCombatModifierService.resolvePassiveGiftIncomingDamageReduction(
-                matchId,
-                context.opponentUserId,
-                targetHolomem.holomemId(),
-                normalizeLevel(asString(attacker.get("current_level")))
-            )
-            : 0;
-        int attachedSupportIncomingDamageReduction = hasOpponentHolomem && targetHolomem != null
-            ? matchEffectCombatModifierService.resolveAttachedSupportIncomingDamageReduction(
-                matchId,
-                targetHolomem.holomemId(),
-                targetHolomem.zone()
-            )
-            : 0;
-        if (targetHolomem != null) {
-            passiveGiftArtBonus = matchEffectCombatModifierService.resolvePassiveGiftArtBonus(
+        AttackDamageResult damageResult = attackDamageService.resolveDamage(
+            AttackDamageContext.resolve(
                 matchId,
                 userId,
+                context.opponentUserId,
+                context.turnNumber,
                 asLong(attacker.get("id")),
-                targetHolomem.zone()
-            );
-        }
-        int incomingDamageReduction = turnIncomingDamageReduction
-            + passiveGiftIncomingDamageReduction
-            + attachedSupportIncomingDamageReduction;
-        int totalDamage = Math.max(
-            baseDamage + attachedSupportArtBonus + artTextDamageBonus + holoxRevealArtBonus + passiveGiftArtBonus
-                + turnArtDamageModifier + criticalBonus - incomingDamageReduction,
-            0
+                asString(attacker.get("current_level")),
+                targetHolomem,
+                hasOpponentHolomem,
+                asString(art.get("effect_json_text")),
+                holoxRevealArtBonus
+            )
         );
+        int totalDamage = damageResult.totalDamage();
         if (totalDamage <= 0) {
             throw new IllegalStateException("此藝能目前未解析出可造成的傷害");
         }
@@ -2611,10 +2556,7 @@ public class MatchActionService {
         payload.put("artCost", requiredCheerCost);
         payload.put("passiveGiftArtCostReduction", passiveGiftArtCostReduction);
         payload.put("costPayment", costSummary);
-        payload.put("artBaseDamage", baseDamage);
-        payload.put("attachedSupportArtBonus", attachedSupportArtBonus);
-        payload.put("artTextDamageBonus", artTextDamageBonus);
-        payload.put("holoxRevealArtBonus", holoxRevealArtBonus);
+        payload.putAll(damageResult.toPayloadFields());
         if (holoxSlotRevealSummary.revealApplied()) {
             payload.put("holoxReveal", holoxSlotRevealSummary.toPayload());
         }
@@ -2624,15 +2566,6 @@ public class MatchActionService {
         if (!hbp02040LifeLoss.isEmpty()) {
             payload.put("hbp02040LifeLoss", hbp02040LifeLoss);
         }
-        payload.put("passiveGiftArtBonus", passiveGiftArtBonus);
-        payload.put("turnArtDamageModifier", turnArtDamageModifier);
-        payload.put("criticalColor", artCritical == null ? null : artCritical.color());
-        payload.put("criticalBonus", criticalBonus);
-        payload.put("criticalApplied", criticalApplied);
-        payload.put("turnIncomingDamageReduction", turnIncomingDamageReduction);
-        payload.put("passiveGiftIncomingDamageReduction", passiveGiftIncomingDamageReduction);
-        payload.put("attachedSupportIncomingDamageReduction", attachedSupportIncomingDamageReduction);
-        payload.put("incomingDamageReduction", incomingDamageReduction);
         payload.put("defenderDamageReceivedGift", defenderDamageReceivedGiftSummary);
         payload.put("artTotalDamage", totalDamage);
         payload.put("effect", artSummary);
@@ -3995,74 +3928,6 @@ public class MatchActionService {
             holderHolomemId.toString()
         );
         return usedCount != null && usedCount > 0;
-    }
-
-    /**
-     * 計算本回合對攻擊方生效的傷害加成（非受傷減免類）。
-     *
-     * <p>這裡要同時支援兩種回合效果：
-     *
-     * <p>- 玩家層級 buff：例如「這回合自己所有 Holomem 的藝能 +20」
-     * <p>- 單體 buff：例如 `HBP06-084` 的「〈博衣こより〉1人のアーツ+20」
-     *
-     * <p>因此 SQL 不能只看 `affected_user_id`。若 payload 已記錄 `targetHolomemId`，就必須只在
-     * 「本次出招的攻擊者就是那張 Holomem」時才套用。否則會把單體加成誤放大成整個玩家都吃到。
-     */
-    private int resolveTurnArtDamageModifier(Long matchId, Long userId, int currentTurn, Long attackerHolomemId) {
-        if (matchId == null || userId == null || currentTurn <= 0) {
-            return 0;
-        }
-        String attackerHolomemIdText = attackerHolomemId == null ? "" : attackerHolomemId.toString();
-        Integer modifier = jdbcTemplate.query(
-            """
-            SELECT COALESCE(SUM(modifier_value), 0) AS total
-            FROM match_turn_effects
-            WHERE match_id = ?
-              AND affected_user_id = ?
-              AND stat_type = 'DAMAGE_MODIFIER'
-              AND expires_turn >= ?
-              AND COALESCE(payload ->> 'rawText', '') NOT LIKE '%受けるダメージ%'
-              AND COALESCE(payload ->> 'rawText', '') NOT LIKE '%ダメージを受ける%'
-              AND (
-                COALESCE(payload ->> 'targetHolomemId', '') = ''
-                OR (payload ->> 'targetHolomemId') = ?
-              )
-            """,
-            rs -> rs.next() ? rs.getInt("total") : 0,
-            matchId,
-            userId,
-            currentTurn,
-            attackerHolomemIdText
-        );
-        return modifier == null ? 0 : modifier;
-    }
-
-    /**
-     * 計算本回合對受擊方生效的受傷減免總和。
-     */
-    private int resolveIncomingDamageReduction(Long matchId, Long targetUserId, int currentTurn) {
-        if (matchId == null || targetUserId == null || currentTurn <= 0) {
-            return 0;
-        }
-        Integer reduction = jdbcTemplate.query(
-            """
-            SELECT COALESCE(SUM(ABS(modifier_value)), 0) AS total
-            FROM match_turn_effects
-            WHERE match_id = ?
-              AND affected_user_id = ?
-              AND stat_type = 'DAMAGE_MODIFIER'
-              AND expires_turn >= ?
-              AND (
-                COALESCE(payload ->> 'rawText', '') LIKE '%受けるダメージ%'
-                OR COALESCE(payload ->> 'rawText', '') LIKE '%ダメージを受ける%'
-              )
-            """,
-            rs -> rs.next() ? rs.getInt("total") : 0,
-            matchId,
-            targetUserId,
-            currentTurn
-        );
-        return reduction == null ? 0 : reduction;
     }
 
     /**
@@ -5493,23 +5358,6 @@ public class MatchActionService {
             return "";
         }
         return value.toString().trim().toUpperCase(Locale.ROOT);
-    }
-
-    /**
-     * 等級文字正規化。
-     */
-    private String normalizeLevel(String levelType) {
-        String normalized = normalizeZone(levelType);
-        if (
-            "DEBUT".equals(normalized) ||
-            "FIRST".equals(normalized) ||
-            "SECOND".equals(normalized) ||
-            "SPOT".equals(normalized) ||
-            "BUZZ".equals(normalized)
-        ) {
-            return normalized;
-        }
-        return "DEBUT";
     }
 
     /**
@@ -7750,66 +7598,11 @@ public class MatchActionService {
             return null;
         }
         for (Map<String, Object> row : rows) {
-            if (resolveArtDamage(asString(row.get("effect_json_text"))) > 0) {
+            if (attackDamageService.resolveArtDamage(asString(row.get("effect_json_text"))) > 0) {
                 return row;
             }
         }
         return rows.get(0);
-    }
-
-    /**
-     * 解析藝能傷害值（JSON 解析優先，失敗時文字 fallback）。
-     */
-    private int resolveArtDamage(String effectJsonText) {
-        if (!StringUtils.hasText(effectJsonText)) {
-            return 0;
-        }
-        try {
-            JsonNode root = objectMapper.readTree(effectJsonText);
-            int parsed = resolveArtDamageFromEffectJson(root);
-            if (parsed > 0) {
-                return parsed;
-            }
-        } catch (Exception ignored) {
-            // JSON 解析失敗時走文字 fallback
-        }
-        return extractFirstNumber(effectJsonText);
-    }
-
-    /**
-     * 從藝能 effect JSON 節點解析傷害數值。
-     */
-    private int resolveArtDamageFromEffectJson(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return 0;
-        }
-        if (node.has("value") && node.path("value").canConvertToInt()) {
-            int value = node.path("value").asInt(0);
-            if (value > 0) {
-                return value;
-            }
-        }
-        if (node.has("damage") && node.path("damage").canConvertToInt()) {
-            int value = node.path("damage").asInt(0);
-            if (value > 0) {
-                return value;
-            }
-        }
-        if (node.has("amount") && node.path("amount").canConvertToInt()) {
-            int value = node.path("amount").asInt(0);
-            if (value > 0) {
-                return value;
-            }
-        }
-        int fallback = extractFirstNumber(node.path("rawHeader").asText(""));
-        if (fallback > 0) {
-            return fallback;
-        }
-        fallback = extractFirstNumber(node.path("rawEffect").asText(""));
-        if (fallback > 0) {
-            return fallback;
-        }
-        return extractFirstNumber(node.path("rawText").asText(""));
     }
 
     /**
@@ -8081,77 +7874,6 @@ public class MatchActionService {
         return updated == 1 ? resolvedCardInstanceId : null;
     }
 
-    /**
-     * 解析藝能文本中的屬性色剋加成（例如紅+50）。
-     */
-    private ArtCritical resolveArtCritical(String effectJsonText) {
-        if (!StringUtils.hasText(effectJsonText)) {
-            return null;
-        }
-        String rawHeader = "";
-        String rawEffect = "";
-        String rawText = "";
-        try {
-            JsonNode root = objectMapper.readTree(effectJsonText);
-            if (root != null && !root.isNull()) {
-                rawHeader = root.path("rawHeader").asText("");
-                rawEffect = root.path("rawEffect").asText("");
-                rawText = root.path("rawText").asText("");
-            }
-        } catch (Exception ignored) {
-            // 解析失敗改走全文 fallback
-        }
-        String merged = rawHeader + " " + rawEffect + " " + rawText + " " + effectJsonText;
-        Matcher matcher = ART_CRITICAL_PATTERN.matcher(merged);
-        if (!matcher.find()) {
-            return null;
-        }
-        String color = mapJapaneseColorToken(matcher.group(1));
-        int bonus;
-        try {
-            bonus = Integer.parseInt(matcher.group(2));
-        } catch (NumberFormatException ignored) {
-            return null;
-        }
-        if (!StringUtils.hasText(color) || bonus <= 0) {
-            return null;
-        }
-        return new ArtCritical(color, bonus);
-    }
-
-    /**
-     * 將日文顏色 token 轉為系統色碼。
-     */
-    private String mapJapaneseColorToken(String token) {
-        return switch (token) {
-            case "赤" -> "RED";
-            case "青" -> "BLUE";
-            case "黄" -> "YELLOW";
-            case "緑" -> "GREEN";
-            case "紫" -> "PURPLE";
-            case "白" -> "WHITE";
-            default -> "";
-        };
-    }
-
-    /**
-     * 抽取字串中的第一個整數；找不到或解析失敗回傳 0。
-     */
-    private int extractFirstNumber(String text) {
-        if (!StringUtils.hasText(text)) {
-            return 0;
-        }
-        Matcher matcher = NUMBER_PATTERN.matcher(text);
-        if (!matcher.find()) {
-            return 0;
-        }
-        try {
-            return Integer.parseInt(matcher.group(1));
-        } catch (NumberFormatException ignored) {
-            return 0;
-        }
-    }
-
     private String normalizeDigits(String text) {
         if (!StringUtils.hasText(text)) {
             return "";
@@ -8329,9 +8051,6 @@ public class MatchActionService {
         private static DrawTurnResult deckedOut() {
             return new DrawTurnResult(null, null, true);
         }
-    }
-
-    private record ArtCritical(String color, int bonus) {
     }
 
     private record HoloxSlotRevealSummary(

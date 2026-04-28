@@ -31,7 +31,7 @@ class AttackDamageServiceTest {
             "{\"damage\":30,\"rawText\":\"赤+50\"}"
         )).thenReturn(20);
         when(matchEffectCombatModifierService.resolvePassiveGiftArtBonus(100L, 10L, 501L, "CENTER")).thenReturn(15);
-        when(matchEffectCombatModifierService.resolvePassiveGiftIncomingDamageReduction(100L, 20L, 901L, "1ST"))
+        when(matchEffectCombatModifierService.resolvePassiveGiftIncomingDamageReduction(100L, 20L, 901L, "DEBUT"))
             .thenReturn(4);
         when(matchEffectCombatModifierService.resolveAttachedSupportIncomingDamageReduction(100L, 901L, "CENTER"))
             .thenReturn(6);

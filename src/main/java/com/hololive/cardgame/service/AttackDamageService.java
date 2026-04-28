@@ -53,7 +53,7 @@ public class AttackDamageService {
         );
 
         ArtCritical artCritical = resolveArtCritical(context.artEffectJsonText());
-        String criticalColor = artCritical == null ? "" : artCritical.color();
+        String criticalColor = artCritical == null ? null : artCritical.color();
         int criticalBonus = 0;
         boolean criticalApplied = false;
         if (artCritical != null && artCritical.bonus() > 0) {
@@ -296,22 +296,16 @@ public class AttackDamageService {
 
     private String normalizeLevel(String level) {
         String normalized = normalize(level);
-        if (!StringUtils.hasText(normalized)) {
-            return "";
-        }
-        if (normalized.equals("DEBUT") || normalized.equals("1ST") || normalized.equals("2ND")) {
+        if (
+            normalized.equals("DEBUT") ||
+            normalized.equals("FIRST") ||
+            normalized.equals("SECOND") ||
+            normalized.equals("SPOT") ||
+            normalized.equals("BUZZ")
+        ) {
             return normalized;
         }
-        if (normalized.contains("DEBUT")) {
-            return "DEBUT";
-        }
-        if (normalized.contains("1ST")) {
-            return "1ST";
-        }
-        if (normalized.contains("2ND")) {
-            return "2ND";
-        }
-        return normalized;
+        return "DEBUT";
     }
 
     private String normalize(String value) {
