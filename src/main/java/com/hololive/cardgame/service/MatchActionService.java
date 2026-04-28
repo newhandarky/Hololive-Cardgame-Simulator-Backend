@@ -78,6 +78,7 @@ public class MatchActionService {
     private final ObjectMapper objectMapper;
     private final MatchPayloadJsonService matchPayloadJsonService;
     private final GiftTriggerActionPayloadExtractor giftTriggerActionPayloadExtractor;
+    private final GiftTriggerActionWriter giftTriggerActionWriter;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -163,6 +164,7 @@ public class MatchActionService {
         this.objectMapper = objectMapper;
         this.matchPayloadJsonService = new MatchPayloadJsonService(objectMapper);
         this.giftTriggerActionPayloadExtractor = new GiftTriggerActionPayloadExtractor();
+        this.giftTriggerActionWriter = new GiftTriggerActionWriter(matchActionRepository, matchPayloadJsonService);
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5267,9 +5269,7 @@ public class MatchActionService {
         Map<String, Object> effectSummary
     ) {
         List<Map<String, Object>> payloads = giftTriggerActionPayloadExtractor.extractTriggeredGiftPayloads(effectSummary);
-        for (Map<String, Object> payload : payloads) {
-            appendAction(match, userId, "GIFT_TRIGGER", toJson(payload), turnNumber);
-        }
+        giftTriggerActionWriter.appendGiftTriggerActions(match.getId(), userId, turnNumber, payloads);
     }
 
     /**
