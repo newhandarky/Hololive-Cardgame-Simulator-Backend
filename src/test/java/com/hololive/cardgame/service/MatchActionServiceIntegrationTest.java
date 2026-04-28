@@ -4649,6 +4649,56 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             hostId
         );
         assertThat(latestGiftPayload).containsPattern("\"triggerType\"\\s*:\\s*\"COLLAB\"");
+        assertThat(latestGiftPayload).containsPattern("\"giftHolderCardId\"\\s*:\\s*\"" + giftHolderCardId + "\"");
+        assertThat(latestGiftPayload).containsPattern("\"sourceCardInstanceId\"\\s*:\\s*" + backCardInstanceId);
+        assertThat(latestGiftPayload).containsPattern("\"requestedEffects\"\\s*:\\s*\\[\\s*\"DRAW\"\\s*\\]");
+
+        Integer giftTriggerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'COLLAB'
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        assertThat(giftTriggerCount).isEqualTo(1);
+
+        Integer giftTriggerActionOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT action_order
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'COLLAB'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        Integer triggerEffectExecutedActionOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT action_order
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
+              AND payload ->> 'sourceActionType' = 'COLLAB'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        assertThat(giftTriggerActionOrder).isLessThan(triggerEffectExecutedActionOrder);
     }
 
     @Test
