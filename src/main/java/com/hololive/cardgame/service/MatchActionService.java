@@ -187,7 +187,9 @@ public class MatchActionService {
             new AttackHoloxRevealResolver(),
             new AttackHbp02039SupportRecoveryResolver(),
             new AttackHbp02040LifeLossResolver(),
-            new AttackDefenderDamagePreventionResolver()
+            new AttackDefenderDamagePreventionResolver(),
+            new AttackOfficialCardArtExtraResolver(),
+            new AttackOfficialOshiArtReactiveResolver()
         );
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
@@ -2367,28 +2369,25 @@ public class MatchActionService {
         );
         Map<String, Object> artSummary = new LinkedHashMap<>(damageApplicationResult.artSummary());
         Long lostLifeCardInstanceId = damageApplicationResult.lostLifeCardInstanceId();
-        Map<String, Object> officialCardArtExtraSummary = applyOfficialCardArtExtraEffects(
-            matchId,
-            userId,
-            context.opponentUserId,
-            asLong(attacker.get("id")),
-            attackerCardId,
-            asString(art.get("name"))
+        AttackEffectPostDamageResult postDamageFollowupResult = attackEffectFollowupService.resolvePostDamage(
+            AttackEffectPostDamageContext.attackArt(
+                matchId,
+                userId,
+                context.opponentUserId,
+                context.turnNumber,
+                asLong(attacker.get("id")),
+                effectiveTargetCardInstanceId,
+                attackerCardId,
+                asString(art.get("name")),
+                asString(attacker.get("main_color")),
+                targetHolomem,
+                artSummary
+            )
         );
-        List<Map<String, Object>> officialCardArtExtraEffects = extractExecutedEffectSummaries(officialCardArtExtraSummary);
-        Map<String, Object> officialOshiArtReactiveSummary = applyOfficialOshiArtReactiveEffects(
-            matchId,
-            userId,
-            context.opponentUserId,
-            context.turnNumber,
-            asLong(attacker.get("id")),
-            effectiveTargetCardInstanceId,
-            asString(attacker.get("main_color")),
-            targetHolomem,
-            artSummary,
-            officialCardArtExtraSummary
-        );
-        List<Map<String, Object>> officialOshiArtReactiveEffects = extractExecutedEffectSummaries(officialOshiArtReactiveSummary);
+        Map<String, Object> officialCardArtExtraSummary = postDamageFollowupResult.officialCardArtExtraSummary();
+        List<Map<String, Object>> officialCardArtExtraEffects = postDamageFollowupResult.officialCardArtExtraEffects();
+        Map<String, Object> officialOshiArtReactiveSummary = postDamageFollowupResult.officialOshiArtReactiveSummary();
+        List<Map<String, Object>> officialOshiArtReactiveEffects = postDamageFollowupResult.officialOshiArtReactiveEffects();
         AttackDownResult attackDownResult = attackDownService.resolveDown(AttackDownContext.attackArt(
             matchId,
             userId,
@@ -5796,6 +5795,43 @@ public class MatchActionService {
                 context.effectiveTargetCardInstanceId(),
                 context.turnNumber(),
                 context.totalDamage()
+            );
+        }
+    }
+
+    private class AttackOfficialCardArtExtraResolver implements AttackEffectFollowupService.OfficialCardArtExtraResolver {
+
+        @Override
+        public Map<String, Object> resolve(AttackEffectPostDamageContext context) {
+            return applyOfficialCardArtExtraEffects(
+                context.matchId(),
+                context.attackerUserId(),
+                context.defenderUserId(),
+                context.attackerHolomemId(),
+                context.attackerCardId(),
+                context.artName()
+            );
+        }
+    }
+
+    private class AttackOfficialOshiArtReactiveResolver implements AttackEffectFollowupService.OfficialOshiArtReactiveResolver {
+
+        @Override
+        public Map<String, Object> resolve(
+            AttackEffectPostDamageContext context,
+            Map<String, Object> officialCardArtExtraSummary
+        ) {
+            return applyOfficialOshiArtReactiveEffects(
+                context.matchId(),
+                context.attackerUserId(),
+                context.defenderUserId(),
+                context.turnNumber(),
+                context.attackerHolomemId(),
+                context.effectiveTargetCardInstanceId(),
+                context.attackerMainColor(),
+                context.targetHolomem(),
+                context.artSummary(),
+                officialCardArtExtraSummary
             );
         }
     }

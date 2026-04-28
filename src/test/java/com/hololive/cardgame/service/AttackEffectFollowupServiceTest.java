@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 
 import com.hololive.cardgame.service.AttackEffectFollowupService.HoloxRevealResult;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -22,11 +23,17 @@ class AttackEffectFollowupServiceTest {
         mock(AttackEffectFollowupService.Hbp02040LifeLossResolver.class);
     private final AttackEffectFollowupService.DamagePreventionResolver damagePreventionResolver =
         mock(AttackEffectFollowupService.DamagePreventionResolver.class);
+    private final AttackEffectFollowupService.OfficialCardArtExtraResolver officialCardArtExtraResolver =
+        mock(AttackEffectFollowupService.OfficialCardArtExtraResolver.class);
+    private final AttackEffectFollowupService.OfficialOshiArtReactiveResolver officialOshiArtReactiveResolver =
+        mock(AttackEffectFollowupService.OfficialOshiArtReactiveResolver.class);
     private final AttackEffectFollowupService service = new AttackEffectFollowupService(
         holoxRevealResolver,
         hbp02039SupportRecoveryResolver,
         hbp02040LifeLossResolver,
-        damagePreventionResolver
+        damagePreventionResolver,
+        officialCardArtExtraResolver,
+        officialOshiArtReactiveResolver
     );
 
     @Test
@@ -146,6 +153,54 @@ class AttackEffectFollowupServiceTest {
             .hasMessageContaining("attack effect damage prevention");
     }
 
+    @Test
+    void resolvePostDamageShouldResolveOfficialCardBeforeOshiReactive() {
+        AttackEffectPostDamageContext context = postDamageContext();
+        Map<String, Object> officialCardSummary = summary("executedEffects", List.of(summary("effectType", "ART_EXTRA")));
+        when(officialCardArtExtraResolver.resolve(context)).thenReturn(officialCardSummary);
+
+        service.resolvePostDamage(context);
+
+        InOrder inOrder = inOrder(officialCardArtExtraResolver, officialOshiArtReactiveResolver);
+        inOrder.verify(officialCardArtExtraResolver).resolve(context);
+        inOrder.verify(officialOshiArtReactiveResolver).resolve(context, officialCardSummary);
+    }
+
+    @Test
+    void resolvePostDamageShouldReturnSummariesAndExecutedEffects() {
+        AttackEffectPostDamageContext context = postDamageContext();
+        Map<String, Object> cardEffect = summary("effectType", "ART_EXTRA");
+        Map<String, Object> oshiEffect = summary("effectType", "OSHI_REACTIVE");
+        Map<String, Object> officialCardSummary = summary("executedEffects", List.of(cardEffect));
+        Map<String, Object> officialOshiSummary = summary("executedEffects", List.of(oshiEffect));
+        when(officialCardArtExtraResolver.resolve(context)).thenReturn(officialCardSummary);
+        when(officialOshiArtReactiveResolver.resolve(context, officialCardSummary)).thenReturn(officialOshiSummary);
+
+        AttackEffectPostDamageResult result = service.resolvePostDamage(context);
+
+        assertThat(result.officialCardArtExtraSummary()).isEqualTo(officialCardSummary);
+        assertThat(result.officialCardArtExtraEffects()).containsExactly(cardEffect);
+        assertThat(result.officialOshiArtReactiveSummary()).isEqualTo(officialOshiSummary);
+        assertThat(result.officialOshiArtReactiveEffects()).containsExactly(oshiEffect);
+    }
+
+    @Test
+    void resolvePostDamageShouldIgnoreNonMapExecutedEffects() {
+        AttackEffectPostDamageContext context = postDamageContext();
+        when(officialCardArtExtraResolver.resolve(context)).thenReturn(summary("executedEffects", List.of("ignored")));
+
+        AttackEffectPostDamageResult result = service.resolvePostDamage(context);
+
+        assertThat(result.officialCardArtExtraEffects()).isEmpty();
+    }
+
+    @Test
+    void resolvePostDamageShouldRejectMissingContext() {
+        assertThatThrownBy(() -> service.resolvePostDamage(null))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("attack effect post damage");
+    }
+
     private AttackEffectFollowupContext context() {
         return AttackEffectFollowupContext.preDamage(
             100L,
@@ -174,6 +229,22 @@ class AttackEffectFollowupServiceTest {
             totalDamage,
             hasOpponentHolomem,
             hasTargetHolomem
+        );
+    }
+
+    private AttackEffectPostDamageContext postDamageContext() {
+        return AttackEffectPostDamageContext.attackArt(
+            100L,
+            10L,
+            20L,
+            3,
+            501L,
+            4001L,
+            "HBP01-087",
+            "雨のマントラ",
+            "BLUE",
+            null,
+            summary("damageApplied", 20)
         );
     }
 
