@@ -77,7 +77,6 @@ public class MatchActionService {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final MatchEffectService matchEffectService;
-    private final MatchEffectDamageService matchEffectDamageService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
     private final MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService;
@@ -93,6 +92,7 @@ public class MatchActionService {
     private final AttackCostService attackCostService;
     private final AttackTargetService attackTargetService;
     private final AttackDamageService attackDamageService;
+    private final AttackDamageApplicationService attackDamageApplicationService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -114,7 +114,6 @@ public class MatchActionService {
         JdbcTemplate jdbcTemplate,
         ObjectMapper objectMapper,
         MatchEffectService matchEffectService,
-        MatchEffectDamageService matchEffectDamageService,
         MatchEffectCombatModifierService matchEffectCombatModifierService,
         MatchTriggeredCombatEffectService matchTriggeredCombatEffectService,
         MatchTurnEffectMaintenanceService matchTurnEffectMaintenanceService,
@@ -130,6 +129,7 @@ public class MatchActionService {
         AttackCostService attackCostService,
         AttackTargetService attackTargetService,
         AttackDamageService attackDamageService,
+        AttackDamageApplicationService attackDamageApplicationService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
@@ -145,7 +145,6 @@ public class MatchActionService {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.matchEffectService = matchEffectService;
-        this.matchEffectDamageService = matchEffectDamageService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
         this.matchTurnEffectMaintenanceService = matchTurnEffectMaintenanceService;
@@ -161,6 +160,7 @@ public class MatchActionService {
         this.attackCostService = attackCostService;
         this.attackTargetService = attackTargetService;
         this.attackDamageService = attackDamageService;
+        this.attackDamageApplicationService = attackDamageApplicationService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -2334,39 +2334,18 @@ public class MatchActionService {
                 }
             }
         }
-        Map<String, Object> artSummary;
-        Long lostLifeCardInstanceId = null;
-        if (hasOpponentHolomem) {
-            if (totalDamage > 0) {
-                artSummary = matchEffectDamageService.applyArtDamage(
-                    matchId,
-                    userId,
-                    totalDamage,
-                    effectiveTargetCardInstanceId,
-                    true
-                );
-                lostLifeCardInstanceId = asLong(artSummary.get("lostLifeCardInstanceId"));
-            } else {
-                artSummary = new LinkedHashMap<>();
-                artSummary.put("effectType", "ART_DAMAGE_PREVENTED");
-                artSummary.put("damageRequested", 0);
-                artSummary.put("damageApplied", 0);
-                artSummary.put("reason", "傷害已由受傷 Gift 抵銷");
-                artSummary.put("lifeReduced", false);
-            }
-        } else {
-            lostLifeCardInstanceId = loseLifeOnce(matchId, context.opponentUserId);
-            if (lostLifeCardInstanceId == null) {
-                throw new IllegalStateException("對手沒有可失去的 LIFE");
-            }
-            artSummary = new LinkedHashMap<>();
-            artSummary.put("effectType", "ART_DAMAGE_FALLBACK");
-            artSummary.put("damageRequested", totalDamage);
-            artSummary.put("damageApplied", 0);
-            artSummary.put("reason", "對手場上無 Holomen，改為扣除 1 點 LIFE");
-            artSummary.put("lifeReduced", true);
-            artSummary.put("lostLifeCardInstanceId", lostLifeCardInstanceId);
-        }
+        AttackDamageApplicationResult damageApplicationResult = attackDamageApplicationService.applyDamage(
+            AttackDamageApplicationContext.attackArt(
+                matchId,
+                userId,
+                context.opponentUserId,
+                totalDamage,
+                effectiveTargetCardInstanceId,
+                hasOpponentHolomem
+            )
+        );
+        Map<String, Object> artSummary = damageApplicationResult.artSummary();
+        Long lostLifeCardInstanceId = damageApplicationResult.lostLifeCardInstanceId();
         Map<String, Object> officialCardArtExtraSummary = applyOfficialCardArtExtraEffects(
             matchId,
             userId,
