@@ -99,6 +99,7 @@ public class MatchActionService {
     private final AttackRestAndPayloadService attackRestAndPayloadService;
     private final AttackActionLogService attackActionLogService;
     private final AttackFinishCheckService attackFinishCheckService;
+    private final AttackEffectFollowupService attackEffectFollowupService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -181,6 +182,11 @@ public class MatchActionService {
             this::hasLifeReduced,
             this::hasHolomemDowned,
             this::saveFinishedMatch
+        );
+        this.attackEffectFollowupService = new AttackEffectFollowupService(
+            new AttackHoloxRevealResolver(),
+            new AttackHbp02039SupportRecoveryResolver(),
+            new AttackHbp02040LifeLossResolver()
         );
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
@@ -2240,30 +2246,22 @@ public class MatchActionService {
         if (art == null) {
             throw new IllegalStateException("找不到可使用的藝能");
         }
-        HoloxSlotRevealSummary holoxSlotRevealSummary = resolveHoloxSlotRevealSummary(
-            matchId,
-            userId,
-            asString(art.get("name")),
-            asString(art.get("effect_json_text"))
+        AttackEffectFollowupResult preDamageFollowupResult = attackEffectFollowupService.resolvePreDamage(
+            AttackEffectFollowupContext.preDamage(
+                matchId,
+                userId,
+                context.opponentUserId,
+                context.turnNumber,
+                asLong(attacker.get("id")),
+                attackerCardId,
+                asString(art.get("name")),
+                asString(art.get("effect_json_text"))
+            )
         );
-        Map<String, Object> hbp02039SupportRecovery = applyHbp02039HoloxSupportRecovery(
-            matchId,
-            userId,
-            attackerCardId,
-            asString(art.get("name")),
-            holoxSlotRevealSummary
-        );
-        Map<String, Object> hbp02040LifeLoss = applyHbp02040HoloxLifeLoss(
-            matchId,
-            userId,
-            context.opponentUserId,
-            context.turnNumber,
-            asLong(attacker.get("id")),
-            attackerCardId,
-            asString(art.get("name")),
-            holoxSlotRevealSummary
-        );
-        int holoxRevealArtBonus = holoxSlotRevealSummary.artBonus();
+        HoloxSlotRevealSummary holoxSlotRevealSummary = toHoloxSlotRevealSummary(preDamageFollowupResult.holoxSlotRevealSummary());
+        Map<String, Object> hbp02039SupportRecovery = preDamageFollowupResult.hbp02039SupportRecovery();
+        Map<String, Object> hbp02040LifeLoss = preDamageFollowupResult.hbp02040LifeLoss();
+        int holoxRevealArtBonus = preDamageFollowupResult.artBonus();
         Map<String, Integer> baseRequiredCheerCost = attackCostService.parseCost(asString(art.get("cost_cheer_json_text")));
         Map<String, Integer> passiveGiftArtCostReduction =
             matchEffectCombatModifierService.resolvePassiveGiftArtCheerCostReduction(
@@ -3356,6 +3354,12 @@ public class MatchActionService {
             holderHolomemId.toString()
         );
         return usedCount != null && usedCount > 0;
+    }
+
+    private HoloxSlotRevealSummary toHoloxSlotRevealSummary(Object summary) {
+        return summary instanceof HoloxSlotRevealSummary holoxSlotRevealSummary
+            ? holoxSlotRevealSummary
+            : HoloxSlotRevealSummary.empty();
     }
 
     /**
@@ -5731,6 +5735,51 @@ public class MatchActionService {
             return null;
         }
         return new AttackPendingDecision(decision.decisionId(), decision.decisionType());
+    }
+
+    private class AttackHoloxRevealResolver implements AttackEffectFollowupService.HoloxRevealResolver {
+
+        @Override
+        public AttackEffectFollowupService.HoloxRevealResult resolve(AttackEffectFollowupContext context) {
+            HoloxSlotRevealSummary summary = resolveHoloxSlotRevealSummary(
+                context.matchId(),
+                context.attackerUserId(),
+                context.artName(),
+                context.artEffectJsonText()
+            );
+            return new AttackEffectFollowupService.HoloxRevealResult(summary, summary.artBonus());
+        }
+    }
+
+    private class AttackHbp02039SupportRecoveryResolver implements AttackEffectFollowupService.Hbp02039SupportRecoveryResolver {
+
+        @Override
+        public Map<String, Object> resolve(AttackEffectFollowupContext context, Object holoxSlotRevealSummary) {
+            return applyHbp02039HoloxSupportRecovery(
+                context.matchId(),
+                context.attackerUserId(),
+                context.attackerCardId(),
+                context.artName(),
+                toHoloxSlotRevealSummary(holoxSlotRevealSummary)
+            );
+        }
+    }
+
+    private class AttackHbp02040LifeLossResolver implements AttackEffectFollowupService.Hbp02040LifeLossResolver {
+
+        @Override
+        public Map<String, Object> resolve(AttackEffectFollowupContext context, Object holoxSlotRevealSummary) {
+            return applyHbp02040HoloxLifeLoss(
+                context.matchId(),
+                context.attackerUserId(),
+                context.defenderUserId(),
+                context.turnNumber(),
+                context.attackerHolomemId(),
+                context.attackerCardId(),
+                context.artName(),
+                toHoloxSlotRevealSummary(holoxSlotRevealSummary)
+            );
+        }
     }
 
     private class AttackArtPendingDecisionCreator implements AttackPostTriggerPendingService.PendingDecisionCreator {
