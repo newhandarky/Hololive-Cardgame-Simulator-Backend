@@ -95,6 +95,7 @@ public class MatchActionService {
     private final CollabEffectResolutionService collabEffectResolutionService;
     private final BloomEffectResolutionService bloomEffectResolutionService;
     private final PlayCardEffectResolutionService playCardEffectResolutionService;
+    private final AttackCostService attackCostService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -129,6 +130,7 @@ public class MatchActionService {
         CollabEffectResolutionService collabEffectResolutionService,
         BloomEffectResolutionService bloomEffectResolutionService,
         PlayCardEffectResolutionService playCardEffectResolutionService,
+        AttackCostService attackCostService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
@@ -157,6 +159,7 @@ public class MatchActionService {
         this.collabEffectResolutionService = collabEffectResolutionService;
         this.bloomEffectResolutionService = bloomEffectResolutionService;
         this.playCardEffectResolutionService = playCardEffectResolutionService;
+        this.attackCostService = attackCostService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -2255,7 +2258,7 @@ public class MatchActionService {
         int holoxRevealArtBonus = holoxSlotRevealSummary.artBonus();
         // 常駐 Gift 的藝能加成可能依目標站位變化，先預設 0，待目標確定後再計算。
         int passiveGiftArtBonus = 0;
-        Map<String, Integer> baseRequiredCheerCost = resolveArtCheerCost(asString(art.get("cost_cheer_json_text")));
+        Map<String, Integer> baseRequiredCheerCost = attackCostService.parseCost(asString(art.get("cost_cheer_json_text")));
         Map<String, Integer> passiveGiftArtCostReduction =
             matchEffectCombatModifierService.resolvePassiveGiftArtCheerCostReduction(
             matchId,
@@ -2269,16 +2272,20 @@ public class MatchActionService {
             context.turnNumber,
             asLong(attacker.get("id"))
         );
-        Map<String, Integer> requiredCheerCost = applyArtCheerCostReduction(
+        Map<String, Integer> requiredCheerCost = attackCostService.applyReduction(
             baseRequiredCheerCost,
             passiveGiftArtCostReduction
         );
-        Map<String, Object> costSummary = payArtCost(
-            matchId,
-            userId,
-            asLong(attacker.get("id")),
-            requiredCheerCost
+        AttackCostPaymentResult costPaymentResult = attackCostService.resolvePayment(
+            AttackCostPaymentContext.preview(
+                matchId,
+                userId,
+                asLong(attacker.get("id")),
+                baseRequiredCheerCost,
+                passiveGiftArtCostReduction
+            )
         );
+        Map<String, Object> costSummary = costPaymentResult.toPaymentSummary();
         Integer opponentHolomemCount = jdbcTemplate.queryForObject(
             """
             SELECT COUNT(*)
@@ -7915,157 +7922,6 @@ public class MatchActionService {
     }
 
     /**
-     * 解析藝能 Cheer 成本（有色與 COLORLESS）。
-     */
-    private Map<String, Integer> resolveArtCheerCost(String costCheerJsonText) {
-        Map<String, Integer> cost = new LinkedHashMap<>();
-        if (!StringUtils.hasText(costCheerJsonText)) {
-            return cost;
-        }
-        try {
-            JsonNode root = objectMapper.readTree(costCheerJsonText);
-            if (root == null || !root.isObject()) {
-                return cost;
-            }
-            root.fields().forEachRemaining(entry -> {
-                String color = normalizeZone(entry.getKey());
-                int required = entry.getValue() == null ? 0 : entry.getValue().asInt(0);
-                if (StringUtils.hasText(color) && required > 0) {
-                    cost.put(color, required);
-                }
-            });
-        } catch (Exception ignored) {
-            // 解析失敗時視為無費用，避免對戰流程中斷
-        }
-        return cost;
-    }
-
-    /**
-     * 套用常駐減費後的藝能 Cheer 成本。
-     */
-    private Map<String, Integer> applyArtCheerCostReduction(
-        Map<String, Integer> baseCost,
-        Map<String, Integer> reduction
-    ) {
-        Map<String, Integer> effectiveCost = new LinkedHashMap<>();
-        if (baseCost == null || baseCost.isEmpty()) {
-            return effectiveCost;
-        }
-        for (Map.Entry<String, Integer> entry : baseCost.entrySet()) {
-            String color = normalizeZone(entry.getKey());
-            int required = entry.getValue() == null ? 0 : entry.getValue();
-            if (!StringUtils.hasText(color) || required <= 0) {
-                continue;
-            }
-            int reducedBy = reduction == null ? 0 : Math.max(0, reduction.getOrDefault(color, 0));
-            int effectiveRequired = Math.max(required - reducedBy, 0);
-            if (effectiveRequired > 0) {
-                effectiveCost.put(color, effectiveRequired);
-            }
-        }
-        return effectiveCost;
-    }
-
-    /**
-     * 驗證藝能費用是否足夠支付（目前僅驗證，不扣除附加 Cheer）。
-     */
-    private Map<String, Object> payArtCost(
-        Long matchId,
-        Long ownerUserId,
-        Long attackerHolomemId,
-        Map<String, Integer> requiredCost
-    ) {
-        Map<String, Integer> normalizedRequired = new LinkedHashMap<>();
-        int totalRequired = 0;
-        if (requiredCost != null) {
-            for (Map.Entry<String, Integer> entry : requiredCost.entrySet()) {
-                String color = normalizeZone(entry.getKey());
-                int count = entry.getValue() == null ? 0 : entry.getValue();
-                if (!StringUtils.hasText(color) || count <= 0) {
-                    continue;
-                }
-                normalizedRequired.put(color, count);
-                totalRequired += count;
-            }
-        }
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("required", normalizedRequired);
-        summary.put("requiredTotal", totalRequired);
-        if (totalRequired <= 0) {
-            summary.put("paid", Map.of());
-            summary.put("paidTotal", 0);
-            summary.put("paidCheerCardIds", List.of());
-            summary.put("paidCheerCardInstanceIds", List.of());
-            summary.put("paidColors", List.of());
-            return summary;
-        }
-
-        List<Map<String, Object>> attachedRows = jdbcTemplate.queryForList(
-            """
-            SELECT mhc.id AS cheer_row_id,
-                   mhc.match_card_id,
-                   mhc.cheer_card_id,
-                   cc.color
-            FROM match_holomem_cheers mhc
-            JOIN cheer_cards cc ON cc.card_id = mhc.cheer_card_id
-            WHERE mhc.match_holomem_id = ?
-            ORDER BY mhc.id
-            """,
-            attackerHolomemId
-        );
-        if (attachedRows.isEmpty()) {
-            throw new IllegalStateException("藝能費用不足：未附加任何 Cheer");
-        }
-
-        List<Map<String, Object>> remaining = new ArrayList<>(attachedRows);
-        List<Map<String, Object>> selected = new ArrayList<>();
-        for (Map.Entry<String, Integer> entry : normalizedRequired.entrySet()) {
-            String color = entry.getKey();
-            if ("COLORLESS".equals(color)) {
-                continue;
-            }
-            int required = entry.getValue();
-            for (int i = 0; i < required; i++) {
-                int idx = findFirstCheerIndexByColor(remaining, color);
-                if (idx < 0) {
-                    throw new IllegalStateException("藝能費用不足：需要 " + color + " Cheer x" + required);
-                }
-                selected.add(remaining.remove(idx));
-            }
-        }
-        int colorlessRequired = normalizedRequired.getOrDefault("COLORLESS", 0);
-        for (int i = 0; i < colorlessRequired; i++) {
-            if (remaining.isEmpty()) {
-                throw new IllegalStateException("藝能費用不足：需要無色 Cheer x" + colorlessRequired);
-            }
-            selected.add(remaining.remove(0));
-        }
-
-        Map<String, Integer> paid = new LinkedHashMap<>();
-        List<String> paidCheerCardIds = new ArrayList<>();
-        List<Long> paidCheerCardInstanceIds = new ArrayList<>();
-        List<String> paidColors = new ArrayList<>();
-        for (Map<String, Object> row : selected) {
-            String cheerCardId = asString(row.get("cheer_card_id"));
-            String color = normalizeZone(row.get("color"));
-            if (!StringUtils.hasText(cheerCardId) || !StringUtils.hasText(color)) {
-                continue;
-            }
-            paid.put(color, paid.getOrDefault(color, 0) + 1);
-            paidCheerCardIds.add(cheerCardId);
-            paidColors.add(color);
-        }
-
-        summary.put("paid", paid);
-        summary.put("paidTotal", selected.size());
-        summary.put("paidCheerCardIds", paidCheerCardIds);
-        summary.put("paidCheerCardInstanceIds", paidCheerCardInstanceIds);
-        summary.put("paidColors", paidColors);
-        summary.put("consumed", false);
-        return summary;
-    }
-
-    /**
      * 取得バトンタッチ無色成本修正值（來自 match_turn_effects）。
      */
     private int resolveBatonTouchColorlessModifier(Long matchId, Long ownerUserId, Long sourceHolomemId, int currentTurn) {
@@ -8267,18 +8123,6 @@ public class MatchActionService {
         summary.put("paidColors", paidColors);
         summary.put("consumed", true);
         return summary;
-    }
-
-    /**
-     * 在 Cheer 列表中找第一張指定顏色的位置索引。
-     */
-    private int findFirstCheerIndexByColor(List<Map<String, Object>> rows, String color) {
-        for (int i = 0; i < rows.size(); i++) {
-            if (color.equals(normalizeZone(rows.get(i).get("color")))) {
-                return i;
-            }
-        }
-        return -1;
     }
 
     /**
