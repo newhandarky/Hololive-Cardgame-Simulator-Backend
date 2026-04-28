@@ -93,6 +93,7 @@ public class MatchActionService {
     private final AttackTargetService attackTargetService;
     private final AttackDamageService attackDamageService;
     private final AttackDamageApplicationService attackDamageApplicationService;
+    private final AttackDownService attackDownService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -130,6 +131,7 @@ public class MatchActionService {
         AttackTargetService attackTargetService,
         AttackDamageService attackDamageService,
         AttackDamageApplicationService attackDamageApplicationService,
+        AttackDownService attackDownService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
@@ -161,6 +163,7 @@ public class MatchActionService {
         this.attackTargetService = attackTargetService;
         this.attackDamageService = attackDamageService;
         this.attackDamageApplicationService = attackDamageApplicationService;
+        this.attackDownService = attackDownService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -2368,52 +2371,29 @@ public class MatchActionService {
             officialCardArtExtraSummary
         );
         List<Map<String, Object>> officialOshiArtReactiveEffects = extractExecutedEffectSummaries(officialOshiArtReactiveSummary);
-        Map<String, Object> attackSummaryForTriggeredChecks = mergeEffectSummaryForChecks(
+        AttackDownResult attackDownResult = attackDownService.resolveDown(AttackDownContext.attackArt(
+            matchId,
+            userId,
+            context.opponentUserId,
+            context.turnNumber,
+            attackerCardInstanceId,
+            attackerCardId,
+            asString(art.get("name")),
+            asString(art.get("effect_json_text")),
+            effectiveTargetCardInstanceId,
+            hasOpponentHolomem,
             artSummary,
-            mergeEffectLists(officialCardArtExtraEffects, officialOshiArtReactiveEffects)
-        );
+            officialCardArtExtraEffects,
+            officialOshiArtReactiveEffects
+        ));
+        Map<String, Object> attackSummaryForTriggeredChecks = attackDownResult.attackSummaryForTriggeredChecks();
         Map<String, Object> officialOshiSelfDownedSummary = Map.of();
-        List<Map<String, Object>> giftTriggeredEffects = new ArrayList<>();
-        giftTriggeredEffects.addAll(
-            matchGiftTriggerService.previewGiftTriggeredEffectsOnArt(
-                matchId,
-                userId,
-                attackerCardInstanceId,
-                effectiveTargetCardInstanceId,
-                context.turnNumber,
-                asString(art.get("name"))
-            )
-        );
-        if (hasOpponentHolomem && hasHolomemDowned(attackSummaryForTriggeredChecks)) {
-            giftTriggeredEffects.addAll(
-                matchGiftTriggerService.previewGiftTriggeredEffectsOnDownedOpponent(
-                    matchId,
-                    userId,
-                    attackerCardInstanceId,
-                    effectiveTargetCardInstanceId,
-                    context.turnNumber
-                )
-            );
-        }
-        Map<String, Object> artDownTriggeredEffectSummary = hasOpponentHolomem && hasHolomemDowned(attackSummaryForTriggeredChecks)
-            ? matchTriggeredCombatEffectService.applyArtDownTriggeredEffects(
-                matchId,
-                userId,
-                attackerCardInstanceId,
-                asString(art.get("effect_json_text"))
-            )
-            : Map.of(
-                "triggerType", "ART_DOWNED_OPPONENT",
-                "requestedEffects", List.of(),
-                "executedEffects", List.of(),
-                "unsupportedEffects", List.of(),
-                "skippedEffects", List.of(),
-                "applied", false
-            );
+        List<Map<String, Object>> giftTriggeredEffects = new ArrayList<>(attackDownResult.giftTriggeredEffects());
+        Map<String, Object> artDownTriggeredEffectSummary = attackDownResult.artDownTriggeredEffectSummary();
         List<Map<String, Object>> defenderGiftTriggeredEffects = new ArrayList<>();
         String downedTargetCardId = targetHolomem == null ? null : targetHolomem.cardId();
         String downedTargetZone = targetHolomem == null ? null : targetHolomem.zone();
-        if (hasOpponentHolomem && hasHolomemDowned(attackSummaryForTriggeredChecks)) {
+        if (attackDownResult.hasDownedHolomem()) {
             officialOshiSelfDownedSummary = applyOfficialOshiSelfDownedEffects(
                 matchId,
                 context.opponentUserId,
@@ -2453,7 +2433,7 @@ public class MatchActionService {
         }
         FollowupInteractionDecision postTriggerConfirmDecision = null;
         FollowupInteractionDecision defenderGiftConfirmDecision = null;
-        Map<String, Object> downEventPreview = extractDownEventPreview(artSummary);
+        Map<String, Object> downEventPreview = attackDownResult.downEventPreview();
         Map<String, Object> postTriggerEffectSummary = buildAttackArtPostTriggerDeferredSummary(
             giftTriggeredEffects,
             downEventPreview
@@ -2906,23 +2886,6 @@ public class MatchActionService {
             }
         }
         return summaries;
-    }
-
-    private List<Map<String, Object>> mergeEffectLists(
-        List<Map<String, Object>> first,
-        List<Map<String, Object>> second
-    ) {
-        if ((first == null || first.isEmpty()) && (second == null || second.isEmpty())) {
-            return List.of();
-        }
-        List<Map<String, Object>> merged = new ArrayList<>();
-        if (first != null) {
-            merged.addAll(first);
-        }
-        if (second != null) {
-            merged.addAll(second);
-        }
-        return merged;
     }
 
     private Map<String, Object> applyOfficialOshiArtReactiveEffects(
