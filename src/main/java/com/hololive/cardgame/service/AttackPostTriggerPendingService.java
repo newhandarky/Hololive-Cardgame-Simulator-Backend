@@ -76,10 +76,50 @@ public class AttackPostTriggerPendingService {
         summary.put("deferred", !giftTriggers.isEmpty() || downEventPreview != null);
         summary.put("triggeredGifts", giftTriggers);
         summary.put("downEvent", downEventPreview);
+        summary.put("triggerSections", buildAttackArtPostTriggerSections(giftTriggers, downEventPreview));
         summary.put("requestedEffects", requestedEffects);
         summary.put("executedEffects", List.of());
         summary.put("unsupportedEffects", List.of());
         return summary;
+    }
+
+    private List<Map<String, Object>> buildAttackArtPostTriggerSections(
+        List<Map<String, Object>> giftTriggeredEffects,
+        Map<String, Object> downEventPreview
+    ) {
+        List<Map<String, Object>> sections = new ArrayList<>();
+        if (downEventPreview != null && !downEventPreview.isEmpty()) {
+            Map<String, Object> downSection = new LinkedHashMap<>();
+            downSection.put("sectionType", "DOWN_EVENT");
+            downSection.put("title", "Down Event");
+            downSection.put("requestedLifeLoss", asInt(downEventPreview.get("requestedLifeLoss")));
+            downSection.put("downedCardId", asString(downEventPreview.get("downedCardId")));
+            downSection.put("rawText", asString(downEventPreview.get("rawText")));
+            sections.add(downSection);
+        }
+        if (giftTriggeredEffects != null && !giftTriggeredEffects.isEmpty()) {
+            List<Map<String, Object>> giftItems = new ArrayList<>();
+            for (Map<String, Object> trigger : giftTriggeredEffects) {
+                if (trigger == null || trigger.isEmpty()) {
+                    continue;
+                }
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("triggerType", normalizeZone(trigger.get("triggerType")));
+                item.put("giftHolderCardId", asString(trigger.get("giftHolderCardId")));
+                item.put("rawText", asString(trigger.get("rawText")));
+                item.put("requestedEffects", toStringList(trigger.get("requestedEffects")));
+                giftItems.add(item);
+            }
+            if (!giftItems.isEmpty()) {
+                Map<String, Object> giftSection = new LinkedHashMap<>();
+                giftSection.put("sectionType", "GIFT");
+                giftSection.put("title", "Gift");
+                giftSection.put("count", giftItems.size());
+                giftSection.put("items", giftItems);
+                sections.add(giftSection);
+            }
+        }
+        return sections;
     }
 
     private Map<String, Object> buildGiftTriggeredEffectDeferredSummary(List<Map<String, Object>> giftTriggeredEffects) {
@@ -113,11 +153,29 @@ public class AttackPostTriggerPendingService {
         List<String> result = new ArrayList<>();
         for (Object item : values) {
             String text = normalizeZone(item);
-            if (StringUtils.hasText(text)) {
+            if (StringUtils.hasText(text) && !result.contains(text)) {
                 result.add(text);
             }
         }
         return result;
+    }
+
+    private Integer asInt(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value instanceof String text) {
+            try {
+                return Integer.parseInt(text);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private String asString(Object value) {
+        return value == null ? "" : String.valueOf(value);
     }
 
     private String normalizeZone(Object value) {

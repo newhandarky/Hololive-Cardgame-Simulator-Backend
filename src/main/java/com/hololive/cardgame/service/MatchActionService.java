@@ -95,6 +95,7 @@ public class MatchActionService {
     private final AttackDamageApplicationService attackDamageApplicationService;
     private final AttackDownService attackDownService;
     private final AttackDefenderGiftFollowupService attackDefenderGiftFollowupService;
+    private final AttackPostTriggerPendingService attackPostTriggerPendingService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -167,6 +168,7 @@ public class MatchActionService {
         this.attackDamageApplicationService = attackDamageApplicationService;
         this.attackDownService = attackDownService;
         this.attackDefenderGiftFollowupService = attackDefenderGiftFollowupService;
+        this.attackPostTriggerPendingService = new AttackPostTriggerPendingService(new AttackArtPendingDecisionCreator());
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -2415,52 +2417,29 @@ public class MatchActionService {
             new ArrayList<>(defenderGiftFollowupResult.defenderGiftTriggeredEffects());
         downedTargetCardId = defenderGiftFollowupResult.downedTargetCardId();
         downedTargetZone = defenderGiftFollowupResult.downedTargetZone();
-        FollowupInteractionDecision postTriggerConfirmDecision = null;
-        FollowupInteractionDecision defenderGiftConfirmDecision = null;
-        Map<String, Object> downEventPreview = attackDownResult.downEventPreview();
-        Map<String, Object> postTriggerEffectSummary = buildAttackArtPostTriggerDeferredSummary(
-            giftTriggeredEffects,
-            downEventPreview
-        );
-        if (!giftTriggeredEffects.isEmpty() || downEventPreview != null) {
-            List<Map<String, Object>> sourceCards = buildGiftTriggerInteractionCards(
+        AttackPostTriggerPendingResult postTriggerPendingResult = attackPostTriggerPendingService.resolvePending(
+            AttackPostTriggerPendingContext.attackArt(
                 matchId,
                 userId,
+                context.opponentUserId,
+                context.turnNumber,
                 attackerCardInstanceId,
                 attackerCardId,
-                giftTriggeredEffects
-            );
-            postTriggerConfirmDecision = createAttackArtPostTriggerConfirmPendingInteraction(
-                matchId,
-                userId,
-                attackerCardInstanceId,
-                attackerCardId,
-                sourceCards,
+                effectiveTargetCardInstanceId,
+                downedTargetCardId,
                 giftTriggeredEffects,
-                downEventPreview,
-                context.turnNumber
-            );
-        }
-        Map<String, Object> defenderGiftEffectSummary = buildGiftTriggeredEffectDeferredSummary(defenderGiftTriggeredEffects);
-        if (!defenderGiftTriggeredEffects.isEmpty()) {
-            List<Map<String, Object>> defenderSourceCards = buildGiftTriggerInteractionCards(
-                matchId,
-                context.opponentUserId,
-                effectiveTargetCardInstanceId,
-                downedTargetCardId,
+                attackDownResult.downEventPreview(),
                 defenderGiftTriggeredEffects
-            );
-            defenderGiftConfirmDecision = createGiftTriggeredEffectConfirmPendingInteraction(
-                matchId,
-                context.opponentUserId,
-                effectiveTargetCardInstanceId,
-                downedTargetCardId,
-                defenderSourceCards,
-                defenderGiftTriggeredEffects,
-                context.turnNumber
-            );
-        }
-
+            )
+        );
+        Map<String, Object> postTriggerEffectSummary = postTriggerPendingResult.postTriggerEffectSummary();
+        FollowupInteractionDecision postTriggerConfirmDecision = toFollowupInteractionDecision(
+            postTriggerPendingResult.postTriggerConfirmDecision()
+        );
+        Map<String, Object> defenderGiftEffectSummary = postTriggerPendingResult.defenderGiftEffectSummary();
+        FollowupInteractionDecision defenderGiftConfirmDecision = toFollowupInteractionDecision(
+            postTriggerPendingResult.defenderGiftConfirmDecision()
+        );
         int attackerRested = jdbcTemplate.update(
             """
             UPDATE match_holomems
@@ -5742,33 +5721,68 @@ public class MatchActionService {
         return null;
     }
 
-    /**
-     * 建立 ATTACK_ART 後續觸發的 deferred 摘要（Gift + Down Event）。
-     */
-    private Map<String, Object> buildAttackArtPostTriggerDeferredSummary(
-        List<Map<String, Object>> giftTriggeredEffects,
-        Map<String, Object> downEventPreview
-    ) {
-        Map<String, Object> summary = new LinkedHashMap<>();
-        List<Map<String, Object>> giftTriggers = giftTriggeredEffects == null ? List.of() : giftTriggeredEffects;
-        List<String> requestedEffects = new ArrayList<>();
-        for (Map<String, Object> trigger : giftTriggers) {
-            requestedEffects.addAll(toStringList(trigger == null ? null : trigger.get("requestedEffects")));
+    private FollowupInteractionDecision toFollowupInteractionDecision(AttackPendingDecision decision) {
+        if (decision == null) {
+            return null;
         }
-        if (downEventPreview != null) {
-            if (!requestedEffects.contains("DOWN_EVENT")) {
-                requestedEffects.add("DOWN_EVENT");
-            }
+        return new FollowupInteractionDecision(decision.decisionId(), decision.decisionType());
+    }
+
+    private AttackPendingDecision toAttackPendingDecision(FollowupInteractionDecision decision) {
+        if (decision == null) {
+            return null;
         }
-        summary.put("sourceActionType", "ATTACK_ART_POST_TRIGGER");
-        summary.put("deferred", !giftTriggers.isEmpty() || downEventPreview != null);
-        summary.put("triggeredGifts", giftTriggers);
-        summary.put("downEvent", downEventPreview);
-        summary.put("triggerSections", buildAttackArtPostTriggerSections(giftTriggeredEffects, downEventPreview));
-        summary.put("requestedEffects", requestedEffects);
-        summary.put("executedEffects", List.of());
-        summary.put("unsupportedEffects", List.of());
-        return summary;
+        return new AttackPendingDecision(decision.decisionId(), decision.decisionType());
+    }
+
+    private class AttackArtPendingDecisionCreator implements AttackPostTriggerPendingService.PendingDecisionCreator {
+
+        @Override
+        public AttackPendingDecision createAttackPostTriggerPending(
+            AttackPostTriggerPendingContext context,
+            Map<String, Object> postTriggerEffectSummary
+        ) {
+            List<Map<String, Object>> sourceCards = buildGiftTriggerInteractionCards(
+                context.matchId(),
+                context.attackerUserId(),
+                context.attackerCardInstanceId(),
+                context.attackerCardId(),
+                context.giftTriggeredEffects()
+            );
+            return toAttackPendingDecision(createAttackArtPostTriggerConfirmPendingInteraction(
+                context.matchId(),
+                context.attackerUserId(),
+                context.attackerCardInstanceId(),
+                context.attackerCardId(),
+                sourceCards,
+                context.giftTriggeredEffects(),
+                context.downEventPreview(),
+                context.turnNumber()
+            ));
+        }
+
+        @Override
+        public AttackPendingDecision createDefenderGiftPending(
+            AttackPostTriggerPendingContext context,
+            Map<String, Object> defenderGiftEffectSummary
+        ) {
+            List<Map<String, Object>> defenderSourceCards = buildGiftTriggerInteractionCards(
+                context.matchId(),
+                context.defenderUserId(),
+                context.downedTargetCardInstanceId(),
+                context.downedTargetCardId(),
+                context.defenderGiftTriggeredEffects()
+            );
+            return toAttackPendingDecision(createGiftTriggeredEffectConfirmPendingInteraction(
+                context.matchId(),
+                context.defenderUserId(),
+                context.downedTargetCardInstanceId(),
+                context.downedTargetCardId(),
+                defenderSourceCards,
+                context.defenderGiftTriggeredEffects(),
+                context.turnNumber()
+            ));
+        }
     }
 
     /**
