@@ -73,7 +73,6 @@ public class MatchActionService {
     private static final String SUPPORT_TYPE_OTHER = "OTHER";
     private static final Pattern NUMBER_PATTERN = Pattern.compile("(\\d+)");
     private static final Pattern ART_CRITICAL_PATTERN = Pattern.compile("([赤青黄緑紫白])\\s*[+＋]\\s*(\\d+)");
-    private static final Pattern CENTER_TAG_REQUIREMENT_PATTERN = Pattern.compile("#([^\\sを]+)を持つセンターホロメンがいる間");
     private static final int OPENING_HAND_SIZE = 7;
 
     private final MatchRepository matchRepository;
@@ -96,6 +95,7 @@ public class MatchActionService {
     private final BloomEffectResolutionService bloomEffectResolutionService;
     private final PlayCardEffectResolutionService playCardEffectResolutionService;
     private final AttackCostService attackCostService;
+    private final AttackTargetService attackTargetService;
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
@@ -131,6 +131,7 @@ public class MatchActionService {
         BloomEffectResolutionService bloomEffectResolutionService,
         PlayCardEffectResolutionService playCardEffectResolutionService,
         AttackCostService attackCostService,
+        AttackTargetService attackTargetService,
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchGiftTriggerService matchGiftTriggerService,
@@ -160,6 +161,7 @@ public class MatchActionService {
         this.bloomEffectResolutionService = bloomEffectResolutionService;
         this.playCardEffectResolutionService = playCardEffectResolutionService;
         this.attackCostService = attackCostService;
+        this.attackTargetService = attackTargetService;
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
@@ -2286,62 +2288,32 @@ public class MatchActionService {
             )
         );
         Map<String, Object> costSummary = costPaymentResult.toPaymentSummary();
-        Integer opponentHolomemCount = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-            """,
-            Integer.class,
-            matchId,
-            context.opponentUserId
+        AttackTargetResult targetResult = attackTargetService.resolveTarget(
+            AttackTargetContext.resolve(
+                matchId,
+                userId,
+                context.opponentUserId,
+                context.turnNumber,
+                targetCardInstanceId
+            )
         );
-        boolean hasOpponentHolomem = opponentHolomemCount != null && opponentHolomemCount > 0;
-        TargetHolomem targetHolomem = null;
+        boolean hasOpponentHolomem = targetResult.hasOpponentHolomem();
+        AttackTargetHolomem targetHolomem = targetResult.target();
         Map<String, Object> defenderSelfDownedHolderSnapshot = null;
         List<Map<String, Object>> defenderSelfDownedFanSupportSnapshots = List.of();
-        boolean passiveGiftTargetRestrictionToCollab = false;
-        boolean passiveGiftTargetRestrictionApplied = false;
-        if (hasOpponentHolomem) {
-            targetHolomem = resolveOpponentTargetHolomem(matchId, context.opponentUserId, targetCardInstanceId);
-            if (targetHolomem == null) {
-                throw new IllegalStateException("DAMAGE 找不到可攻擊的對手 Holomen");
-            }
-            passiveGiftTargetRestrictionToCollab = hasPassiveGiftTargetRestrictionToCollab(matchId, context.opponentUserId);
-            if (passiveGiftTargetRestrictionToCollab) {
-                if (!"COLLAB".equals(targetHolomem.zone())) {
-                    if (targetCardInstanceId != null && targetCardInstanceId > 0) {
-                        throw new IllegalStateException("對手有用心棒效果，藝能只能以對手 COLLAB Holomen 為目標");
-                    }
-                    TargetHolomem collabTarget = loadOpponentCollabTargetHolomem(matchId, context.opponentUserId);
-                    if (collabTarget == null) {
-                        throw new IllegalStateException("對手有用心棒效果，目前沒有可被指定的 COLLAB Holomen");
-                    }
-                    targetHolomem = collabTarget;
-                }
-                passiveGiftTargetRestrictionApplied = true;
-            }
+        if (hasOpponentHolomem && targetResult.targetBeforeRedirect() != null) {
             defenderSelfDownedHolderSnapshot = matchGiftTriggerService.loadGiftHolderSnapshot(
                 matchId,
                 context.opponentUserId,
-                targetHolomem.holomemId()
+                targetResult.targetBeforeRedirect().holomemId()
             );
             defenderSelfDownedFanSupportSnapshots = loadSelfDownedFanSupportSnapshots(
                 matchId,
                 context.opponentUserId,
-                targetHolomem.holomemId()
+                targetResult.targetBeforeRedirect().holomemId()
             );
-            DamageRedirectTarget redirectTarget = resolveDamageRedirectTarget(
-                matchId,
-                context.opponentUserId,
-                context.turnNumber
-            );
-            if (redirectTarget != null) {
-                targetHolomem = redirectTarget.target();
-            }
         }
-        Long effectiveTargetCardInstanceId = targetHolomem == null ? targetCardInstanceId : targetHolomem.matchCardInstanceId();
+        Long effectiveTargetCardInstanceId = targetResult.effectiveTargetCardInstanceId();
         ArtCritical artCritical = resolveArtCritical(asString(art.get("effect_json_text")));
         int criticalBonus = 0;
         boolean criticalApplied = false;
@@ -2629,10 +2601,9 @@ public class MatchActionService {
         payload.put("attackerCardId", attackerCardId);
         payload.put("attackerZone", attackerZone);
         payload.put("targetCardInstanceId", effectiveTargetCardInstanceId);
-        payload.put("passiveGiftTargetRestrictionToCollab", passiveGiftTargetRestrictionToCollab);
-        payload.put("passiveGiftTargetRestrictionApplied", passiveGiftTargetRestrictionApplied);
-        payload.put("damageRedirectApplied", hasOpponentHolomem && targetCardInstanceId != null
-            && !targetCardInstanceId.equals(effectiveTargetCardInstanceId));
+        payload.put("passiveGiftTargetRestrictionToCollab", targetResult.passiveGiftTargetRestrictionToCollab());
+        payload.put("passiveGiftTargetRestrictionApplied", targetResult.passiveGiftTargetRestrictionApplied());
+        payload.put("damageRedirectApplied", targetResult.damageRedirectApplied());
         payload.put("targetMainColor", targetHolomem == null ? null : targetHolomem.mainColor());
         payload.put("artName", asString(art.get("name")));
         payload.put("artOrderIndex", art.get("order_index"));
@@ -3050,7 +3021,7 @@ public class MatchActionService {
         Long attackerHolomemId,
         Long targetCardInstanceId,
         String attackerMainColor,
-        TargetHolomem targetHolomem,
+        AttackTargetHolomem targetHolomem,
         Map<String, Object> artSummary,
         Map<String, Object> officialCardArtExtraSummary
     ) {
@@ -3105,7 +3076,7 @@ public class MatchActionService {
         int turnNumber,
         Long targetCardInstanceId,
         String attackerMainColor,
-        TargetHolomem targetHolomem,
+        AttackTargetHolomem targetHolomem,
         Map<String, Object> artSummary
     ) {
         if (!"BLUE".equals(normalizeZone(attackerMainColor)) || targetHolomem == null || !"BACK".equals(targetHolomem.zone())) {
@@ -3209,7 +3180,7 @@ public class MatchActionService {
         Long defenderUserId,
         Long attackerUserId,
         int turnNumber,
-        TargetHolomem downedTarget,
+        AttackTargetHolomem downedTarget,
         Map<String, Object> holderSnapshot,
         Map<String, Object> artSummary
     ) {
@@ -3319,7 +3290,7 @@ public class MatchActionService {
         Long matchId,
         Long defenderUserId,
         Long attackerUserId,
-        TargetHolomem downedTarget,
+        AttackTargetHolomem downedTarget,
         Map<String, Object> holderSnapshot,
         Map<String, Object> artSummary
     ) {
@@ -4024,86 +3995,6 @@ public class MatchActionService {
             holderHolomemId.toString()
         );
         return usedCount != null && usedCount > 0;
-    }
-
-    /**
-     * 解析 DAMAGE_REDIRECT 類行動鎖效果，必要時回傳改向目標並消耗該效果。
-     */
-    private DamageRedirectTarget resolveDamageRedirectTarget(Long matchId, Long affectedUserId, int currentTurn) {
-        if (matchId == null || affectedUserId == null || currentTurn <= 0) {
-            return null;
-        }
-        List<Map<String, Object>> candidates = jdbcTemplate.queryForList(
-            """
-            SELECT id, payload::text AS payload_text
-            FROM match_turn_effects
-            WHERE match_id = ?
-              AND affected_user_id = ?
-              AND stat_type = 'ACTION_LOCK'
-              AND expires_turn >= ?
-            ORDER BY id DESC
-            """,
-            matchId,
-            affectedUserId,
-            currentTurn
-        );
-        for (Map<String, Object> row : candidates) {
-            Long effectId = asLong(row.get("id"));
-            String payloadText = asString(row.get("payload_text"));
-            JsonNode payload = parseJson(payloadText);
-            if (!matchesLockAction(payload, "DAMAGE_REDIRECT")) {
-                continue;
-            }
-            Long targetHolomemId = extractJsonLong(payload, "targetHolomemId");
-            if (targetHolomemId == null || targetHolomemId <= 0) {
-                continue;
-            }
-            TargetHolomem redirectTarget = loadTargetHolomemById(matchId, affectedUserId, targetHolomemId);
-            if (redirectTarget == null) {
-                continue;
-            }
-            if (effectId != null && effectId > 0) {
-                jdbcTemplate.update(
-                    "DELETE FROM match_turn_effects WHERE id = ? AND match_id = ?",
-                    effectId,
-                    matchId
-                );
-            }
-            return new DamageRedirectTarget(effectId, redirectTarget);
-        }
-        return null;
-    }
-
-    /**
-     * 依 holomemId 載入可用目標資訊（match_card_id 與主色）。
-     */
-    private TargetHolomem loadTargetHolomemById(Long matchId, Long ownerUserId, Long holomemId) {
-        if (matchId == null || ownerUserId == null || holomemId == null || holomemId <= 0) {
-            return null;
-        }
-        return jdbcTemplate.query(
-            """
-            SELECT h.id, h.match_card_id, h.card_id, h.zone, m.main_color
-            FROM match_holomems h
-            JOIN member_cards m ON m.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.id = ?
-            LIMIT 1
-            """,
-            rs -> rs.next()
-                ? new TargetHolomem(
-                    rs.getLong("id"),
-                    rs.getLong("match_card_id"),
-                    rs.getString("card_id"),
-                    normalizeZone(rs.getString("zone")),
-                    normalizeZone(rs.getString("main_color"))
-                )
-                : null,
-            matchId,
-            ownerUserId,
-            holomemId
-        );
     }
 
     /**
@@ -8229,167 +8120,6 @@ public class MatchActionService {
     }
 
     /**
-     * 解析攻擊目標 Holomem：
-     * 有指定目標則優先驗證，否則依站位預設優先順序挑選。
-     */
-    private TargetHolomem resolveOpponentTargetHolomem(
-        Long matchId,
-        Long opponentUserId,
-        Long requestedTargetCardInstanceId
-    ) {
-        if (opponentUserId == null) {
-            return null;
-        }
-        if (requestedTargetCardInstanceId != null && requestedTargetCardInstanceId > 0) {
-            return jdbcTemplate.query(
-                """
-                SELECT h.id, h.match_card_id, h.card_id, h.zone, m.main_color
-                FROM match_holomems h
-                JOIN member_cards m ON m.card_id = h.card_id
-                WHERE h.match_id = ?
-                  AND h.owner_user_id = ?
-                  AND h.match_card_id = ?
-                LIMIT 1
-                """,
-                rs -> rs.next()
-                    ? new TargetHolomem(
-                        rs.getLong("id"),
-                        rs.getLong("match_card_id"),
-                        rs.getString("card_id"),
-                        normalizeZone(rs.getString("zone")),
-                        normalizeZone(rs.getString("main_color"))
-                    )
-                    : null,
-                matchId,
-                opponentUserId,
-                requestedTargetCardInstanceId
-            );
-        }
-        return jdbcTemplate.query(
-            """
-            SELECT h.id, h.match_card_id, h.card_id, h.zone, m.main_color
-            FROM match_holomems h
-            JOIN member_cards m ON m.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-            ORDER BY CASE h.zone WHEN 'CENTER' THEN 1 WHEN 'COLLAB' THEN 2 WHEN 'BACK' THEN 3 ELSE 9 END, h.id
-            LIMIT 1
-            """,
-            rs -> rs.next()
-                ? new TargetHolomem(
-                    rs.getLong("id"),
-                    rs.getLong("match_card_id"),
-                    rs.getString("card_id"),
-                    normalizeZone(rs.getString("zone")),
-                    normalizeZone(rs.getString("main_color"))
-                )
-                : null,
-            matchId,
-            opponentUserId
-        );
-    }
-
-    private TargetHolomem loadOpponentCollabTargetHolomem(Long matchId, Long opponentUserId) {
-        if (opponentUserId == null) {
-            return null;
-        }
-        return jdbcTemplate.query(
-            """
-            SELECT h.id, h.match_card_id, h.card_id, h.zone, m.main_color
-            FROM match_holomems h
-            JOIN member_cards m ON m.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.zone = 'COLLAB'
-            ORDER BY h.id
-            LIMIT 1
-            """,
-            rs -> rs.next()
-                ? new TargetHolomem(
-                    rs.getLong("id"),
-                    rs.getLong("match_card_id"),
-                    rs.getString("card_id"),
-                    normalizeZone(rs.getString("zone")),
-                    normalizeZone(rs.getString("main_color"))
-                )
-                : null,
-            matchId,
-            opponentUserId
-        );
-    }
-
-    private boolean hasPassiveGiftTargetRestrictionToCollab(Long matchId, Long ownerUserId) {
-        if (matchId == null || ownerUserId == null) {
-            return false;
-        }
-        List<String> passiveTexts = jdbcTemplate.query(
-            """
-            SELECT mc.passive_effect_json::text AS passive_text
-            FROM match_holomems h
-            JOIN member_cards mc ON mc.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.zone = 'COLLAB'
-              AND mc.passive_effect_json IS NOT NULL
-              AND mc.passive_effect_json::text LIKE '%相手のホロメンのアーツは%'
-              AND mc.passive_effect_json::text LIKE '%自分のコラボホロメンしか対象にできない%'
-            """,
-            (rs, rowNum) -> rs.getString("passive_text"),
-            matchId,
-            ownerUserId
-        );
-        for (String passiveText : passiveTexts) {
-            if (!StringUtils.hasText(passiveText)) {
-                continue;
-            }
-            String requiredCenterTag = extractRequiredCenterTagForPassiveTargetRestriction(passiveText);
-            if (StringUtils.hasText(requiredCenterTag)
-                && !hasCenterHolomemWithTag(matchId, ownerUserId, requiredCenterTag)) {
-                continue;
-            }
-            return true;
-        }
-        return false;
-    }
-
-    private String extractRequiredCenterTagForPassiveTargetRestriction(String passiveText) {
-        if (!StringUtils.hasText(passiveText)) {
-            return "";
-        }
-        Matcher matcher = CENTER_TAG_REQUIREMENT_PATTERN.matcher(passiveText);
-        if (!matcher.find()) {
-            return "";
-        }
-        String tagToken = matcher.group(1);
-        if (!StringUtils.hasText(tagToken)) {
-            return "";
-        }
-        return "#" + tagToken.trim();
-    }
-
-    private boolean hasCenterHolomemWithTag(Long matchId, Long ownerUserId, String requiredTag) {
-        if (matchId == null || ownerUserId == null || !StringUtils.hasText(requiredTag)) {
-            return false;
-        }
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_holomems h
-            JOIN cards c ON c.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.zone = 'CENTER'
-              AND jsonb_exists(COALESCE(c.tags_json, '[]'::jsonb), ?)
-            """,
-            Integer.class,
-            matchId,
-            ownerUserId,
-            requiredTag
-        );
-        return count != null && count > 0;
-    }
-
-    /**
      * 將日文顏色 token 轉為系統色碼。
      */
     private String mapJapaneseColorToken(String token) {
@@ -8679,12 +8409,6 @@ public class MatchActionService {
         Long lookedCardInstanceId,
         String lookedCardId
     ) {
-    }
-
-    private record TargetHolomem(Long holomemId, Long matchCardInstanceId, String cardId, String zone, String mainColor) {
-    }
-
-    private record DamageRedirectTarget(Long effectId, TargetHolomem target) {
     }
 
     private record PendingDecision(

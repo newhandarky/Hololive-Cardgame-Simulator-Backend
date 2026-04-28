@@ -3,6 +3,7 @@ package com.hololive.cardgame.service;
 public record AttackTargetResult(
     boolean hasOpponentHolomem,
     AttackTargetHolomem target,
+    AttackTargetHolomem targetBeforeRedirect,
     Long effectiveTargetCardInstanceId,
     boolean passiveGiftTargetRestrictionToCollab,
     boolean passiveGiftTargetRestrictionApplied,
@@ -13,6 +14,7 @@ public record AttackTargetResult(
     public static AttackTargetResult noOpponent(Long requestedTargetCardInstanceId) {
         return new AttackTargetResult(
             false,
+            null,
             null,
             requestedTargetCardInstanceId,
             false,

@@ -76,6 +76,7 @@ public class AttackTargetService {
             passiveGiftTargetRestrictionApplied = true;
         }
 
+        AttackTargetHolomem targetBeforeRedirect = target;
         Long damageRedirectEffectId = null;
         if (context.resolveDamageRedirect()) {
             DamageRedirectTarget redirectTarget = resolveDamageRedirectTarget(
@@ -98,6 +99,7 @@ public class AttackTargetService {
         return new AttackTargetResult(
             true,
             target,
+            targetBeforeRedirect,
             effectiveTargetCardInstanceId,
             passiveGiftTargetRestrictionToCollab,
             passiveGiftTargetRestrictionApplied,
