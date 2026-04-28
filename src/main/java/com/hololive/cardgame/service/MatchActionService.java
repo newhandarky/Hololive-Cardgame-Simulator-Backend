@@ -82,6 +82,7 @@ public class MatchActionService {
     private final PendingGiftTriggerContextExtractor pendingGiftTriggerContextExtractor;
     private final PendingDownEventContextExtractor pendingDownEventContextExtractor;
     private final AttackPostTriggerSectionBuilder attackPostTriggerSectionBuilder;
+    private final AttackPostTriggerConfirmMessageBuilder attackPostTriggerConfirmMessageBuilder;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -171,6 +172,7 @@ public class MatchActionService {
         this.pendingGiftTriggerContextExtractor = new PendingGiftTriggerContextExtractor();
         this.pendingDownEventContextExtractor = new PendingDownEventContextExtractor();
         this.attackPostTriggerSectionBuilder = new AttackPostTriggerSectionBuilder();
+        this.attackPostTriggerConfirmMessageBuilder = new AttackPostTriggerConfirmMessageBuilder();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5593,31 +5595,10 @@ public class MatchActionService {
         List<Map<String, Object>> giftTriggeredEffects,
         Map<String, Object> downEventPreview
     ) {
-        List<String> lines = new ArrayList<>();
-        if (downEventPreview != null && !downEventPreview.isEmpty()) {
-            Integer requestedLifeLoss = asInt(downEventPreview.get("requestedLifeLoss"));
-            String downedCardId = asString(downEventPreview.get("downedCardId"));
-            String rawText = asString(downEventPreview.get("rawText"));
-            StringBuilder line = new StringBuilder("[Down Event]\n");
-            line.append("DOWN_EVENT");
-            if (StringUtils.hasText(downedCardId)) {
-                line.append(" (").append(downedCardId).append(")");
-            }
-            if (requestedLifeLoss != null && requestedLifeLoss > 0) {
-                line.append("：額外失去生命 ").append(requestedLifeLoss);
-            }
-            if (StringUtils.hasText(rawText)) {
-                line.append("\n").append(rawText);
-            }
-            lines.add(line.toString());
-        }
-        if (giftTriggeredEffects != null && !giftTriggeredEffects.isEmpty()) {
-            lines.add("[Gift]\n" + buildGiftTriggeredEffectDetails(giftTriggeredEffects));
-        }
-        if (lines.isEmpty()) {
-            return "是否要執行攻擊後觸發效果？";
-        }
-        return "是否要執行攻擊後觸發效果？\n" + String.join("\n\n", lines);
+        return attackPostTriggerConfirmMessageBuilder.buildAttackArtPostTriggerConfirmMessage(
+            giftTriggeredEffects,
+            downEventPreview
+        );
     }
 
     /**
@@ -5774,28 +5755,7 @@ public class MatchActionService {
      * 組裝 Gift 觸發明細文字（不含最上層提問句）。
      */
     private String buildGiftTriggeredEffectDetails(List<Map<String, Object>> giftTriggeredEffects) {
-        int count = 0;
-        List<String> lines = new ArrayList<>();
-        for (Map<String, Object> trigger : giftTriggeredEffects) {
-            count++;
-            String cardId = asString(trigger.get("giftHolderCardId"));
-            String triggerType = normalizeZone(trigger.get("triggerType"));
-            String rawText = asString(trigger.get("rawText"));
-            List<String> effectTypes = toStringList(trigger.get("requestedEffects"));
-            String effectSummary = effectTypes.isEmpty() ? "無可解析效果類型" : String.join("、", effectTypes);
-            StringBuilder line = new StringBuilder();
-            line.append("#").append(count).append(" ");
-            if (StringUtils.hasText(cardId)) {
-                line.append(cardId).append(" ");
-            }
-            line.append("[").append(StringUtils.hasText(triggerType) ? triggerType : "GIFT").append("]");
-            line.append(" 效果類型：").append(effectSummary);
-            if (StringUtils.hasText(rawText)) {
-                line.append("\n").append(rawText);
-            }
-            lines.add(line.toString());
-        }
-        return String.join("\n\n", lines);
+        return attackPostTriggerConfirmMessageBuilder.buildGiftTriggeredEffectDetails(giftTriggeredEffects);
     }
 
     /**
