@@ -215,6 +215,7 @@ public class MatchActionService {
             this.attackEffectSummaryExtractor,
             this.attackFinishCheckService,
             this.attackEffectFollowupService,
+            this.attackPerformanceAvailabilityService,
             this.matchEffectCombatModifierService,
             matchGiftTriggerService,
             jdbcTemplate,
@@ -239,22 +240,8 @@ public class MatchActionService {
             }
 
             @Override
-            public boolean hasAvailableArtAttacker(Long matchId, Long userId, int turnNumber) {
-                return attackPerformanceAvailabilityService.hasAvailableArtAttacker(matchId, userId, turnNumber);
-            }
-
-            @Override
             public void touchUpdatedAt(MatchEntity match) {
                 MatchActionService.this.touchUpdatedAt(match);
-            }
-
-            @Override
-            public List<Map<String, Object>> loadSelfDownedFanSupportSnapshots(
-                Long matchId,
-                Long ownerUserId,
-                Long holderHolomemId
-            ) {
-                return matchGiftTriggerService.loadSelfDownedFanSupportSnapshots(matchId, ownerUserId, holderHolomemId);
             }
 
         };

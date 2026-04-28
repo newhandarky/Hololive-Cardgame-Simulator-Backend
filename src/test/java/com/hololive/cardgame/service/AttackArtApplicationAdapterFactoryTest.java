@@ -37,6 +37,8 @@ class AttackArtApplicationAdapterFactoryTest {
     private final AttackEffectSummaryExtractor attackEffectSummaryExtractor = new AttackEffectSummaryExtractor();
     private final AttackFinishCheckService attackFinishCheckService = mock(AttackFinishCheckService.class);
     private final AttackEffectFollowupService attackEffectFollowupService = mock(AttackEffectFollowupService.class);
+    private final AttackPerformanceAvailabilityService attackPerformanceAvailabilityService =
+        mock(AttackPerformanceAvailabilityService.class);
     private final MatchEffectCombatModifierService matchEffectCombatModifierService =
         mock(MatchEffectCombatModifierService.class);
     private final MatchGiftTriggerService matchGiftTriggerService = mock(MatchGiftTriggerService.class);
@@ -60,6 +62,7 @@ class AttackArtApplicationAdapterFactoryTest {
 
         InOrder order = inOrder(
             jdbcTemplate,
+            attackPerformanceAvailabilityService,
             dependencies,
             matchRepository,
             attackPayloadJsonService,
@@ -72,7 +75,7 @@ class AttackArtApplicationAdapterFactoryTest {
             eq(100L),
             eq(10L)
         );
-        order.verify(dependencies).hasAvailableArtAttacker(100L, 10L, 3);
+        order.verify(attackPerformanceAvailabilityService).hasAvailableArtAttacker(100L, 10L, 3);
         order.verify(dependencies).touchUpdatedAt(match);
         order.verify(matchRepository).saveAndFlush(match);
         order.verify(attackPayloadJsonService).toJson(any());
@@ -125,7 +128,7 @@ class AttackArtApplicationAdapterFactoryTest {
         when(attackPostTriggerPendingService.resolvePending(any())).thenReturn(
             new AttackPostTriggerPendingResult(Map.of(), null, Map.of(), null)
         );
-        when(dependencies.hasAvailableArtAttacker(100L, 10L, 3)).thenReturn(false);
+        when(attackPerformanceAvailabilityService.hasAvailableArtAttacker(100L, 10L, 3)).thenReturn(false);
         when(jdbcTemplate.update(anyString(), any(), any(), any())).thenReturn(1);
         when(attackPayloadJsonService.toJson(any())).thenReturn("{\"artTotalDamage\":50}");
         when(attackActionLogService.appendAttackArt(any())).thenReturn(
@@ -150,6 +153,7 @@ class AttackArtApplicationAdapterFactoryTest {
             attackEffectSummaryExtractor,
             attackFinishCheckService,
             attackEffectFollowupService,
+            attackPerformanceAvailabilityService,
             matchEffectCombatModifierService,
             matchGiftTriggerService,
             jdbcTemplate,

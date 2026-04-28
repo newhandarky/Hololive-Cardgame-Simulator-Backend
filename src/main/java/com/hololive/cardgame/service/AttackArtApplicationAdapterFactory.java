@@ -24,6 +24,7 @@ class AttackArtApplicationAdapterFactory {
     private final AttackEffectSummaryExtractor attackEffectSummaryExtractor;
     private final AttackFinishCheckService attackFinishCheckService;
     private final AttackEffectFollowupService attackEffectFollowupService;
+    private final AttackPerformanceAvailabilityService attackPerformanceAvailabilityService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final JdbcTemplate jdbcTemplate;
@@ -45,6 +46,7 @@ class AttackArtApplicationAdapterFactory {
         AttackEffectSummaryExtractor attackEffectSummaryExtractor,
         AttackFinishCheckService attackFinishCheckService,
         AttackEffectFollowupService attackEffectFollowupService,
+        AttackPerformanceAvailabilityService attackPerformanceAvailabilityService,
         MatchEffectCombatModifierService matchEffectCombatModifierService,
         MatchGiftTriggerService matchGiftTriggerService,
         JdbcTemplate jdbcTemplate,
@@ -65,6 +67,7 @@ class AttackArtApplicationAdapterFactory {
         this.attackEffectSummaryExtractor = attackEffectSummaryExtractor;
         this.attackFinishCheckService = attackFinishCheckService;
         this.attackEffectFollowupService = attackEffectFollowupService;
+        this.attackPerformanceAvailabilityService = attackPerformanceAvailabilityService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.jdbcTemplate = jdbcTemplate;
@@ -261,7 +264,7 @@ class AttackArtApplicationAdapterFactory {
                     context.defenderUserId(),
                     targetResult.targetBeforeRedirect().holomemId()
                 );
-                defenderSelfDownedFanSupportSnapshots = dependencies.loadSelfDownedFanSupportSnapshots(
+                defenderSelfDownedFanSupportSnapshots = matchGiftTriggerService.loadSelfDownedFanSupportSnapshots(
                     context.matchId(),
                     context.defenderUserId(),
                     targetResult.targetBeforeRedirect().holomemId()
@@ -630,7 +633,7 @@ class AttackArtApplicationAdapterFactory {
                 throw new IllegalStateException("藝能結算失敗，請重新整理後再試");
             }
 
-            boolean hasNextPerformanceAction = dependencies.hasAvailableArtAttacker(
+            boolean hasNextPerformanceAction = attackPerformanceAvailabilityService.hasAvailableArtAttacker(
                 context.matchId(),
                 context.attackerUserId(),
                 context.turnNumber()
