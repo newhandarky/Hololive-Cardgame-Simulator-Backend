@@ -89,8 +89,7 @@ public class MatchActionService {
     private final GiftPendingDecisionCreator giftPendingDecisionCreator;
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
     private final EffectPostTriggerPendingService effectPostTriggerPendingService;
-    private final FollowupInteractionContextBuilder followupInteractionContextBuilder;
-    private final FollowupCardCandidateLoader followupCardCandidateLoader;
+    private final FollowupInteractionContextResolver followupInteractionContextResolver;
     private final FollowupPendingDecisionContextBuilder followupPendingDecisionContextBuilder;
     private final FollowupInteractionPendingDecisionWriter followupInteractionPendingDecisionWriter;
     private final MatchEffectService matchEffectService;
@@ -199,8 +198,7 @@ public class MatchActionService {
             new EffectPostTriggerConfirmMessageBuilder(),
             followupTriggerConfirmPendingDecisionCreator
         );
-        this.followupInteractionContextBuilder = new FollowupInteractionContextBuilder();
-        this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
+        this.followupInteractionContextResolver = new FollowupInteractionContextResolver(jdbcTemplate);
         this.followupPendingDecisionContextBuilder = new FollowupPendingDecisionContextBuilder();
         this.followupInteractionPendingDecisionWriter = new FollowupInteractionPendingDecisionWriter(
             jdbcTemplate,
@@ -5458,18 +5456,7 @@ public class MatchActionService {
         Long userId,
         Map<String, Object> effectSummary
     ) {
-        return followupInteractionContextBuilder.buildFollowupInteractionContext(
-            userId,
-            effectSummary,
-            (viewerUserId, ownerUserId, cardInstanceId, fallbackZone, fallbackCardId) -> followupCardCandidateLoader.loadCardCandidateForDecision(
-                matchId,
-                viewerUserId,
-                ownerUserId,
-                cardInstanceId,
-                fallbackZone,
-                fallbackCardId
-            )
-        );
+        return followupInteractionContextResolver.resolve(matchId, userId, effectSummary);
     }
 
     /**
