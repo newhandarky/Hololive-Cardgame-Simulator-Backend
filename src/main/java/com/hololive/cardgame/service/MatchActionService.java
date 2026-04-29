@@ -88,6 +88,7 @@ public class MatchActionService {
     private final EffectPostTriggerConfirmMessageBuilder effectPostTriggerConfirmMessageBuilder;
     private final FollowupInteractionContextBuilder followupInteractionContextBuilder;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
+    private final FollowupPendingDecisionContextBuilder followupPendingDecisionContextBuilder;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -183,6 +184,7 @@ public class MatchActionService {
         this.effectPostTriggerConfirmMessageBuilder = new EffectPostTriggerConfirmMessageBuilder();
         this.followupInteractionContextBuilder = new FollowupInteractionContextBuilder();
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
+        this.followupPendingDecisionContextBuilder = new FollowupPendingDecisionContextBuilder();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5848,23 +5850,10 @@ public class MatchActionService {
             throw new IllegalStateException("你有待處理的互動，請先完成確認");
         }
 
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("interactionType", interaction.decisionType());
-        context.put("title", interaction.title());
-        context.put("message", interaction.message());
-        context.put("cards", interaction.cards());
-        if (interaction.placementOptions() != null && !interaction.placementOptions().isEmpty()) {
-            context.put("placementOptions", interaction.placementOptions());
-        }
-        context.put("effectType", effectType);
-        context.put("candidateCardInstanceIds", interaction.candidateCardInstanceIds());
-        context.put("candidateCards", interaction.cards());
-        if (interaction.lookedCardInstanceId() != null) {
-            context.put("lookedCardInstanceId", interaction.lookedCardInstanceId());
-        }
-        if (StringUtils.hasText(interaction.lookedCardId())) {
-            context.put("lookedCardId", interaction.lookedCardId());
-        }
+        Map<String, Object> context = followupPendingDecisionContextBuilder.buildPendingDecisionContext(
+            interaction,
+            effectType
+        );
 
         Long decisionId = jdbcTemplate.query(
             """
