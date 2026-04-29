@@ -21,6 +21,7 @@ public class CollabEffectResolutionService {
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
+    private final GiftTriggeredEffectDetailsMessageBuilder giftTriggeredEffectDetailsMessageBuilder;
 
     public CollabEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -37,6 +38,7 @@ public class CollabEffectResolutionService {
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
+        this.giftTriggeredEffectDetailsMessageBuilder = new GiftTriggeredEffectDetailsMessageBuilder();
     }
 
     public CollabEffectResolution resolve(CollabAction action, CollabResolutionResult resolutionResult) {
@@ -251,28 +253,7 @@ public class CollabEffectResolutionService {
     }
 
     private String buildGiftTriggeredEffectDetails(List<Map<String, Object>> giftTriggeredEffects) {
-        int count = 0;
-        List<String> lines = new ArrayList<>();
-        for (Map<String, Object> trigger : giftTriggeredEffects) {
-            count++;
-            String cardId = asString(trigger.get("giftHolderCardId"));
-            String triggerType = normalizeZone(trigger.get("triggerType"));
-            String rawText = asString(trigger.get("rawText"));
-            List<String> effectTypes = toStringList(trigger.get("requestedEffects"));
-            String effectSummary = effectTypes.isEmpty() ? "無可解析效果類型" : String.join("、", effectTypes);
-            StringBuilder line = new StringBuilder();
-            line.append("#").append(count).append(" ");
-            if (StringUtils.hasText(cardId)) {
-                line.append(cardId).append(" ");
-            }
-            line.append("[").append(StringUtils.hasText(triggerType) ? triggerType : "GIFT").append("]");
-            line.append(" 效果類型：").append(effectSummary);
-            if (StringUtils.hasText(rawText)) {
-                line.append("\n").append(rawText);
-            }
-            lines.add(line.toString());
-        }
-        return String.join("\n\n", lines);
+        return giftTriggeredEffectDetailsMessageBuilder.buildGiftTriggeredEffectDetails(giftTriggeredEffects);
     }
 
     private List<Map<String, Object>> buildGiftTriggerInteractionCards(

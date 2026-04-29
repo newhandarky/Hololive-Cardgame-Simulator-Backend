@@ -4,11 +4,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.util.StringUtils;
 
 @Service
 public class PlayCardEffectResolutionService {
@@ -20,6 +18,7 @@ public class PlayCardEffectResolutionService {
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
+    private final GiftTriggeredEffectDetailsMessageBuilder giftTriggeredEffectDetailsMessageBuilder;
 
     public PlayCardEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -34,6 +33,7 @@ public class PlayCardEffectResolutionService {
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
+        this.giftTriggeredEffectDetailsMessageBuilder = new GiftTriggeredEffectDetailsMessageBuilder();
     }
 
     public PlayCardEffectResolution resolve(PlayCardAction action, PlayCardResolutionResult resolutionResult) {
@@ -166,28 +166,7 @@ public class PlayCardEffectResolutionService {
     }
 
     private String buildGiftTriggeredEffectDetails(List<Map<String, Object>> giftTriggeredEffects) {
-        int count = 0;
-        List<String> lines = new ArrayList<>();
-        for (Map<String, Object> trigger : giftTriggeredEffects) {
-            count++;
-            String cardId = asString(trigger.get("giftHolderCardId"));
-            String triggerType = normalizeZone(trigger.get("triggerType"));
-            String rawText = asString(trigger.get("rawText"));
-            List<String> effectTypes = toStringList(trigger.get("requestedEffects"));
-            String effectSummary = effectTypes.isEmpty() ? "無可解析效果類型" : String.join("、", effectTypes);
-            StringBuilder line = new StringBuilder();
-            line.append("#").append(count).append(" ");
-            if (StringUtils.hasText(cardId)) {
-                line.append(cardId).append(" ");
-            }
-            line.append("[").append(StringUtils.hasText(triggerType) ? triggerType : "GIFT").append("]");
-            line.append(" 效果類型：").append(effectSummary);
-            if (StringUtils.hasText(rawText)) {
-                line.append("\n").append(rawText);
-            }
-            lines.add(line.toString());
-        }
-        return String.join("\n\n", lines);
+        return giftTriggeredEffectDetailsMessageBuilder.buildGiftTriggeredEffectDetails(giftTriggeredEffects);
     }
 
     private List<Map<String, Object>> buildTriggeredResolutionOrder(
@@ -213,32 +192,4 @@ public class PlayCardEffectResolutionService {
         return order;
     }
 
-    private String normalizeZone(Object value) {
-        if (value == null) {
-            return "";
-        }
-        return String.valueOf(value).trim().toUpperCase(Locale.ROOT);
-    }
-
-    private String asString(Object value) {
-        if (value == null) {
-            return null;
-        }
-        String text = String.valueOf(value);
-        return StringUtils.hasText(text) ? text : null;
-    }
-
-    private List<String> toStringList(Object value) {
-        if (value instanceof List<?> list) {
-            List<String> result = new ArrayList<>();
-            for (Object item : list) {
-                String text = asString(item);
-                if (StringUtils.hasText(text)) {
-                    result.add(text);
-                }
-            }
-            return result;
-        }
-        return List.of();
-    }
 }
