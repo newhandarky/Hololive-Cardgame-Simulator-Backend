@@ -1,6 +1,5 @@
 package com.hololive.cardgame.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -13,14 +12,10 @@ import org.springframework.util.StringUtils;
 @Service
 public class BloomEffectResolutionService {
 
-    private static final String INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM = "TRIGGER_EFFECT_CONFIRM";
-    private static final String PENDING_STATUS = "PENDING";
-
-    private final JdbcTemplate jdbcTemplate;
-    private final ObjectMapper objectMapper;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchEventHookService matchEventHookService;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
+    private final BloomTriggerConfirmPendingDecisionWriter bloomTriggerConfirmPendingDecisionWriter;
 
     public BloomEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -28,11 +23,10 @@ public class BloomEffectResolutionService {
         MatchTriggeredCardEffectService matchTriggeredCardEffectService,
         MatchEventHookService matchEventHookService
     ) {
-        this.jdbcTemplate = jdbcTemplate;
-        this.objectMapper = objectMapper;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchEventHookService = matchEventHookService;
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
+        this.bloomTriggerConfirmPendingDecisionWriter = new BloomTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
     }
 
     public BloomEffectResolution resolveAfterBloom(
@@ -70,7 +64,7 @@ public class BloomEffectResolutionService {
         if (bloomPreview.hasEffect()) {
             Map<String, Object> additionalContext = new LinkedHashMap<>();
             additionalContext.put("sourceLevelType", target.topLevelType());
-            triggerConfirmDecision = createTriggeredEffectConfirmPendingInteraction(
+            triggerConfirmDecision = bloomTriggerConfirmPendingDecisionWriter.createTriggeredEffectConfirmPendingInteraction(
                 matchId,
                 userId,
                 bloomCardInstanceId,
@@ -90,66 +84,6 @@ public class BloomEffectResolutionService {
             buildTriggeredResolutionOrder(bloomEffectSummary, triggerSummary),
             bloomPreview.hasEffect()
         );
-    }
-
-    private BloomFollowupDecision createTriggeredEffectConfirmPendingInteraction(
-        Long matchId,
-        Long userId,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        String message,
-        List<Map<String, Object>> cards,
-        int turnNumber,
-        Map<String, Object> additionalContext
-    ) {
-        if (hasBlockingPendingDecision(matchId, userId)) {
-            throw new IllegalStateException("你有待處理的互動，請先完成確認");
-        }
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("interactionType", INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
-        context.put("sourceActionType", "BLOOM");
-        context.put("title", "確認 Bloom 效果");
-        context.put("message", message);
-        context.put("cards", cards == null ? List.of() : cards);
-        context.put("turnNumber", turnNumber);
-        if (additionalContext != null && !additionalContext.isEmpty()) {
-            context.putAll(additionalContext);
-        }
-
-        Long decisionId = jdbcTemplate.query(
-            """
-            INSERT INTO match_pending_decisions (
-                match_id,
-                user_id,
-                decision_type,
-                source_action_type,
-                source_card_instance_id,
-                source_card_id,
-                effect_type,
-                min_select,
-                max_select,
-                status,
-                context_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM,
-            "BLOOM",
-            sourceCardInstanceId,
-            sourceCardId,
-            "BLOOM_EFFECT",
-            0,
-            0,
-            PENDING_STATUS,
-            toJson(context)
-        );
-        if (decisionId == null) {
-            return null;
-        }
-        return new BloomFollowupDecision(decisionId, INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
     }
 
     private Map<String, Object> buildInteractionSourceCardPayload(
@@ -223,31 +157,4 @@ public class BloomEffectResolutionService {
         return order;
     }
 
-    private boolean hasBlockingPendingDecision(Long matchId, Long userId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = ?
-            """,
-            Integer.class,
-            matchId,
-            userId,
-            PENDING_STATUS
-        );
-        return count != null && count > 0;
-    }
-
-    private String toJson(Object value) {
-        try {
-            return objectMapper.writeValueAsString(value);
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("無法序列化 BLOOM effect payload", ex);
-        }
-    }
-
-    private record BloomFollowupDecision(Long decisionId, String decisionType) {
-    }
 }
