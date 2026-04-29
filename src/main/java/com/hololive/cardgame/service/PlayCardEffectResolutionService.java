@@ -19,6 +19,7 @@ public class PlayCardEffectResolutionService {
     private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
+    private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
 
     public PlayCardEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -32,6 +33,7 @@ public class PlayCardEffectResolutionService {
         this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
+        this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
     }
 
     public PlayCardEffectResolution resolve(PlayCardAction action, PlayCardResolutionResult resolutionResult) {
@@ -109,28 +111,7 @@ public class PlayCardEffectResolutionService {
     }
 
     private Map<String, Object> buildGiftTriggeredEffectDeferredSummary(List<Map<String, Object>> giftTriggeredEffects) {
-        Map<String, Object> summary = new LinkedHashMap<>();
-        List<Map<String, Object>> triggers = giftTriggeredEffects == null ? List.of() : giftTriggeredEffects;
-        List<String> requestedEffects = new ArrayList<>();
-        for (Map<String, Object> trigger : triggers) {
-            Object requested = trigger.get("requestedEffects");
-            if (!(requested instanceof List<?> list)) {
-                continue;
-            }
-            for (Object effectType : list) {
-                String normalized = normalizeZone(effectType);
-                if (StringUtils.hasText(normalized) && !requestedEffects.contains(normalized)) {
-                    requestedEffects.add(normalized);
-                }
-            }
-        }
-        summary.put("sourceActionType", "GIFT");
-        summary.put("deferred", !triggers.isEmpty());
-        summary.put("triggeredGifts", triggers);
-        summary.put("requestedEffects", requestedEffects);
-        summary.put("executedEffects", List.of());
-        summary.put("unsupportedEffects", List.of());
-        return summary;
+        return giftTriggeredEffectDeferredSummaryBuilder.buildGiftTriggeredEffectDeferredSummary(giftTriggeredEffects);
     }
 
     private FollowupInteractionDecision createGiftTriggeredEffectConfirmPendingInteraction(

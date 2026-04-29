@@ -85,6 +85,7 @@ public class MatchActionService {
     private final AttackPostTriggerConfirmMessageBuilder attackPostTriggerConfirmMessageBuilder;
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
+    private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
     private final EffectPostTriggerConfirmMessageBuilder effectPostTriggerConfirmMessageBuilder;
     private final FollowupInteractionContextBuilder followupInteractionContextBuilder;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
@@ -181,6 +182,7 @@ public class MatchActionService {
         this.attackPostTriggerConfirmMessageBuilder = new AttackPostTriggerConfirmMessageBuilder();
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
+        this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
         this.effectPostTriggerConfirmMessageBuilder = new EffectPostTriggerConfirmMessageBuilder();
         this.followupInteractionContextBuilder = new FollowupInteractionContextBuilder();
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
@@ -5627,28 +5629,7 @@ public class MatchActionService {
      * 建立 Gift 觸發待確認摘要（不立即執行效果）。
      */
     private Map<String, Object> buildGiftTriggeredEffectDeferredSummary(List<Map<String, Object>> giftTriggeredEffects) {
-        Map<String, Object> summary = new LinkedHashMap<>();
-        List<Map<String, Object>> triggers = giftTriggeredEffects == null ? List.of() : giftTriggeredEffects;
-        List<String> requestedEffects = new ArrayList<>();
-        for (Map<String, Object> trigger : triggers) {
-            Object requested = trigger.get("requestedEffects");
-            if (!(requested instanceof List<?> list)) {
-                continue;
-            }
-            for (Object effectType : list) {
-                String normalized = normalizeZone(effectType);
-                if (StringUtils.hasText(normalized) && !requestedEffects.contains(normalized)) {
-                    requestedEffects.add(normalized);
-                }
-            }
-        }
-        summary.put("sourceActionType", "GIFT");
-        summary.put("deferred", !triggers.isEmpty());
-        summary.put("triggeredGifts", triggers);
-        summary.put("requestedEffects", requestedEffects);
-        summary.put("executedEffects", List.of());
-        summary.put("unsupportedEffects", List.of());
-        return summary;
+        return giftTriggeredEffectDeferredSummaryBuilder.buildGiftTriggeredEffectDeferredSummary(giftTriggeredEffects);
     }
 
     private List<Map<String, Object>> buildGiftTriggerPayloads(List<Map<String, Object>> giftTriggeredEffects) {
