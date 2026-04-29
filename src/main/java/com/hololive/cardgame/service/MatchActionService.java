@@ -1128,14 +1128,11 @@ public class MatchActionService {
             );
             payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
             if (!mainStepGiftEffects.isEmpty()) {
-                FollowupInteractionDecision mainStepGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                FollowupInteractionDecision mainStepGiftDecision = createDeferredGiftTriggerDecision(
                     matchId,
                     userId,
-                    null,
-                    null,
-                    buildGiftTriggerInteractionCards(matchId, userId, null, null, mainStepGiftEffects),
-                    mainStepGiftEffects,
-                    context.turnNumber
+                    context.turnNumber,
+                    mainStepGiftEffects
                 );
                 putFollowupDecisionPayload(payload, mainStepGiftDecision);
             }
@@ -1244,14 +1241,11 @@ public class MatchActionService {
             );
             payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
             if (!mainStepGiftEffects.isEmpty()) {
-                FollowupInteractionDecision mainStepGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+                FollowupInteractionDecision mainStepGiftDecision = createDeferredGiftTriggerDecision(
                     matchId,
                     userId,
-                    null,
-                    null,
-                    buildGiftTriggerInteractionCards(matchId, userId, null, null, mainStepGiftEffects),
-                    mainStepGiftEffects,
-                    context.turnNumber
+                    context.turnNumber,
+                    mainStepGiftEffects
                 );
                 putFollowupDecisionPayload(payload, mainStepGiftDecision);
             }
