@@ -5607,19 +5607,7 @@ public class MatchActionService {
                 turnNumber
             );
 
-        return createTriggeredEffectConfirmPendingInteraction(
-            input.matchId(),
-            input.userId(),
-            input.sourceActionType(),
-            input.sourceCardInstanceId(),
-            input.sourceCardId(),
-            input.effectType(),
-            input.title(),
-            input.message(),
-            input.cards(),
-            input.turnNumber(),
-            input.additionalContext()
-        );
+        return followupTriggerConfirmPendingDecisionWriter.create(input);
     }
 
     /**
