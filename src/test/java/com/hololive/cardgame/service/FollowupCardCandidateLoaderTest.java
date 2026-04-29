@@ -105,6 +105,32 @@ class FollowupCardCandidateLoaderTest {
         assertThat(candidate).containsEntry("levelType", null);
     }
 
+    @Test
+    void loadOwnedCardCandidateForDecisionShouldPreserveZoneForActorOwnedCard() {
+        whenQueryReturns(
+            Map.of(
+                "cardInstanceId",
+                101L,
+                "cardId",
+                "HBP99-001",
+                "zone",
+                "STAGE"
+            )
+        );
+
+        Map<String, Object> candidate = loader.loadOwnedCardCandidateForDecision(
+            1L,
+            10L,
+            101L,
+            "HAND",
+            "FALLBACK"
+        );
+
+        assertThat(candidate).containsEntry("cardInstanceId", 101L);
+        assertThat(candidate).containsEntry("cardId", "HBP99-001");
+        assertThat(candidate).containsEntry("zone", "STAGE");
+    }
+
     @SuppressWarnings({ "unchecked", "rawtypes" })
     private void whenQueryReturns(Map<String, Object> row) {
         when(jdbcTemplate.query(anyString(), any(ResultSetExtractor.class), any(), any(), any()))

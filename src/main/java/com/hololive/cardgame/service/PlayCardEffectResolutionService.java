@@ -268,9 +268,8 @@ public class PlayCardEffectResolutionService {
         String cardId,
         String fallbackZone
     ) {
-        return followupCardCandidateLoader.loadCardCandidateForDecision(
+        return followupCardCandidateLoader.loadOwnedCardCandidateForDecision(
             matchId,
-            userId,
             userId,
             cardInstanceId,
             fallbackZone,

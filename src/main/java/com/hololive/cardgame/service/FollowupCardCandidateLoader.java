@@ -14,6 +14,23 @@ class FollowupCardCandidateLoader {
         this.jdbcTemplate = jdbcTemplate;
     }
 
+    Map<String, Object> loadOwnedCardCandidateForDecision(
+        Long matchId,
+        Long userId,
+        Long cardInstanceId,
+        String fallbackZone,
+        String fallbackCardId
+    ) {
+        return loadCardCandidateForDecision(
+            matchId,
+            userId,
+            userId,
+            cardInstanceId,
+            fallbackZone,
+            fallbackCardId
+        );
+    }
+
     Map<String, Object> loadCardCandidateForDecision(
         Long matchId,
         Long viewerUserId,

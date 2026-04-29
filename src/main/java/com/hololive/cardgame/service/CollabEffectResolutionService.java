@@ -392,9 +392,8 @@ public class CollabEffectResolutionService {
         String cardId,
         String fallbackZone
     ) {
-        return followupCardCandidateLoader.loadCardCandidateForDecision(
+        return followupCardCandidateLoader.loadOwnedCardCandidateForDecision(
             matchId,
-            userId,
             userId,
             cardInstanceId,
             fallbackZone,

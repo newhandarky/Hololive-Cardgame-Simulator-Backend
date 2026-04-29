@@ -97,21 +97,13 @@ public class BloomEffectResolutionService {
         Long cardInstanceId,
         String fallbackCardId
     ) {
-        Map<String, Object> card = followupCardCandidateLoader.loadCardCandidateForDecision(
+        return followupCardCandidateLoader.loadOwnedCardCandidateForDecision(
             matchId,
-            userId,
             userId,
             cardInstanceId,
             "STAGE",
             fallbackCardId
         );
-        if (!card.containsKey("cardInstanceId")) {
-            card.put("cardInstanceId", cardInstanceId);
-        }
-        if (!card.containsKey("cardId")) {
-            card.put("cardId", fallbackCardId);
-        }
-        return card;
     }
 
     private Map<String, Object> buildTriggeredEffectDeferredSummary(
