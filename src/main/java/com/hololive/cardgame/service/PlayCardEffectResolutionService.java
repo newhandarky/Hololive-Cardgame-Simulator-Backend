@@ -6,7 +6,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -19,6 +18,7 @@ public class PlayCardEffectResolutionService {
     private final FollowupSourceCardPayloadBuilder followupSourceCardPayloadBuilder;
     private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
+    private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
 
     public PlayCardEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -31,6 +31,7 @@ public class PlayCardEffectResolutionService {
         this.followupSourceCardPayloadBuilder = new FollowupSourceCardPayloadBuilder(jdbcTemplate);
         this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
+        this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
     }
 
     public PlayCardEffectResolution resolve(PlayCardAction action, PlayCardResolutionResult resolutionResult) {
@@ -170,31 +171,10 @@ public class PlayCardEffectResolutionService {
         Map<String, Object> additionalContext,
         List<Map<String, Object>> giftTriggeredEffects
     ) {
-        if (additionalContext == null || giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
+        if (additionalContext == null) {
             return;
         }
-        List<Map<String, Object>> selectableTriggers = giftTriggeredEffects.stream()
-            .filter(Objects::nonNull)
-            .filter(trigger -> toBoolean(trigger.get("selectionRequired")))
-            .toList();
-        if (selectableTriggers.size() != 1) {
-            return;
-        }
-        Map<String, Object> selectionTrigger = selectableTriggers.get(0);
-        List<Long> candidateCardInstanceIds = toLongList(selectionTrigger.get("selectionCandidateCardInstanceIds"));
-        if (candidateCardInstanceIds.isEmpty()) {
-            return;
-        }
-        additionalContext.put("candidateCardInstanceIds", candidateCardInstanceIds);
-        additionalContext.put("selectionGiftHolderCardInstanceId", asLong(selectionTrigger.get("giftHolderCardInstanceId")));
-        additionalContext.put("minSelect", Math.max(asInt(selectionTrigger.get("selectionMinSelect")), 1));
-        additionalContext.put(
-            "maxSelect",
-            Math.max(
-                asInt(selectionTrigger.get("selectionMaxSelect")),
-                Math.max(asInt(selectionTrigger.get("selectionMinSelect")), 1)
-            )
-        );
+        additionalContext.putAll(giftSelectionPendingContextBuilder.buildSelectionPendingContext(giftTriggeredEffects));
     }
 
     private String buildGiftTriggeredEffectConfirmMessage(List<Map<String, Object>> giftTriggeredEffects) {
@@ -267,44 +247,6 @@ public class PlayCardEffectResolutionService {
         return StringUtils.hasText(text) ? text : null;
     }
 
-    private Long asLong(Object value) {
-        if (value == null) {
-            return null;
-        }
-        if (value instanceof Number number) {
-            return number.longValue();
-        }
-        try {
-            return Long.parseLong(String.valueOf(value));
-        } catch (NumberFormatException ignored) {
-            return null;
-        }
-    }
-
-    private int asInt(Object value) {
-        if (value == null) {
-            return 0;
-        }
-        if (value instanceof Number number) {
-            return number.intValue();
-        }
-        try {
-            return Integer.parseInt(String.valueOf(value));
-        } catch (NumberFormatException ignored) {
-            return 0;
-        }
-    }
-
-    private boolean toBoolean(Object value) {
-        if (value == null) {
-            return false;
-        }
-        if (value instanceof Boolean bool) {
-            return bool;
-        }
-        return Boolean.parseBoolean(String.valueOf(value));
-    }
-
     private List<String> toStringList(Object value) {
         if (value instanceof List<?> list) {
             List<String> result = new ArrayList<>();
@@ -312,20 +254,6 @@ public class PlayCardEffectResolutionService {
                 String text = asString(item);
                 if (StringUtils.hasText(text)) {
                     result.add(text);
-                }
-            }
-            return result;
-        }
-        return List.of();
-    }
-
-    private List<Long> toLongList(Object value) {
-        if (value instanceof List<?> list) {
-            List<Long> result = new ArrayList<>();
-            for (Object item : list) {
-                Long parsed = asLong(item);
-                if (parsed != null) {
-                    result.add(parsed);
                 }
             }
             return result;

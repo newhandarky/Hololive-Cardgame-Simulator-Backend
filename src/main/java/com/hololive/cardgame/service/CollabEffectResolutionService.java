@@ -6,7 +6,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -20,6 +19,7 @@ public class CollabEffectResolutionService {
     private final FollowupSourceCardPayloadBuilder followupSourceCardPayloadBuilder;
     private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
+    private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
 
     public CollabEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -34,6 +34,7 @@ public class CollabEffectResolutionService {
         this.followupSourceCardPayloadBuilder = new FollowupSourceCardPayloadBuilder(jdbcTemplate);
         this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
+        this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
     }
 
     public CollabEffectResolution resolve(CollabAction action, CollabResolutionResult resolutionResult) {
@@ -195,31 +196,10 @@ public class CollabEffectResolutionService {
         Map<String, Object> additionalContext,
         List<Map<String, Object>> giftTriggeredEffects
     ) {
-        if (additionalContext == null || giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
+        if (additionalContext == null) {
             return;
         }
-        List<Map<String, Object>> selectableTriggers = giftTriggeredEffects.stream()
-            .filter(Objects::nonNull)
-            .filter(trigger -> toBoolean(trigger.get("selectionRequired")))
-            .toList();
-        if (selectableTriggers.size() != 1) {
-            return;
-        }
-        Map<String, Object> selectionTrigger = selectableTriggers.get(0);
-        List<Long> candidateCardInstanceIds = toLongList(selectionTrigger.get("selectionCandidateCardInstanceIds"));
-        if (candidateCardInstanceIds.isEmpty()) {
-            return;
-        }
-        additionalContext.put("candidateCardInstanceIds", candidateCardInstanceIds);
-        additionalContext.put("selectionGiftHolderCardInstanceId", asLong(selectionTrigger.get("giftHolderCardInstanceId")));
-        additionalContext.put("minSelect", Math.max(asInt(selectionTrigger.get("selectionMinSelect")), 1));
-        additionalContext.put(
-            "maxSelect",
-            Math.max(
-                asInt(selectionTrigger.get("selectionMaxSelect")),
-                Math.max(asInt(selectionTrigger.get("selectionMinSelect")), 1)
-            )
-        );
+        additionalContext.putAll(giftSelectionPendingContextBuilder.buildSelectionPendingContext(giftTriggeredEffects));
     }
 
     private String buildCollabTriggeredEffectConfirmMessage(
@@ -424,30 +404,6 @@ public class CollabEffectResolutionService {
         }
     }
 
-    private int asInt(Object value) {
-        if (value == null) {
-            return 0;
-        }
-        if (value instanceof Number number) {
-            return number.intValue();
-        }
-        try {
-            return Integer.parseInt(String.valueOf(value));
-        } catch (NumberFormatException ignored) {
-            return 0;
-        }
-    }
-
-    private boolean toBoolean(Object value) {
-        if (value == null) {
-            return false;
-        }
-        if (value instanceof Boolean bool) {
-            return bool;
-        }
-        return Boolean.parseBoolean(String.valueOf(value));
-    }
-
     private List<String> toStringList(Object value) {
         if (value instanceof List<?> list) {
             List<String> result = new ArrayList<>();
@@ -455,20 +411,6 @@ public class CollabEffectResolutionService {
                 String text = asString(item);
                 if (StringUtils.hasText(text)) {
                     result.add(text);
-                }
-            }
-            return result;
-        }
-        return List.of();
-    }
-
-    private List<Long> toLongList(Object value) {
-        if (value instanceof List<?> list) {
-            List<Long> result = new ArrayList<>();
-            for (Object item : list) {
-                Long parsed = asLong(item);
-                if (parsed != null) {
-                    result.add(parsed);
                 }
             }
             return result;
