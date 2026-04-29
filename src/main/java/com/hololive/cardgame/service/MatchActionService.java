@@ -87,6 +87,7 @@ public class MatchActionService {
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
     private final EffectPostTriggerConfirmMessageBuilder effectPostTriggerConfirmMessageBuilder;
     private final FollowupInteractionContextBuilder followupInteractionContextBuilder;
+    private final FollowupCardCandidateLoader followupCardCandidateLoader;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -181,6 +182,7 @@ public class MatchActionService {
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
         this.effectPostTriggerConfirmMessageBuilder = new EffectPostTriggerConfirmMessageBuilder();
         this.followupInteractionContextBuilder = new FollowupInteractionContextBuilder();
+        this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5309,7 +5311,7 @@ public class MatchActionService {
         String fallbackCardId,
         String fallbackZone
     ) {
-        Map<String, Object> card = loadCardCandidateForDecision(
+        Map<String, Object> card = followupCardCandidateLoader.loadCardCandidateForDecision(
             matchId,
             userId,
             userId,
@@ -5901,69 +5903,6 @@ public class MatchActionService {
     }
 
     /**
-     * 載入決策候選卡片資料，若查無完整資料則回傳 fallback 結構。
-     */
-    private Map<String, Object> loadCardCandidateForDecision(
-        Long matchId,
-        Long viewerUserId,
-        Long ownerUserId,
-        Long cardInstanceId,
-        String fallbackZone,
-        String fallbackCardId
-    ) {
-        Map<String, Object> row = jdbcTemplate.query(
-            """
-            SELECT mc.id AS card_instance_id,
-                   mc.card_id,
-                   mc.zone,
-                   c.name,
-                   c.card_type,
-                   c.image_url,
-                   m.level_type
-            FROM match_cards mc
-            LEFT JOIN cards c ON c.card_id = mc.card_id
-            LEFT JOIN member_cards m ON m.card_id = mc.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> value = new LinkedHashMap<>();
-                value.put("cardInstanceId", rs.getLong("card_instance_id"));
-                value.put("cardId", rs.getString("card_id"));
-                value.put("zone", normalizeZone(rs.getString("zone")));
-                value.put("name", rs.getString("name"));
-                value.put("cardType", rs.getString("card_type"));
-                value.put("imageUrl", rs.getString("image_url"));
-                value.put("levelType", rs.getString("level_type"));
-                return value;
-            },
-            matchId,
-            ownerUserId,
-            cardInstanceId
-        );
-        if (row != null) {
-            if (!viewerUserId.equals(ownerUserId)) {
-                row.put("zone", null);
-            }
-            return row;
-        }
-        Map<String, Object> fallback = new LinkedHashMap<>();
-        fallback.put("cardInstanceId", cardInstanceId);
-        fallback.put("cardId", fallbackCardId);
-        fallback.put("zone", normalizeZone(fallbackZone));
-        fallback.put("name", null);
-        fallback.put("cardType", null);
-        fallback.put("imageUrl", null);
-        fallback.put("levelType", null);
-        return fallback;
-    }
-
-    /**
      * 正規化決策中的 placement 欄位（例如 TOP/BOTTOM）。
      */
     private String normalizeDecisionPlacement(String placement) {
@@ -5984,7 +5923,7 @@ public class MatchActionService {
         return followupInteractionContextBuilder.buildFollowupInteractionContext(
             userId,
             effectSummary,
-            (viewerUserId, ownerUserId, cardInstanceId, fallbackZone, fallbackCardId) -> loadCardCandidateForDecision(
+            (viewerUserId, ownerUserId, cardInstanceId, fallbackZone, fallbackCardId) -> followupCardCandidateLoader.loadCardCandidateForDecision(
                 matchId,
                 viewerUserId,
                 ownerUserId,
