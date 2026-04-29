@@ -92,6 +92,7 @@ public class MatchActionService {
     private final FollowupInteractionContextBuilder followupInteractionContextBuilder;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
     private final FollowupPendingDecisionContextBuilder followupPendingDecisionContextBuilder;
+    private final FollowupInteractionPendingDecisionWriter followupInteractionPendingDecisionWriter;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -201,6 +202,11 @@ public class MatchActionService {
         this.followupInteractionContextBuilder = new FollowupInteractionContextBuilder();
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
         this.followupPendingDecisionContextBuilder = new FollowupPendingDecisionContextBuilder();
+        this.followupInteractionPendingDecisionWriter = new FollowupInteractionPendingDecisionWriter(
+            jdbcTemplate,
+            matchPayloadJsonService,
+            followupPendingDecisionContextBuilder
+        );
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5423,49 +5429,15 @@ public class MatchActionService {
         if (interaction == null) {
             return null;
         }
-        if (hasBlockingPendingDecision(matchId, userId)) {
-            throw new IllegalStateException("你有待處理的互動，請先完成確認");
-        }
-
-        Map<String, Object> context = followupPendingDecisionContextBuilder.buildPendingDecisionContext(
-            interaction,
-            effectType
-        );
-
-        Long decisionId = jdbcTemplate.query(
-            """
-            INSERT INTO match_pending_decisions (
-                match_id,
-                user_id,
-                decision_type,
-                source_action_type,
-                source_card_instance_id,
-                source_card_id,
-                effect_type,
-                min_select,
-                max_select,
-                status,
-                context_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
+        return followupInteractionPendingDecisionWriter.create(
             matchId,
             userId,
-            interaction.decisionType(),
             sourceActionType,
             sourceCardInstanceId,
             sourceCardId,
             effectType,
-            interaction.minSelect(),
-            interaction.maxSelect(),
-            PENDING_STATUS,
-            toJson(context)
+            interaction
         );
-        if (decisionId == null) {
-            return null;
-        }
-        return new FollowupInteractionDecision(decisionId, interaction.decisionType());
     }
 
     /**
