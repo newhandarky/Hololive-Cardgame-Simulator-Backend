@@ -14,7 +14,7 @@ public class BloomEffectResolutionService {
 
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchEventHookService matchEventHookService;
-    private final FollowupCardCandidateLoader followupCardCandidateLoader;
+    private final FollowupSourceCardPayloadBuilder followupSourceCardPayloadBuilder;
     private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
 
     public BloomEffectResolutionService(
@@ -25,7 +25,7 @@ public class BloomEffectResolutionService {
     ) {
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchEventHookService = matchEventHookService;
-        this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
+        this.followupSourceCardPayloadBuilder = new FollowupSourceCardPayloadBuilder(jdbcTemplate);
         this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
     }
 
@@ -74,7 +74,7 @@ public class BloomEffectResolutionService {
                     "BLOOM_EFFECT",
                     "確認 Bloom 效果",
                     buildTriggeredEffectConfirmMessage(bloomPreview),
-                    List.of(buildInteractionSourceCardPayload(matchId, userId, bloomCardInstanceId, bloomCardId)),
+                    List.of(followupSourceCardPayloadBuilder.buildOwnedStageCard(matchId, userId, bloomCardInstanceId, bloomCardId)),
                     turnNumber,
                     additionalContext
                 )
@@ -88,21 +88,6 @@ public class BloomEffectResolutionService {
             triggerConfirmDecision == null ? null : triggerConfirmDecision.decisionType(),
             buildTriggeredResolutionOrder(bloomEffectSummary, triggerSummary),
             bloomPreview.hasEffect()
-        );
-    }
-
-    private Map<String, Object> buildInteractionSourceCardPayload(
-        Long matchId,
-        Long userId,
-        Long cardInstanceId,
-        String fallbackCardId
-    ) {
-        return followupCardCandidateLoader.loadOwnedCardCandidateForDecision(
-            matchId,
-            userId,
-            cardInstanceId,
-            "STAGE",
-            fallbackCardId
         );
     }
 

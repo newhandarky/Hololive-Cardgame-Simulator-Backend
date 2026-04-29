@@ -16,7 +16,7 @@ public class PlayCardEffectResolutionService {
 
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final MatchEventHookService matchEventHookService;
-    private final FollowupCardCandidateLoader followupCardCandidateLoader;
+    private final FollowupSourceCardPayloadBuilder followupSourceCardPayloadBuilder;
     private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
 
     public PlayCardEffectResolutionService(
@@ -27,7 +27,7 @@ public class PlayCardEffectResolutionService {
     ) {
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.matchEventHookService = matchEventHookService;
-        this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
+        this.followupSourceCardPayloadBuilder = new FollowupSourceCardPayloadBuilder(jdbcTemplate);
         this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
     }
 
@@ -74,12 +74,12 @@ public class PlayCardEffectResolutionService {
                 resolutionResult.cardInstanceId(),
                 resolutionResult.cardId(),
                 List.of(
-                    buildInteractionSourceCardPayload(
+                    followupSourceCardPayloadBuilder.buildOwnedCard(
                         matchId,
                         userId,
                         resolutionResult.cardInstanceId(),
-                        resolutionResult.cardId(),
-                        resolutionResult.targetZone()
+                        resolutionResult.targetZone(),
+                        resolutionResult.cardId()
                     )
                 ),
                 giftTriggeredEffects,
@@ -259,22 +259,6 @@ public class PlayCardEffectResolutionService {
             lines.add(line.toString());
         }
         return String.join("\n\n", lines);
-    }
-
-    private Map<String, Object> buildInteractionSourceCardPayload(
-        Long matchId,
-        Long userId,
-        Long cardInstanceId,
-        String cardId,
-        String fallbackZone
-    ) {
-        return followupCardCandidateLoader.loadOwnedCardCandidateForDecision(
-            matchId,
-            userId,
-            cardInstanceId,
-            fallbackZone,
-            cardId
-        );
     }
 
     private List<Map<String, Object>> buildTriggeredResolutionOrder(

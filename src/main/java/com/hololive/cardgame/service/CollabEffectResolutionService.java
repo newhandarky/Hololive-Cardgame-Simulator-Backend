@@ -17,7 +17,7 @@ public class CollabEffectResolutionService {
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final MatchEventHookService matchEventHookService;
-    private final FollowupCardCandidateLoader followupCardCandidateLoader;
+    private final FollowupSourceCardPayloadBuilder followupSourceCardPayloadBuilder;
     private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
 
     public CollabEffectResolutionService(
@@ -30,7 +30,7 @@ public class CollabEffectResolutionService {
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.matchEventHookService = matchEventHookService;
-        this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
+        this.followupSourceCardPayloadBuilder = new FollowupSourceCardPayloadBuilder(jdbcTemplate);
         this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
     }
 
@@ -158,7 +158,7 @@ public class CollabEffectResolutionService {
             giftTriggeredEffects
         );
         if (cards.isEmpty() && sourceCardInstanceId != null && sourceCardInstanceId > 0) {
-            cards = List.of(buildInteractionSourceCardPayload(matchId, userId, sourceCardInstanceId, sourceCardId, "COLLAB"));
+            cards = List.of(followupSourceCardPayloadBuilder.buildOwnedCard(matchId, userId, sourceCardInstanceId, "COLLAB", sourceCardId));
         }
 
         Map<String, Object> additionalContext = new LinkedHashMap<>();
@@ -355,7 +355,7 @@ public class CollabEffectResolutionService {
     ) {
         List<Map<String, Object>> cards = new ArrayList<>();
         if (sourceCardInstanceId != null && sourceCardInstanceId > 0) {
-            cards.add(buildInteractionSourceCardPayload(matchId, userId, sourceCardInstanceId, sourceCardId, "STAGE"));
+            cards.add(followupSourceCardPayloadBuilder.buildOwnedStageCard(matchId, userId, sourceCardInstanceId, sourceCardId));
         }
         if (giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
             return cards;
@@ -373,32 +373,16 @@ public class CollabEffectResolutionService {
                 continue;
             }
             cards.add(
-                buildInteractionSourceCardPayload(
+                followupSourceCardPayloadBuilder.buildOwnedCard(
                     matchId,
                     userId,
                     holderCardInstanceId,
-                    holderCardId,
-                    StringUtils.hasText(holderZone) ? holderZone : "STAGE"
+                    StringUtils.hasText(holderZone) ? holderZone : "STAGE",
+                    holderCardId
                 )
             );
         }
         return cards;
-    }
-
-    private Map<String, Object> buildInteractionSourceCardPayload(
-        Long matchId,
-        Long userId,
-        Long cardInstanceId,
-        String cardId,
-        String fallbackZone
-    ) {
-        return followupCardCandidateLoader.loadOwnedCardCandidateForDecision(
-            matchId,
-            userId,
-            cardInstanceId,
-            fallbackZone,
-            cardId
-        );
     }
 
     private Map<String, Object> mergeEffectSummaryForChecks(
