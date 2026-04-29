@@ -5106,33 +5106,6 @@ public class MatchActionService {
         String title,
         String message,
         List<Map<String, Object>> cards,
-        int turnNumber
-    ) {
-        return createTriggeredEffectConfirmPendingInteraction(
-            matchId,
-            userId,
-            sourceActionType,
-            sourceCardInstanceId,
-            sourceCardId,
-            effectType,
-            title,
-            message,
-            cards,
-            turnNumber,
-            null
-        );
-    }
-
-    private FollowupInteractionDecision createTriggeredEffectConfirmPendingInteraction(
-        Long matchId,
-        Long userId,
-        String sourceActionType,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        String effectType,
-        String title,
-        String message,
-        List<Map<String, Object>> cards,
         int turnNumber,
         Map<String, Object> additionalContext
     ) {
