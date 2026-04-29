@@ -86,6 +86,7 @@ public class MatchActionService {
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
+    private final GiftTriggeredEffectConfirmMessageBuilder giftTriggeredEffectConfirmMessageBuilder;
     private final EffectPostTriggerConfirmMessageBuilder effectPostTriggerConfirmMessageBuilder;
     private final FollowupInteractionContextBuilder followupInteractionContextBuilder;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
@@ -183,6 +184,7 @@ public class MatchActionService {
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
+        this.giftTriggeredEffectConfirmMessageBuilder = new GiftTriggeredEffectConfirmMessageBuilder();
         this.effectPostTriggerConfirmMessageBuilder = new EffectPostTriggerConfirmMessageBuilder();
         this.followupInteractionContextBuilder = new FollowupInteractionContextBuilder();
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
@@ -5683,17 +5685,7 @@ public class MatchActionService {
      * 組裝 Gift 觸發確認訊息（含卡文與 effectType 摘要）。
      */
     private String buildGiftTriggeredEffectConfirmMessage(List<Map<String, Object>> giftTriggeredEffects) {
-        if (giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
-            return "是否要執行本次 Gift 觸發效果？";
-        }
-        return "是否要執行本次 Gift 觸發效果？\n" + buildGiftTriggeredEffectDetails(giftTriggeredEffects);
-    }
-
-    /**
-     * 組裝 Gift 觸發明細文字（不含最上層提問句）。
-     */
-    private String buildGiftTriggeredEffectDetails(List<Map<String, Object>> giftTriggeredEffects) {
-        return attackPostTriggerConfirmMessageBuilder.buildGiftTriggeredEffectDetails(giftTriggeredEffects);
+        return giftTriggeredEffectConfirmMessageBuilder.buildGiftTriggeredEffectConfirmMessage(giftTriggeredEffects);
     }
 
     /**

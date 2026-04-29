@@ -18,7 +18,7 @@ public class PlayCardEffectResolutionService {
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
-    private final GiftTriggeredEffectDetailsMessageBuilder giftTriggeredEffectDetailsMessageBuilder;
+    private final GiftTriggeredEffectConfirmMessageBuilder giftTriggeredEffectConfirmMessageBuilder;
 
     public PlayCardEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -33,7 +33,7 @@ public class PlayCardEffectResolutionService {
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
-        this.giftTriggeredEffectDetailsMessageBuilder = new GiftTriggeredEffectDetailsMessageBuilder();
+        this.giftTriggeredEffectConfirmMessageBuilder = new GiftTriggeredEffectConfirmMessageBuilder();
     }
 
     public PlayCardEffectResolution resolve(PlayCardAction action, PlayCardResolutionResult resolutionResult) {
@@ -159,14 +159,7 @@ public class PlayCardEffectResolutionService {
     }
 
     private String buildGiftTriggeredEffectConfirmMessage(List<Map<String, Object>> giftTriggeredEffects) {
-        if (giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
-            return "是否要執行本次 Gift 觸發效果？";
-        }
-        return "是否要執行本次 Gift 觸發效果？\n" + buildGiftTriggeredEffectDetails(giftTriggeredEffects);
-    }
-
-    private String buildGiftTriggeredEffectDetails(List<Map<String, Object>> giftTriggeredEffects) {
-        return giftTriggeredEffectDetailsMessageBuilder.buildGiftTriggeredEffectDetails(giftTriggeredEffects);
+        return giftTriggeredEffectConfirmMessageBuilder.buildGiftTriggeredEffectConfirmMessage(giftTriggeredEffects);
     }
 
     private List<Map<String, Object>> buildTriggeredResolutionOrder(
