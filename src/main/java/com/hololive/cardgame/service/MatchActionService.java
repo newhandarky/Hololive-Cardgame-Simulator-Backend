@@ -1578,6 +1578,28 @@ public class MatchActionService {
         );
     }
 
+    private FollowupInteractionDecision createBatonTouchGiftTriggerDecision(
+        Long matchId,
+        Long userId,
+        Long sourceCardInstanceId,
+        String sourceCardId,
+        List<Map<String, Object>> giftEffects,
+        int turnNumber
+    ) {
+        if (giftEffects == null || giftEffects.isEmpty()) {
+            return null;
+        }
+        return createGiftTriggeredEffectConfirmPendingInteraction(
+            matchId,
+            userId,
+            sourceCardInstanceId,
+            sourceCardId,
+            buildGiftTriggerInteractionCards(matchId, userId, sourceCardInstanceId, sourceCardId, giftEffects),
+            giftEffects,
+            turnNumber
+        );
+    }
+
     private Map<String, Object> buildAdvancePhasePayload(
         MatchPhase currentPhase,
         MatchPhase nextPhase,
@@ -2131,18 +2153,11 @@ public class MatchActionService {
         FollowupInteractionDecision batonTouchGiftDecision = null;
         if (!batonTouchGiftTriggeredEffects.isEmpty()) {
             batonTouchGiftEffectSummary = buildGiftTriggeredEffectDeferredSummary(batonTouchGiftTriggeredEffects);
-            batonTouchGiftDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+            batonTouchGiftDecision = createBatonTouchGiftTriggerDecision(
                 matchId,
                 userId,
                 targetCenterHolomemCardInstanceId,
                 asString(target.get("card_id")),
-                buildGiftTriggerInteractionCards(
-                    matchId,
-                    userId,
-                    targetCenterHolomemCardInstanceId,
-                    asString(target.get("card_id")),
-                    batonTouchGiftTriggeredEffects
-                ),
                 batonTouchGiftTriggeredEffects,
                 context.turnNumber
             );
