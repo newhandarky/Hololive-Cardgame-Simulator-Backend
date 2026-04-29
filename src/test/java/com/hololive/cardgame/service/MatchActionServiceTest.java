@@ -128,6 +128,70 @@ class MatchActionServiceTest {
     }
 
     @Test
+    void createGiftTriggeredEffectConfirmPendingInteractionShouldKeepBatonTouchSourceCardContext() throws Exception {
+        when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any(), any())).thenReturn(0);
+        whenInsertReturns(904L);
+
+        Map<String, Object> card = Map.of("cardInstanceId", 701L, "cardId", "hBP01-001", "zone", "BACK");
+        Map<String, Object> trigger = Map.of(
+            "triggerType",
+            "BATON_TOUCH_BACK",
+            "giftHolderCardInstanceId",
+            701L,
+            "giftHolderCardId",
+            "hBP01-001",
+            "giftHolderZone",
+            "BACK",
+            "requestedEffects",
+            List.of("DRAW"),
+            "rawText",
+            "baton gift text"
+        );
+
+        FollowupInteractionDecision decision = ReflectionTestUtils.invokeMethod(
+            service,
+            "createGiftTriggeredEffectConfirmPendingInteraction",
+            100L,
+            10L,
+            701L,
+            "hBP01-001",
+            List.of(card),
+            List.of(trigger),
+            4
+        );
+
+        assertThat(decision).isEqualTo(new FollowupInteractionDecision(904L, "TRIGGER_EFFECT_CONFIRM"));
+        ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
+        verify(jdbcTemplate).query(
+            anyString(),
+            any(ResultSetExtractor.class),
+            argsCaptor.capture()
+        );
+        assertThat(argsCaptor.getValue()).containsExactly(
+            100L,
+            10L,
+            "TRIGGER_EFFECT_CONFIRM",
+            "GIFT",
+            701L,
+            "hBP01-001",
+            "GIFT_TRIGGER",
+            0,
+            0,
+            "PENDING",
+            argsCaptor.getValue()[10]
+        );
+        assertThat((String) argsCaptor.getValue()[10])
+            .contains("\"sourceActionType\":\"GIFT\"")
+            .contains("\"cardInstanceId\":701")
+            .contains("\"cardId\":\"hBP01-001\"")
+            .contains("\"zone\":\"BACK\"")
+            .contains("\"triggerType\":\"BATON_TOUCH_BACK\"")
+            .contains("\"giftHolderCardInstanceId\":701")
+            .contains("\"giftCount\":1")
+            .contains("\"turnNumber\":4");
+    }
+
+    @Test
     void createTriggeredEffectConfirmPendingInteractionShouldDelegateAdditionalContextBounds() throws Exception {
         when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any(), any())).thenReturn(0);
         whenInsertReturns(902L);
