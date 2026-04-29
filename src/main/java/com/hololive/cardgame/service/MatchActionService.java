@@ -1128,7 +1128,7 @@ public class MatchActionService {
             );
             payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
             if (!mainStepGiftEffects.isEmpty()) {
-                FollowupInteractionDecision mainStepGiftDecision = createDeferredGiftTriggerDecision(
+                FollowupInteractionDecision mainStepGiftDecision = createGiftTriggerDecisionWithoutSourceCard(
                     matchId,
                     userId,
                     context.turnNumber,
@@ -1241,7 +1241,7 @@ public class MatchActionService {
             );
             payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
             if (!mainStepGiftEffects.isEmpty()) {
-                FollowupInteractionDecision mainStepGiftDecision = createDeferredGiftTriggerDecision(
+                FollowupInteractionDecision mainStepGiftDecision = createGiftTriggerDecisionWithoutSourceCard(
                     matchId,
                     userId,
                     context.turnNumber,
@@ -1533,7 +1533,7 @@ public class MatchActionService {
             return AdvancePhaseFollowup.empty();
         }
         List<Map<String, Object>> ownGiftEffects = transitionPreview.ownGiftEffects();
-        FollowupInteractionDecision ownDecision = createDeferredGiftTriggerDecision(
+        FollowupInteractionDecision ownDecision = createGiftTriggerDecisionWithoutSourceCard(
             matchId,
             userId,
             turnNumber,
@@ -1543,7 +1543,7 @@ public class MatchActionService {
         List<Map<String, Object>> opponentGiftEffects = transitionPreview.opponentGiftEffects();
         FollowupInteractionDecision opponentDecision = null;
         if (opponentUserId != null) {
-            opponentDecision = createDeferredGiftTriggerDecision(
+            opponentDecision = createGiftTriggerDecisionWithoutSourceCard(
                 matchId,
                 opponentUserId,
                 turnNumber,
@@ -1558,7 +1558,7 @@ public class MatchActionService {
         );
     }
 
-    private FollowupInteractionDecision createDeferredGiftTriggerDecision(
+    private FollowupInteractionDecision createGiftTriggerDecisionWithoutSourceCard(
         Long matchId,
         Long userId,
         int turnNumber,
