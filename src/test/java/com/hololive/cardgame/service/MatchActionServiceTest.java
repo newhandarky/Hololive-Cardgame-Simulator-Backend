@@ -176,6 +176,91 @@ class MatchActionServiceTest {
             .contains("\"turnNumber\":4");
     }
 
+    @Test
+    void createAttackArtPostTriggerConfirmPendingInteractionShouldKeepPostTriggerContext() throws Exception {
+        when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any(), any())).thenReturn(0);
+        whenInsertReturns(903L);
+
+        Map<String, Object> card = Map.of("cardInstanceId", 701L, "cardId", "hBP01-001", "zone", "CENTER");
+        Map<String, Object> giftTrigger = Map.of(
+            "triggerType",
+            "ART_USED",
+            "giftHolderCardInstanceId",
+            801L,
+            "giftHolderCardId",
+            "hBP06-014",
+            "giftHolderZone",
+            "BACK",
+            "requestedEffects",
+            List.of("DRAW"),
+            "rawText",
+            "gift text"
+        );
+        Map<String, Object> downEventPreview = Map.of(
+            "downedOwnerUserId",
+            20L,
+            "downedCardId",
+            "hBP02-001",
+            "downedStageZone",
+            "CENTER",
+            "turnNumber",
+            4,
+            "requestedLifeLoss",
+            1,
+            "rawText",
+            "down text"
+        );
+
+        FollowupInteractionDecision decision = ReflectionTestUtils.invokeMethod(
+            service,
+            "createAttackArtPostTriggerConfirmPendingInteraction",
+            100L,
+            10L,
+            701L,
+            "hBP01-001",
+            List.of(card),
+            List.of(giftTrigger),
+            downEventPreview,
+            4
+        );
+
+        assertThat(decision).isEqualTo(new FollowupInteractionDecision(903L, "TRIGGER_EFFECT_CONFIRM"));
+        ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
+        verify(jdbcTemplate).query(
+            anyString(),
+            any(ResultSetExtractor.class),
+            argsCaptor.capture()
+        );
+        assertThat(argsCaptor.getValue()).containsExactly(
+            100L,
+            10L,
+            "TRIGGER_EFFECT_CONFIRM",
+            "ATTACK_ART_POST_TRIGGER",
+            701L,
+            "hBP01-001",
+            "ATTACK_ART_POST_TRIGGER",
+            0,
+            0,
+            "PENDING",
+            argsCaptor.getValue()[10]
+        );
+        assertThat((String) argsCaptor.getValue()[10])
+            .contains("\"sourceActionType\":\"ATTACK_ART_POST_TRIGGER\"")
+            .contains("\"title\":\"確認攻擊後觸發效果\"")
+            .contains("\"message\":\"是否要執行攻擊後觸發效果？")
+            .contains("[Down Event]")
+            .contains("[Gift]")
+            .contains("\"giftTriggers\"")
+            .contains("\"giftCount\":1")
+            .contains("\"downEvent\"")
+            .contains("\"downedCardId\":\"hBP02-001\"")
+            .contains("\"requestedLifeLoss\":1")
+            .contains("\"triggerSections\"")
+            .contains("\"sectionType\":\"GIFT\"")
+            .contains("\"sectionType\":\"DOWN_EVENT\"")
+            .contains("\"turnNumber\":4");
+    }
+
     @SuppressWarnings({ "unchecked", "rawtypes" })
     private void whenInsertReturns(Long decisionId) throws Exception {
         when(jdbcTemplate.query(anyString(), any(ResultSetExtractor.class), any(Object[].class)))
