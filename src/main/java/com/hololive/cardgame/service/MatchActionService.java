@@ -83,6 +83,7 @@ public class MatchActionService {
     private final PendingDownEventContextExtractor pendingDownEventContextExtractor;
     private final AttackPostTriggerSectionBuilder attackPostTriggerSectionBuilder;
     private final AttackPostTriggerConfirmMessageBuilder attackPostTriggerConfirmMessageBuilder;
+    private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
@@ -181,6 +182,7 @@ public class MatchActionService {
         this.pendingDownEventContextExtractor = new PendingDownEventContextExtractor();
         this.attackPostTriggerSectionBuilder = new AttackPostTriggerSectionBuilder();
         this.attackPostTriggerConfirmMessageBuilder = new AttackPostTriggerConfirmMessageBuilder();
+        this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
@@ -5134,60 +5136,19 @@ public class MatchActionService {
         int turnNumber,
         Map<String, Object> additionalContext
     ) {
-        if (hasBlockingPendingDecision(matchId, userId)) {
-            throw new IllegalStateException("你有待處理的互動，請先完成確認");
-        }
-        int minSelect = 0;
-        int maxSelect = 0;
-        if (additionalContext != null && !additionalContext.isEmpty()) {
-            minSelect = Math.max(asInt(additionalContext.get("minSelect")), 0);
-            maxSelect = Math.max(asInt(additionalContext.get("maxSelect")), minSelect);
-        }
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("interactionType", INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
-        context.put("sourceActionType", normalizeZone(sourceActionType));
-        context.put("title", title);
-        context.put("message", message);
-        context.put("cards", cards == null ? List.of() : cards);
-        context.put("turnNumber", turnNumber);
-        if (additionalContext != null && !additionalContext.isEmpty()) {
-            context.putAll(additionalContext);
-        }
-
-        Long decisionId = jdbcTemplate.query(
-            """
-            INSERT INTO match_pending_decisions (
-                match_id,
-                user_id,
-                decision_type,
-                source_action_type,
-                source_card_instance_id,
-                source_card_id,
-                effect_type,
-                min_select,
-                max_select,
-                status,
-                context_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
+        return followupTriggerConfirmPendingDecisionWriter.create(new FollowupTriggerConfirmPendingDecisionInput(
             matchId,
             userId,
-            INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM,
-            normalizeZone(sourceActionType),
+            sourceActionType,
             sourceCardInstanceId,
             sourceCardId,
             effectType,
-            minSelect,
-            maxSelect,
-            PENDING_STATUS,
-            toJson(context)
-        );
-        if (decisionId == null) {
-            return null;
-        }
-        return new FollowupInteractionDecision(decisionId, INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
+            title,
+            message,
+            cards,
+            turnNumber,
+            additionalContext
+        ));
     }
 
     /**

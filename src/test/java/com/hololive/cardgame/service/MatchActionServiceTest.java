@@ -127,6 +127,55 @@ class MatchActionServiceTest {
             .contains("\"turnNumber\":4");
     }
 
+    @Test
+    void createTriggeredEffectConfirmPendingInteractionShouldDelegateAdditionalContextBounds() throws Exception {
+        when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any(), any())).thenReturn(0);
+        whenInsertReturns(902L);
+
+        FollowupInteractionDecision decision = ReflectionTestUtils.invokeMethod(
+            service,
+            "createTriggeredEffectConfirmPendingInteraction",
+            100L,
+            10L,
+            "BLOOM",
+            701L,
+            "hBP01-001",
+            "BLOOM_EFFECT",
+            "確認 Bloom 效果",
+            "confirm bloom?",
+            null,
+            4,
+            Map.of("minSelect", 1, "maxSelect", 2, "sourceLevelType", "DEBUT")
+        );
+
+        assertThat(decision).isEqualTo(new FollowupInteractionDecision(902L, "TRIGGER_EFFECT_CONFIRM"));
+        ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
+        verify(jdbcTemplate).query(
+            anyString(),
+            any(ResultSetExtractor.class),
+            argsCaptor.capture()
+        );
+        assertThat(argsCaptor.getValue()).containsExactly(
+            100L,
+            10L,
+            "TRIGGER_EFFECT_CONFIRM",
+            "BLOOM",
+            701L,
+            "hBP01-001",
+            "BLOOM_EFFECT",
+            1,
+            2,
+            "PENDING",
+            argsCaptor.getValue()[10]
+        );
+        assertThat((String) argsCaptor.getValue()[10])
+            .contains("\"sourceActionType\":\"BLOOM\"")
+            .contains("\"message\":\"confirm bloom?\"")
+            .contains("\"cards\":[]")
+            .contains("\"sourceLevelType\":\"DEBUT\"")
+            .contains("\"turnNumber\":4");
+    }
+
     @SuppressWarnings({ "unchecked", "rawtypes" })
     private void whenInsertReturns(Long decisionId) throws Exception {
         when(jdbcTemplate.query(anyString(), any(ResultSetExtractor.class), any(Object[].class)))
