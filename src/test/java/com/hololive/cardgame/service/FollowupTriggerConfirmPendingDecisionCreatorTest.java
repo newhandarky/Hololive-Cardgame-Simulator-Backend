@@ -9,64 +9,26 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.hololive.cardgame.game.action.GameActionExecutor;
-import com.hololive.cardgame.repository.MatchActionRepository;
-import com.hololive.cardgame.repository.MatchPlayerRepository;
-import com.hololive.cardgame.repository.MatchRepository;
 import java.sql.ResultSet;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.ResultSetExtractor;
-import org.springframework.test.util.ReflectionTestUtils;
 
-class MatchActionServiceTest {
+class FollowupTriggerConfirmPendingDecisionCreatorTest {
 
     private final JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-    private final MatchActionService service = new MatchActionService(
-        mock(MatchRepository.class),
-        mock(MatchPlayerRepository.class),
-        mock(MatchActionRepository.class),
-        jdbcTemplate,
-        new ObjectMapper(),
-        mock(MatchEffectService.class),
-        mock(MatchEffectCombatModifierService.class),
-        mock(MatchTriggeredCombatEffectService.class),
-        mock(MatchTurnEffectMaintenanceService.class),
-        mock(MatchTurnLifecycleService.class),
-        mock(EndTurnApplicationService.class),
-        mock(BloomApplicationService.class),
-        mock(CollabApplicationService.class),
-        mock(AttachCheerApplicationService.class),
-        mock(PlayCardApplicationService.class),
-        mock(CollabEffectResolutionService.class),
-        mock(BloomEffectResolutionService.class),
-        mock(PlayCardEffectResolutionService.class),
-        mock(AttackCostService.class),
-        mock(AttackTargetService.class),
-        mock(AttackDamageService.class),
-        mock(AttackDamageApplicationService.class),
-        mock(AttackDownService.class),
-        mock(AttackDefenderGiftFollowupService.class),
-        mock(MatchPhaseAdvanceGiftTransitionService.class),
-        mock(MatchTriggeredCardEffectService.class),
-        mock(MatchGiftTriggerService.class),
-        mock(MatchTriggeredGiftResolutionService.class),
-        mock(MatchTriggeredEffectResolutionService.class),
-        mock(MatchEventHookService.class),
-        mock(GameActionExecutor.class),
-        mock(DiceService.class)
+    private final FollowupTriggerConfirmPendingDecisionCreator creator = new FollowupTriggerConfirmPendingDecisionCreator(
+        new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, new ObjectMapper())
     );
 
     @Test
-    void createTriggeredEffectConfirmPendingInteractionShouldDelegateAdditionalContextBounds() throws Exception {
+    void createShouldDelegateAdditionalContextBounds() throws Exception {
         when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any(), any())).thenReturn(0);
         whenInsertReturns(902L);
 
-        FollowupInteractionDecision decision = ReflectionTestUtils.invokeMethod(
-            service,
-            "createTriggeredEffectConfirmPendingInteraction",
+        FollowupInteractionDecision decision = creator.create(
             100L,
             10L,
             "BLOOM",

@@ -82,6 +82,7 @@ public class MatchActionService {
     private final PendingGiftTriggerContextExtractor pendingGiftTriggerContextExtractor;
     private final PendingDownEventContextExtractor pendingDownEventContextExtractor;
     private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
+    private final FollowupTriggerConfirmPendingDecisionCreator followupTriggerConfirmPendingDecisionCreator;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
     private final GiftTriggeredEffectConfirmPendingInputBuilder giftTriggeredEffectConfirmPendingInputBuilder;
     private final GiftTriggerInteractionCardsBuilder giftTriggerInteractionCardsBuilder;
@@ -180,6 +181,9 @@ public class MatchActionService {
         this.pendingGiftTriggerContextExtractor = new PendingGiftTriggerContextExtractor();
         this.pendingDownEventContextExtractor = new PendingDownEventContextExtractor();
         this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
+        this.followupTriggerConfirmPendingDecisionCreator = new FollowupTriggerConfirmPendingDecisionCreator(
+            followupTriggerConfirmPendingDecisionWriter
+        );
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
         this.giftTriggeredEffectConfirmPendingInputBuilder = new GiftTriggeredEffectConfirmPendingInputBuilder();
         this.giftTriggerInteractionCardsBuilder = new GiftTriggerInteractionCardsBuilder(jdbcTemplate);
@@ -5105,34 +5109,6 @@ public class MatchActionService {
         return skipped;
     }
 
-    private FollowupInteractionDecision createTriggeredEffectConfirmPendingInteraction(
-        Long matchId,
-        Long userId,
-        String sourceActionType,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        String effectType,
-        String title,
-        String message,
-        List<Map<String, Object>> cards,
-        int turnNumber,
-        Map<String, Object> additionalContext
-    ) {
-        return followupTriggerConfirmPendingDecisionWriter.create(new FollowupTriggerConfirmPendingDecisionInput(
-            matchId,
-            userId,
-            sourceActionType,
-            sourceCardInstanceId,
-            sourceCardId,
-            effectType,
-            title,
-            message,
-            cards,
-            turnNumber,
-            additionalContext
-        ));
-    }
-
     /**
      * GIFT 互動確認後執行：依 pending context 逐筆觸發並彙整摘要。
      */
@@ -5503,7 +5479,7 @@ public class MatchActionService {
         additionalContext.put("downEvent", downEventContext);
         additionalContext.put("originSourceActionType", normalizeZone(originSourceActionType));
 
-        return createTriggeredEffectConfirmPendingInteraction(
+        return followupTriggerConfirmPendingDecisionCreator.create(
             matchId,
             userId,
             ACTION_TYPE_EFFECT_POST_TRIGGER,
