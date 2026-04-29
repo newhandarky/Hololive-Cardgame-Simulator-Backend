@@ -109,7 +109,7 @@ class PlayCardEffectResolutionServiceTest {
                 eq(0),
                 eq(0),
                 eq("PENDING"),
-                any(String.class)
+                contains("\"cards\":[{\"cardInstanceId\":701,\"cardId\":\"hBP01-001\",\"zone\":\"BACK\"")
             )
         ).thenReturn(900L);
 
@@ -133,7 +133,7 @@ class PlayCardEffectResolutionServiceTest {
             eq(0),
             eq(0),
             eq("PENDING"),
-            any(String.class)
+            contains("\"cards\":[{\"cardInstanceId\":701,\"cardId\":\"hBP01-001\",\"zone\":\"BACK\"")
         );
     }
 
