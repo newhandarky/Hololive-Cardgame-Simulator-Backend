@@ -89,6 +89,7 @@ public class MatchActionService {
     private final GiftPendingDecisionCreator giftPendingDecisionCreator;
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
     private final EffectFollowupDecisionResolver effectFollowupDecisionResolver;
+    private final FollowupDecisionPayloadAppender followupDecisionPayloadAppender;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -205,6 +206,7 @@ public class MatchActionService {
             new FollowupInteractionContextResolver(jdbcTemplate),
             followupInteractionPendingDecisionWriter
         );
+        this.followupDecisionPayloadAppender = new FollowupDecisionPayloadAppender();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -723,7 +725,7 @@ public class MatchActionService {
             effectSummary,
             context.turnNumber
         );
-        putFollowupDecisionPayload(payload, followupDecision);
+        followupDecisionPayloadAppender.append(payload, followupDecision);
         appendAction(
             context.match,
             userId,
@@ -861,7 +863,7 @@ public class MatchActionService {
             pending.effectType(),
             effectSummary
         );
-        putFollowupDecisionPayload(payload, followupDecision);
+        followupDecisionPayloadAppender.append(payload, followupDecision);
         finalizeResolvedEffect(context, matchId, userId, effectSummary);
     }
 
@@ -1048,7 +1050,7 @@ public class MatchActionService {
             effectSummary,
             context.turnNumber
         );
-        putFollowupDecisionPayload(payload, followupDecision);
+        followupDecisionPayloadAppender.append(payload, followupDecision);
         appendAction(
             context.match,
             userId,
@@ -1132,7 +1134,7 @@ public class MatchActionService {
                     context.turnNumber,
                     mainStepGiftEffects
                 );
-                putFollowupDecisionPayload(payload, mainStepGiftDecision);
+                followupDecisionPayloadAppender.append(payload, mainStepGiftDecision);
             }
         }
         matchTurnLifecycleService.confirmDrawRevealDecision(
@@ -1245,7 +1247,7 @@ public class MatchActionService {
                     context.turnNumber,
                     mainStepGiftEffects
                 );
-                putFollowupDecisionPayload(payload, mainStepGiftDecision);
+                followupDecisionPayloadAppender.append(payload, mainStepGiftDecision);
             }
         }
         appendAction(
@@ -1607,7 +1609,7 @@ public class MatchActionService {
                 buildGiftTriggeredEffectDeferredSummary(followup.ownGiftEffects()),
                 buildGiftTriggeredEffectDeferredSummary(followup.opponentGiftEffects())
             );
-            putFollowupDecisionPayload(payload, followup.ownDecision());
+            followupDecisionPayloadAppender.append(payload, followup.ownDecision());
             putOpponentFollowupDecisionPayload(payload, followup.opponentDecision());
         }
         return payload;
@@ -1957,7 +1959,7 @@ public class MatchActionService {
             effectSummary,
             context.turnNumber
         );
-        putFollowupDecisionPayload(payload, followupDecision);
+        followupDecisionPayloadAppender.append(payload, followupDecision);
         appendAction(
             context.match,
             userId,
@@ -2161,7 +2163,7 @@ public class MatchActionService {
         payload.put("cost", costSummary);
         if (batonTouchGiftEffectSummary != null) {
             payload.put("batonTouchGiftEffect", batonTouchGiftEffectSummary);
-            putFollowupDecisionPayload(payload, batonTouchGiftDecision);
+            followupDecisionPayloadAppender.append(payload, batonTouchGiftDecision);
         }
 
         appendAction(
@@ -5366,20 +5368,6 @@ public class MatchActionService {
             return null;
         }
         return placement.trim().toUpperCase(Locale.ROOT);
-    }
-
-    /**
-     * 將 follow-up decision id/type 寫回 action payload，便於前端串接 modal。
-     */
-    private void putFollowupDecisionPayload(Map<String, Object> payload, FollowupInteractionDecision followupDecision) {
-        if (payload == null || followupDecision == null || followupDecision.decisionId() == null) {
-            return;
-        }
-        payload.put("pendingInteractionDecisionId", followupDecision.decisionId());
-        payload.put("pendingInteractionDecisionType", followupDecision.decisionType());
-        if (DECISION_TYPE_LOOK_TOP_DECK.equals(followupDecision.decisionType())) {
-            payload.put("pendingLookTopDeckDecisionId", followupDecision.decisionId());
-        }
     }
 
     /**
