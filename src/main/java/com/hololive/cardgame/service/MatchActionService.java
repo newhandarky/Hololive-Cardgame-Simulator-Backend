@@ -88,10 +88,7 @@ public class MatchActionService {
     private final GiftTriggerInteractionCardsBuilder giftTriggerInteractionCardsBuilder;
     private final GiftPendingDecisionCreator giftPendingDecisionCreator;
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
-    private final EffectPostTriggerPendingService effectPostTriggerPendingService;
-    private final FollowupInteractionContextResolver followupInteractionContextResolver;
-    private final FollowupPendingDecisionContextBuilder followupPendingDecisionContextBuilder;
-    private final FollowupInteractionPendingDecisionWriter followupInteractionPendingDecisionWriter;
+    private final EffectFollowupDecisionResolver effectFollowupDecisionResolver;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -193,17 +190,20 @@ public class MatchActionService {
             followupTriggerConfirmPendingDecisionWriter
         );
         this.attackArtPostTriggerConfirmPendingInputBuilder = new AttackArtPostTriggerConfirmPendingInputBuilder();
-        this.effectPostTriggerPendingService = new EffectPostTriggerPendingService(
+        EffectPostTriggerPendingService effectPostTriggerPendingService = new EffectPostTriggerPendingService(
             jdbcTemplate,
             new EffectPostTriggerConfirmMessageBuilder(),
             followupTriggerConfirmPendingDecisionCreator
         );
-        this.followupInteractionContextResolver = new FollowupInteractionContextResolver(jdbcTemplate);
-        this.followupPendingDecisionContextBuilder = new FollowupPendingDecisionContextBuilder();
-        this.followupInteractionPendingDecisionWriter = new FollowupInteractionPendingDecisionWriter(
+        FollowupInteractionPendingDecisionWriter followupInteractionPendingDecisionWriter = new FollowupInteractionPendingDecisionWriter(
             jdbcTemplate,
             matchPayloadJsonService,
-            followupPendingDecisionContextBuilder
+            new FollowupPendingDecisionContextBuilder()
+        );
+        this.effectFollowupDecisionResolver = new EffectFollowupDecisionResolver(
+            effectPostTriggerPendingService,
+            new FollowupInteractionContextResolver(jdbcTemplate),
+            followupInteractionPendingDecisionWriter
         );
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
@@ -713,26 +713,16 @@ public class MatchActionService {
         payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
         payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
         payload.put("effect", effectSummary);
-        FollowupInteractionDecision followupDecision = createEffectPostTriggerConfirmPendingInteractionIfNeeded(
+        FollowupInteractionDecision followupDecision = effectFollowupDecisionResolver.resolvePostTriggerOrInteraction(
             matchId,
             userId,
             "PLAY_SUPPORT",
             cardInstanceId,
             cardId,
+            asString(supportRow.get("effect_type")),
             effectSummary,
             context.turnNumber
         );
-        if (followupDecision == null) {
-            followupDecision = createFollowupInteractionPendingDecisionIfNeeded(
-                matchId,
-                userId,
-                "PLAY_SUPPORT",
-                cardInstanceId,
-                cardId,
-                asString(supportRow.get("effect_type")),
-                effectSummary
-            );
-        }
         putFollowupDecisionPayload(payload, followupDecision);
         appendAction(
             context.match,
@@ -862,7 +852,7 @@ public class MatchActionService {
         );
         appendGiftTriggerActionsIfPresent(context.match, userId, context.turnNumber, effectSummary);
         payload.put("effect", effectSummary);
-        FollowupInteractionDecision followupDecision = createFollowupInteractionPendingDecisionIfNeeded(
+        FollowupInteractionDecision followupDecision = effectFollowupDecisionResolver.resolveInteraction(
             matchId,
             userId,
             pending.sourceActionType(),
@@ -1048,26 +1038,16 @@ public class MatchActionService {
             payload.put("cardId", pending.sourceCardId());
             payload.put("limited", pending.limited());
         }
-        FollowupInteractionDecision followupDecision = createEffectPostTriggerConfirmPendingInteractionIfNeeded(
+        FollowupInteractionDecision followupDecision = effectFollowupDecisionResolver.resolvePostTriggerOrInteraction(
             matchId,
             userId,
             sourceActionType,
             pending.sourceCardInstanceId(),
             pending.sourceCardId(),
+            pending.effectType(),
             effectSummary,
             context.turnNumber
         );
-        if (followupDecision == null) {
-            followupDecision = createFollowupInteractionPendingDecisionIfNeeded(
-                matchId,
-                userId,
-                sourceActionType,
-                pending.sourceCardInstanceId(),
-                pending.sourceCardId(),
-                pending.effectType(),
-                effectSummary
-            );
-        }
         putFollowupDecisionPayload(payload, followupDecision);
         appendAction(
             context.match,
@@ -1967,26 +1947,16 @@ public class MatchActionService {
         payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
         payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
         payload.put("effect", effectSummary);
-        FollowupInteractionDecision followupDecision = createEffectPostTriggerConfirmPendingInteractionIfNeeded(
+        FollowupInteractionDecision followupDecision = effectFollowupDecisionResolver.resolvePostTriggerOrInteraction(
             matchId,
             userId,
             ACTION_TYPE_USE_OSHI_SKILL,
             oshiCardInstanceId,
             oshiCardId,
+            effectType,
             effectSummary,
             context.turnNumber
         );
-        if (followupDecision == null) {
-            followupDecision = createFollowupInteractionPendingDecisionIfNeeded(
-                matchId,
-                userId,
-                ACTION_TYPE_USE_OSHI_SKILL,
-                oshiCardInstanceId,
-                oshiCardId,
-                effectType,
-                effectSummary
-            );
-        }
         putFollowupDecisionPayload(payload, followupDecision);
         appendAction(
             context.match,
@@ -5389,56 +5359,6 @@ public class MatchActionService {
     }
 
     /**
-     * 非攻擊來源若有 deferred down event，建立統一的確認互動。
-     */
-    private FollowupInteractionDecision createEffectPostTriggerConfirmPendingInteractionIfNeeded(
-        Long matchId,
-        Long userId,
-        String originSourceActionType,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        Map<String, Object> effectSummary,
-        int turnNumber
-    ) {
-        return effectPostTriggerPendingService.createEffectPostTriggerConfirmPendingInteractionIfNeeded(
-            matchId,
-            userId,
-            originSourceActionType,
-            sourceCardInstanceId,
-            sourceCardId,
-            effectSummary,
-            turnNumber
-        );
-    }
-
-    /**
-     * 根據效果摘要判斷是否要產生 follow-up 互動（LOOK_TOP_DECK/REORDER 等）。
-     */
-    private FollowupInteractionDecision createFollowupInteractionPendingDecisionIfNeeded(
-        Long matchId,
-        Long userId,
-        String sourceActionType,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        String effectType,
-        Map<String, Object> effectSummary
-    ) {
-        FollowupInteractionContext interaction = extractFollowupInteractionDecisionContext(matchId, userId, effectSummary);
-        if (interaction == null) {
-            return null;
-        }
-        return followupInteractionPendingDecisionWriter.create(
-            matchId,
-            userId,
-            sourceActionType,
-            sourceCardInstanceId,
-            sourceCardId,
-            effectType,
-            interaction
-        );
-    }
-
-    /**
      * 正規化決策中的 placement 欄位（例如 TOP/BOTTOM）。
      */
     private String normalizeDecisionPlacement(String placement) {
@@ -5446,17 +5366,6 @@ public class MatchActionService {
             return null;
         }
         return placement.trim().toUpperCase(Locale.ROOT);
-    }
-
-    /**
-     * 從效果摘要萃取 follow-up 互動上下文（含候選卡、提示訊息、可選數量）。
-     */
-    private FollowupInteractionContext extractFollowupInteractionDecisionContext(
-        Long matchId,
-        Long userId,
-        Map<String, Object> effectSummary
-    ) {
-        return followupInteractionContextResolver.resolve(matchId, userId, effectSummary);
     }
 
     /**
