@@ -84,7 +84,7 @@ ATTACK pilot cleanup 已完成，`AttackArtApplicationAdapterFactory` 不再依�
 - `MatchTimestampServiceTest`
 - 代表性 use case integration smoke 可依後續替換 call site 再補
 
-### Step LHC-3：Gift trigger action helper 評估（進行中）
+### Step LHC-3：Gift trigger action helper 評估（已完成第一輪 baseline）
 
 已完成：
 
@@ -93,11 +93,17 @@ ATTACK pilot cleanup 已完成，`AttackArtApplicationAdapterFactory` 不再依�
   - empty payload 不寫入
   - 單筆 payload action type / payload / action order
   - 多筆 payload 在同一次 writer 呼叫中連續遞增 action order
-- `playToStageShouldTriggerGiftWhenQualifiedHolomemEntersStage` legacy API smoke 已通過。
+- `playToStageShouldTriggerGiftWhenQualifiedHolomemEntersStage` legacy API smoke 已通過，並已補 stage enter payload / action order snapshot：
+  - `triggerType = STAGE_ENTER`
+  - `giftHolderCardId`
+  - `sourceCardInstanceId`
+  - `requestedEffects = [DRAW]`
+  - `GIFT_TRIGGER` action order 早於同次 confirm 的 `TRIGGER_EFFECT_EXECUTED`
+- COLLAB Gift path 已有 payload shape 與 action order relation baseline。
 
 仍待評估：
 
-- `GIFT_TRIGGER` action payload snapshot 是否足以覆蓋 play support / stage enter / triggered gift confirm 三種來源。
+- play support / damage received / down event 等其他 `GIFT_TRIGGER` 來源是否需要同等 snapshot，可在各自 use case cleanup 時補，不阻擋本輪。
 - `AttackActionLogService.ACTION_TYPE_GIFT_TRIGGER` 與 `GiftTriggerActionWriter.ACTION_TYPE_GIFT_TRIGGER` 是否需要後續合併成共用常數。
 - `MatchEffectService` 內直接寫 `GIFT_TRIGGER` 的 legacy SQL 是否應獨立規劃，不在本輪直接搬動。
 
@@ -116,11 +122,10 @@ ATTACK pilot cleanup 已完成，`AttackArtApplicationAdapterFactory` 不再依�
 
 ## 四、下一步建議
 
-下一步建議進 LHC-3 的第二段驗收，不再重做 LHC-1 / LHC-2：
+下一步建議進 LHC-3 acceptance / planning closure，不再重做 LHC-1 / LHC-2：
 
-1. 盤點現有 `GIFT_TRIGGER` integration assertions，確認是否已覆蓋 payload shape 與 action order。
-2. 若缺 snapshot，優先補一個低風險 focused integration assertion，不改 production code。
-3. 再決定是否需要抽共用 action type 常數；若只為去字串重複，不急著做。
-4. `MatchEffectService` 的 legacy SQL writer 另開規劃，不併入本輪 helper cleanup。
+1. 記錄本輪 helper cleanup acceptance：serializer / timestamp / non-attack Gift writer baseline 已完成。
+2. 暫不抽共用 action type 常數；若只為去字串重複，不急著做。
+3. `MatchEffectService` 的 legacy SQL writer 另開規劃，不併入本輪 helper cleanup。
 
-這個切法能維持 action writer 邊界穩定，同時逐步補足 action order / payload baseline。
+這個切法能維持 action writer 邊界穩定，同時避免把 legacy SQL writer 與 action writer cleanup 混在同一輪。
