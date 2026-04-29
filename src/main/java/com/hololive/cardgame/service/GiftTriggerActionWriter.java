@@ -32,8 +32,10 @@ class GiftTriggerActionWriter {
             return List.of();
         }
         List<MatchActionEntity> savedActions = new ArrayList<>();
+        int nextActionOrder = matchActionRepository.findMaxActionOrderByTurn(matchId, turnNumber) + 1;
         for (Map<String, Object> payload : payloads) {
-            savedActions.add(appendGiftTriggerAction(matchId, userId, turnNumber, payload));
+            savedActions.add(appendGiftTriggerAction(matchId, userId, turnNumber, payload, nextActionOrder));
+            nextActionOrder++;
         }
         return savedActions;
     }
@@ -42,7 +44,8 @@ class GiftTriggerActionWriter {
         Long matchId,
         Long userId,
         int turnNumber,
-        Map<String, Object> payload
+        Map<String, Object> payload,
+        int actionOrder
     ) {
         MatchActionEntity action = new MatchActionEntity();
         action.setMatchId(matchId);
@@ -50,7 +53,7 @@ class GiftTriggerActionWriter {
         action.setActionType(ACTION_TYPE_GIFT_TRIGGER);
         action.setPayload(matchPayloadJsonService.toJson(payload));
         action.setTurnNumber(turnNumber);
-        action.setActionOrder(matchActionRepository.findMaxActionOrderByTurn(matchId, turnNumber) + 1);
+        action.setActionOrder(actionOrder);
         action.setExecutedAt(LocalDateTime.now());
         return matchActionRepository.save(action);
     }

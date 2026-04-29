@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -61,5 +62,27 @@ class GiftTriggerActionWriterTest {
         assertThat(savedActions).hasSize(1);
         assertThat(savedActions.get(0).getId()).isEqualTo(9001L);
         assertThat(savedActions.get(0).getActionType()).isEqualTo(GiftTriggerActionWriter.ACTION_TYPE_GIFT_TRIGGER);
+    }
+
+    @Test
+    void appendGiftTriggerActionsShouldIncrementActionOrderForMultiplePayloads() {
+        when(matchActionRepository.findMaxActionOrderByTurn(100L, 2)).thenReturn(6);
+        when(matchActionRepository.save(any(MatchActionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        writer.appendGiftTriggerActions(
+            100L,
+            10L,
+            2,
+            List.of(
+                Map.of("triggerType", "COLLAB", "requestedEffects", List.of("DRAW")),
+                Map.of("triggerType", "STAGE_ENTER", "requestedEffects", List.of("DAMAGE"))
+            )
+        );
+
+        ArgumentCaptor<MatchActionEntity> actionCaptor = ArgumentCaptor.forClass(MatchActionEntity.class);
+        verify(matchActionRepository, times(2)).save(actionCaptor.capture());
+        assertThat(actionCaptor.getAllValues())
+            .extracting(MatchActionEntity::getActionOrder)
+            .containsExactly(7, 8);
     }
 }
