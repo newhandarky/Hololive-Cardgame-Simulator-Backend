@@ -17578,7 +17578,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         Long hostId = context.hostId();
         Long guestId = context.guestId();
 
-        createStageHolomemWithSingleCard(
+        Long giftHolderCardInstanceId = createStageHolomemWithSingleCard(
             matchId,
             guestId,
             "HBP05-065",
@@ -17586,6 +17586,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             "FIRST",
             0
         );
+        Long giftHolderHolomemId = loadHolomemIdByCardInstanceId(matchId, guestId, giftHolderCardInstanceId);
 
         String durableTargetCardId = createMemberCardDefinition("THBP05065_ODD_TGT", "HBP05-065 奇數減傷目標", "DEBUT", 300, "YELLOW");
         Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
@@ -17650,6 +17651,17 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         entityManager.clear();
         advanceToPerformancePhase(matchId, hostId, attackerCardInstanceId);
 
+        Integer maxActionOrderBeforeAttack = jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(MAX(action_order), 0)
+            FROM match_actions
+            WHERE match_id = ?
+              AND turn_number = 2
+            """,
+            Integer.class,
+            matchId
+        );
+
         AttackArtActionRequest attack = new AttackArtActionRequest();
         attack.setAttackerCardInstanceId(attackerCardInstanceId);
         attack.setTargetCardInstanceId(guestCenterCardInstanceId);
@@ -17679,6 +17691,59 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         assertThat(payloadText).containsPattern("\"incomingDamageReduction\"\\s*:\\s*40");
         assertThat(payloadText).containsPattern("\"artTotalDamage\"\\s*:\\s*60");
         assertThat(damageTaken).isEqualTo(60);
+
+        String giftTriggerPayloadText = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'PASSIVE_INCOMING_DAMAGE_REDUCTION'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : "",
+            matchId,
+            guestId
+        );
+        assertThat(giftTriggerPayloadText).containsPattern("\"triggerType\"\\s*:\\s*\"PASSIVE_INCOMING_DAMAGE_REDUCTION\"");
+        assertThat(giftTriggerPayloadText).containsPattern("\"giftHolderHolomemId\"\\s*:\\s*" + giftHolderHolomemId);
+        assertThat(giftTriggerPayloadText).containsPattern("\"giftText\"\\s*:");
+        assertThat(giftTriggerPayloadText).contains("サイコロを1回振れる");
+        assertThat(giftTriggerPayloadText).containsPattern("\"diceRoll\"\\s*:\\s*1");
+
+        Integer giftTriggerActionOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT action_order
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'GIFT_TRIGGER'
+              AND payload ->> 'triggerType' = 'PASSIVE_INCOMING_DAMAGE_REDUCTION'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            Integer.class,
+            matchId,
+            guestId
+        );
+        Integer attackArtActionOrder = jdbcTemplate.queryForObject(
+            """
+            SELECT action_order
+            FROM match_actions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND action_type = 'ATTACK_ART'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            Integer.class,
+            matchId,
+            hostId
+        );
+        assertThat(giftTriggerActionOrder).isGreaterThan(maxActionOrderBeforeAttack);
+        assertThat(giftTriggerActionOrder).isLessThan(attackArtActionOrder);
     }
 
     @Test
