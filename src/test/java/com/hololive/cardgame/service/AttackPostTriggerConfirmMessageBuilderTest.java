@@ -17,6 +17,12 @@ class AttackPostTriggerConfirmMessageBuilderTest {
     }
 
     @Test
+    void buildAttackArtPostTriggerConfirmMessageShouldSkipEmptyGiftDetails() {
+        assertThat(builder.buildAttackArtPostTriggerConfirmMessage(List.of(Map.of()), null))
+            .isEqualTo("是否要執行攻擊後觸發效果？");
+    }
+
+    @Test
     void buildAttackArtPostTriggerConfirmMessageShouldIncludeDownEventBeforeGift() {
         String message = builder.buildAttackArtPostTriggerConfirmMessage(
             List.of(
