@@ -85,6 +85,7 @@ public class MatchActionService {
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
     private final GiftTriggeredEffectConfirmPendingInputBuilder giftTriggeredEffectConfirmPendingInputBuilder;
     private final GiftTriggerInteractionCardsBuilder giftTriggerInteractionCardsBuilder;
+    private final GiftPendingDecisionCreator giftPendingDecisionCreator;
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
     private final EffectPostTriggerConfirmMessageBuilder effectPostTriggerConfirmMessageBuilder;
     private final FollowupInteractionContextBuilder followupInteractionContextBuilder;
@@ -182,6 +183,11 @@ public class MatchActionService {
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
         this.giftTriggeredEffectConfirmPendingInputBuilder = new GiftTriggeredEffectConfirmPendingInputBuilder();
         this.giftTriggerInteractionCardsBuilder = new GiftTriggerInteractionCardsBuilder(jdbcTemplate);
+        this.giftPendingDecisionCreator = new GiftPendingDecisionCreator(
+            giftTriggerInteractionCardsBuilder,
+            giftTriggeredEffectConfirmPendingInputBuilder,
+            followupTriggerConfirmPendingDecisionWriter
+        );
         this.attackArtPostTriggerConfirmPendingInputBuilder = new AttackArtPostTriggerConfirmPendingInputBuilder();
         this.effectPostTriggerConfirmMessageBuilder = new EffectPostTriggerConfirmMessageBuilder();
         this.followupInteractionContextBuilder = new FollowupInteractionContextBuilder();
@@ -1564,15 +1570,11 @@ public class MatchActionService {
         int turnNumber,
         List<Map<String, Object>> giftEffects
     ) {
-        if (giftEffects == null || giftEffects.isEmpty()) {
-            return null;
-        }
-        return createGiftTriggeredEffectConfirmPendingInteraction(
+        return giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
             matchId,
             userId,
             null,
             null,
-            buildGiftTriggerInteractionCards(matchId, userId, null, null, giftEffects),
             giftEffects,
             turnNumber
         );
@@ -1586,15 +1588,11 @@ public class MatchActionService {
         List<Map<String, Object>> giftEffects,
         int turnNumber
     ) {
-        if (giftEffects == null || giftEffects.isEmpty()) {
-            return null;
-        }
-        return createGiftTriggeredEffectConfirmPendingInteraction(
+        return giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
             matchId,
             userId,
             sourceCardInstanceId,
             sourceCardId,
-            buildGiftTriggerInteractionCards(matchId, userId, sourceCardInstanceId, sourceCardId, giftEffects),
             giftEffects,
             turnNumber
         );
@@ -5458,51 +5456,6 @@ public class MatchActionService {
      */
     private Map<String, Object> buildGiftTriggeredEffectDeferredSummary(List<Map<String, Object>> giftTriggeredEffects) {
         return giftTriggeredEffectDeferredSummaryBuilder.buildGiftTriggeredEffectDeferredSummary(giftTriggeredEffects);
-    }
-
-    /**
-     * 建立 Gift 觸發確認互動。
-     */
-    private FollowupInteractionDecision createGiftTriggeredEffectConfirmPendingInteraction(
-        Long matchId,
-        Long userId,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        List<Map<String, Object>> cards,
-        List<Map<String, Object>> giftTriggeredEffects,
-        int turnNumber
-    ) {
-        FollowupTriggerConfirmPendingDecisionInput input = giftTriggeredEffectConfirmPendingInputBuilder
-            .buildGiftTriggeredEffectConfirmPendingInput(
-                matchId,
-                userId,
-                sourceCardInstanceId,
-                sourceCardId,
-                cards,
-                giftTriggeredEffects,
-                turnNumber
-            );
-
-        return followupTriggerConfirmPendingDecisionWriter.create(input);
-    }
-
-    /**
-     * 組裝 Gift 互動用卡片清單（攻擊者 + 觸發 Gift 的持有者）。
-     */
-    private List<Map<String, Object>> buildGiftTriggerInteractionCards(
-        Long matchId,
-        Long userId,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        List<Map<String, Object>> giftTriggeredEffects
-    ) {
-        return giftTriggerInteractionCardsBuilder.buildGiftTriggerInteractionCards(
-            matchId,
-            userId,
-            sourceCardInstanceId,
-            sourceCardId,
-            giftTriggeredEffects
-        );
     }
 
     /**

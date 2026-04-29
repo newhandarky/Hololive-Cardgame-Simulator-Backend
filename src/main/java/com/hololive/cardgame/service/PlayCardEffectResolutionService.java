@@ -14,9 +14,8 @@ public class PlayCardEffectResolutionService {
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final MatchEventHookService matchEventHookService;
     private final FollowupSourceCardPayloadBuilder followupSourceCardPayloadBuilder;
-    private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
-    private final GiftTriggeredEffectConfirmPendingInputBuilder giftTriggeredEffectConfirmPendingInputBuilder;
+    private final GiftPendingDecisionCreator giftPendingDecisionCreator;
 
     public PlayCardEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -27,9 +26,12 @@ public class PlayCardEffectResolutionService {
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.matchEventHookService = matchEventHookService;
         this.followupSourceCardPayloadBuilder = new FollowupSourceCardPayloadBuilder(jdbcTemplate);
-        this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
-        this.giftTriggeredEffectConfirmPendingInputBuilder = new GiftTriggeredEffectConfirmPendingInputBuilder();
+        this.giftPendingDecisionCreator = new GiftPendingDecisionCreator(
+            new GiftTriggerInteractionCardsBuilder(jdbcTemplate),
+            new GiftTriggeredEffectConfirmPendingInputBuilder(),
+            new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper)
+        );
     }
 
     public PlayCardEffectResolution resolve(PlayCardAction action, PlayCardResolutionResult resolutionResult) {
@@ -69,7 +71,7 @@ public class PlayCardEffectResolutionService {
 
         FollowupInteractionDecision pendingDecision = null;
         if (!giftTriggeredEffects.isEmpty()) {
-            pendingDecision = createGiftTriggeredEffectConfirmPendingInteraction(
+            pendingDecision = giftPendingDecisionCreator.createWithCards(
                 matchId,
                 userId,
                 resolutionResult.cardInstanceId(),
@@ -108,28 +110,6 @@ public class PlayCardEffectResolutionService {
 
     private Map<String, Object> buildGiftTriggeredEffectDeferredSummary(List<Map<String, Object>> giftTriggeredEffects) {
         return giftTriggeredEffectDeferredSummaryBuilder.buildGiftTriggeredEffectDeferredSummary(giftTriggeredEffects);
-    }
-
-    private FollowupInteractionDecision createGiftTriggeredEffectConfirmPendingInteraction(
-        Long matchId,
-        Long userId,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        List<Map<String, Object>> cards,
-        List<Map<String, Object>> giftTriggeredEffects,
-        int turnNumber
-    ) {
-        return followupTriggerConfirmPendingDecisionWriter.create(
-            giftTriggeredEffectConfirmPendingInputBuilder.buildGiftTriggeredEffectConfirmPendingInput(
-                matchId,
-                userId,
-                sourceCardInstanceId,
-                sourceCardId,
-                cards,
-                giftTriggeredEffects,
-                turnNumber
-            )
-        );
     }
 
     private List<Map<String, Object>> buildTriggeredResolutionOrder(
