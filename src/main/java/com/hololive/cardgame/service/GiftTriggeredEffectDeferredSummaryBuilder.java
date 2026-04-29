@@ -14,6 +14,9 @@ class GiftTriggeredEffectDeferredSummaryBuilder {
         List<Map<String, Object>> triggers = giftTriggeredEffects == null ? List.of() : giftTriggeredEffects;
         List<String> requestedEffects = new ArrayList<>();
         for (Map<String, Object> trigger : triggers) {
+            if (trigger == null) {
+                continue;
+            }
             Object requested = trigger.get("requestedEffects");
             if (!(requested instanceof List<?> list)) {
                 continue;

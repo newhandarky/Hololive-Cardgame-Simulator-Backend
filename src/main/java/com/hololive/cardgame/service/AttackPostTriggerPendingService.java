@@ -9,9 +9,11 @@ import org.springframework.util.StringUtils;
 public class AttackPostTriggerPendingService {
 
     private final PendingDecisionCreator pendingDecisionCreator;
+    private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
 
     public AttackPostTriggerPendingService(PendingDecisionCreator pendingDecisionCreator) {
         this.pendingDecisionCreator = pendingDecisionCreator;
+        this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
     }
 
     public AttackPostTriggerPendingResult resolvePending(AttackPostTriggerPendingContext context) {
@@ -123,23 +125,7 @@ public class AttackPostTriggerPendingService {
     }
 
     private Map<String, Object> buildGiftTriggeredEffectDeferredSummary(List<Map<String, Object>> giftTriggeredEffects) {
-        Map<String, Object> summary = new LinkedHashMap<>();
-        List<Map<String, Object>> triggers = safeList(giftTriggeredEffects);
-        List<String> requestedEffects = new ArrayList<>();
-        for (Map<String, Object> trigger : triggers) {
-            for (String effectType : toStringList(trigger == null ? null : trigger.get("requestedEffects"))) {
-                if (!requestedEffects.contains(effectType)) {
-                    requestedEffects.add(effectType);
-                }
-            }
-        }
-        summary.put("sourceActionType", "GIFT");
-        summary.put("deferred", !triggers.isEmpty());
-        summary.put("triggeredGifts", triggers);
-        summary.put("requestedEffects", requestedEffects);
-        summary.put("executedEffects", List.of());
-        summary.put("unsupportedEffects", List.of());
-        return summary;
+        return giftTriggeredEffectDeferredSummaryBuilder.buildGiftTriggeredEffectDeferredSummary(safeList(giftTriggeredEffects));
     }
 
     private List<Map<String, Object>> safeList(List<Map<String, Object>> source) {

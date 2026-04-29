@@ -2,6 +2,7 @@ package com.hololive.cardgame.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -34,7 +35,8 @@ class GiftTriggeredEffectDeferredSummaryBuilderTest {
         Map<String, Object> drawTrigger = Map.of("requestedEffects", List.of("draw", " DRAW ", "", "damage"));
         Map<String, Object> duplicateTrigger = Map.of("requestedEffects", List.of("DRAW", "heal"));
         Map<String, Object> ignoredTrigger = Map.of("requestedEffects", "bad");
-        List<Map<String, Object>> triggers = List.of(drawTrigger, duplicateTrigger, ignoredTrigger);
+        List<Map<String, Object>> triggers = new ArrayList<>(List.of(drawTrigger, duplicateTrigger, ignoredTrigger));
+        triggers.add(null);
 
         Map<String, Object> summary = builder.buildGiftTriggeredEffectDeferredSummary(triggers);
 
