@@ -75,6 +75,94 @@ class FollowupTriggerConfirmPendingDecisionWriterTest {
     }
 
     @Test
+    void createShouldKeepBloomSelectionBoundsAtZeroWithoutSelectionContext() throws Exception {
+        when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any(), any())).thenReturn(0);
+        whenInsertReturns(902L);
+
+        FollowupInteractionDecision decision = writer.create(new FollowupTriggerConfirmPendingDecisionInput(
+            100L,
+            10L,
+            "BLOOM",
+            801L,
+            "HBP99-001",
+            "BLOOM_EFFECT",
+            "確認 Bloom 效果",
+            "confirm bloom?",
+            List.of(Map.of("cardInstanceId", 801L)),
+            4,
+            Map.of("sourceLevelType", "DEBUT")
+        ));
+
+        assertThat(decision).isEqualTo(new FollowupInteractionDecision(902L, "TRIGGER_EFFECT_CONFIRM"));
+        ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
+        verify(jdbcTemplate).query(
+            anyString(),
+            any(ResultSetExtractor.class),
+            argsCaptor.capture()
+        );
+        assertThat(argsCaptor.getValue()).containsExactly(
+            100L,
+            10L,
+            "TRIGGER_EFFECT_CONFIRM",
+            "BLOOM",
+            801L,
+            "HBP99-001",
+            "BLOOM_EFFECT",
+            0,
+            0,
+            "PENDING",
+            argsCaptor.getValue()[10]
+        );
+        assertThat((String) argsCaptor.getValue()[10])
+            .contains("\"sourceActionType\":\"BLOOM\"")
+            .contains("\"sourceLevelType\":\"DEBUT\"");
+    }
+
+    @Test
+    void createShouldUseEmptyCardsWhenCardsAndAdditionalContextAreNull() throws Exception {
+        when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any(), any())).thenReturn(0);
+        whenInsertReturns(903L);
+
+        FollowupInteractionDecision decision = writer.create(new FollowupTriggerConfirmPendingDecisionInput(
+            100L,
+            10L,
+            "GIFT",
+            801L,
+            "HBP99-001",
+            "GIFT_TRIGGER",
+            "確認 Gift 效果",
+            "confirm?",
+            null,
+            4,
+            null
+        ));
+
+        assertThat(decision).isEqualTo(new FollowupInteractionDecision(903L, "TRIGGER_EFFECT_CONFIRM"));
+        ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
+        verify(jdbcTemplate).query(
+            anyString(),
+            any(ResultSetExtractor.class),
+            argsCaptor.capture()
+        );
+        assertThat(argsCaptor.getValue()).containsExactly(
+            100L,
+            10L,
+            "TRIGGER_EFFECT_CONFIRM",
+            "GIFT",
+            801L,
+            "HBP99-001",
+            "GIFT_TRIGGER",
+            0,
+            0,
+            "PENDING",
+            argsCaptor.getValue()[10]
+        );
+        assertThat((String) argsCaptor.getValue()[10])
+            .contains("\"cards\":[]")
+            .contains("\"turnNumber\":4");
+    }
+
+    @Test
     void createShouldRejectBlockingPendingDecision() {
         when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any(), any())).thenReturn(1);
 
