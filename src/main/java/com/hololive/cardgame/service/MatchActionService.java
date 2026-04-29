@@ -206,11 +206,17 @@ public class MatchActionService {
         this.attackDamageApplicationService = attackDamageApplicationService;
         this.attackDownService = attackDownService;
         this.attackDefenderGiftFollowupService = attackDefenderGiftFollowupService;
-        this.attackPostTriggerPendingService = new AttackPostTriggerPendingService(new AttackArtPendingDecisionCreator());
+        this.attackPendingDecisionConversionService = new AttackPendingDecisionConversionService();
+        this.attackPostTriggerPendingService = new AttackPostTriggerPendingService(new AttackArtPendingDecisionCreator(
+            this.giftTriggerInteractionCardsBuilder,
+            this.attackArtPostTriggerConfirmPendingInputBuilder,
+            this.giftTriggeredEffectConfirmPendingInputBuilder,
+            this.followupTriggerConfirmPendingDecisionWriter,
+            this.attackPendingDecisionConversionService
+        ));
         this.attackRestAndPayloadService = new AttackRestAndPayloadService();
         this.attackActionLogService = new AttackActionLogService(new AttackActionWriterAdapter(matchActionRepository));
         this.attackPayloadJsonService = new AttackPayloadJsonService(objectMapper);
-        this.attackPendingDecisionConversionService = new AttackPendingDecisionConversionService();
         this.attackEffectSummaryExtractor = new AttackEffectSummaryExtractor();
         this.matchTimestampService = new MatchTimestampService();
         this.attackPerformanceAvailabilityService = new AttackPerformanceAvailabilityService(jdbcTemplate);
@@ -5435,56 +5441,6 @@ public class MatchActionService {
                 context.artSummary(),
                 officialCardArtExtraSummary
             );
-        }
-    }
-
-    private class AttackArtPendingDecisionCreator implements AttackPostTriggerPendingService.PendingDecisionCreator {
-
-        @Override
-        public AttackPendingDecision createAttackPostTriggerPending(
-            AttackPostTriggerPendingContext context,
-            Map<String, Object> postTriggerEffectSummary
-        ) {
-            List<Map<String, Object>> sourceCards = buildGiftTriggerInteractionCards(
-                context.matchId(),
-                context.attackerUserId(),
-                context.attackerCardInstanceId(),
-                context.attackerCardId(),
-                context.giftTriggeredEffects()
-            );
-            return attackPendingDecisionConversionService.toAttackPendingDecision(createAttackArtPostTriggerConfirmPendingInteraction(
-                context.matchId(),
-                context.attackerUserId(),
-                context.attackerCardInstanceId(),
-                context.attackerCardId(),
-                sourceCards,
-                context.giftTriggeredEffects(),
-                context.downEventPreview(),
-                context.turnNumber()
-            ));
-        }
-
-        @Override
-        public AttackPendingDecision createDefenderGiftPending(
-            AttackPostTriggerPendingContext context,
-            Map<String, Object> defenderGiftEffectSummary
-        ) {
-            List<Map<String, Object>> defenderSourceCards = buildGiftTriggerInteractionCards(
-                context.matchId(),
-                context.defenderUserId(),
-                context.downedTargetCardInstanceId(),
-                context.downedTargetCardId(),
-                context.defenderGiftTriggeredEffects()
-            );
-            return attackPendingDecisionConversionService.toAttackPendingDecision(createGiftTriggeredEffectConfirmPendingInteraction(
-                context.matchId(),
-                context.defenderUserId(),
-                context.downedTargetCardInstanceId(),
-                context.downedTargetCardId(),
-                defenderSourceCards,
-                context.defenderGiftTriggeredEffects(),
-                context.turnNumber()
-            ));
         }
     }
 
