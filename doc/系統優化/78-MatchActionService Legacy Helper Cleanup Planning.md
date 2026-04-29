@@ -1,7 +1,7 @@
 # MatchActionService Legacy Helper Cleanup Planning
 
-更新日期：2026-04-28
-結論：先拆共用 serializer / timestamp helper，不直接擴大 action writer
+更新日期：2026-04-29
+結論：serializer / timestamp helper 已落地，下一步收斂 Gift trigger action writer baseline
 
 ---
 
@@ -15,7 +15,7 @@ ATTACK pilot cleanup 已完成，`AttackArtApplicationAdapterFactory` 不再依�
 
 ---
 
-## 二、目前 helper 使用量
+## 二、目前 helper 使用量與落地狀態
 
 盤點命令：
 
@@ -23,25 +23,35 @@ ATTACK pilot cleanup 已完成，`AttackArtApplicationAdapterFactory` 不再依�
 - `rg -c "touchUpdatedAt\\(" src/main/java/com/hololive/cardgame/service/MatchActionService.java`
 - `rg -c "appendGiftTriggerActionsIfPresent\\(" src/main/java/com/hololive/cardgame/service/MatchActionService.java`
 
-目前結果：
+原始盤點結果：
 
-| helper | 出現次數 | 判讀 |
+| helper | 原出現次數 | 目前狀態 | 判讀 |
 | --- | ---: | --- |
-| `toJson(...)` | 36 | 橫跨多個 action payload / pending payload，可先抽成共用 serializer。 |
-| `touchUpdatedAt(...)` | 33 | 多個 use case 共用 timestamp mutation，可沿用 `MatchTimestampService` 擴大替換。 |
-| `appendGiftTriggerActionsIfPresent(...)` | 2 | 目前只在 play support gift trigger 路徑使用，需先確認 event payload shape。 |
+| `toJson(...)` | 36 | 已委派 `MatchPayloadJsonService` | `MatchActionService.toJson(...)` 已只保留 private facade，實作責任已移出。 |
+| `touchUpdatedAt(...)` | 33 | 已委派 `MatchTimestampService` | `MatchActionService.touchUpdatedAt(...)` 已只保留 private facade，實作責任已移出。 |
+| `appendGiftTriggerActionsIfPresent(...)` | 2 | 已委派 `GiftTriggerActionWriter` | writer 已存在，且已補多筆 payload action order baseline。 |
+
+目前 focused baseline：
+
+- `MatchPayloadJsonServiceTest`
+- `MatchTimestampServiceTest`
+- `GiftTriggerActionWriterTest`
+
+目前 legacy API smoke：
+
+- `MatchActionServiceIntegrationTest#playToStageShouldTriggerGiftWhenQualifiedHolomemEntersStage`
 
 ---
 
 ## 三、建議切法
 
-### Step LHC-1：共用 JSON serializer
+### Step LHC-1：共用 JSON serializer（已完成）
 
-目標：
+完成狀態：
 
-- 新增或擴充共用 `MatchPayloadJsonService`
-- 先讓 `MatchActionService.toJson(...)` 委派到共用 service
-- 再分批替換低風險 use case 呼叫點
+- `MatchPayloadJsonService` 已存在。
+- `MatchActionService.toJson(...)` 已委派到共用 service。
+- `MatchPayloadJsonServiceTest` 已覆蓋正常序列化與失敗回傳 `{}` 的 legacy 語意。
 
 不做：
 
@@ -51,16 +61,17 @@ ATTACK pilot cleanup 已完成，`AttackArtApplicationAdapterFactory` 不再依�
 
 驗證：
 
-- focused serializer unit test
+- `MatchPayloadJsonServiceTest`
 - compile
-- 代表性 action payload integration smoke
+- 代表性 action payload integration smoke 可依後續改動再補
 
-### Step LHC-2：共用 timestamp helper
+### Step LHC-2：共用 timestamp helper（已完成）
 
-目標：
+完成狀態：
 
-- 將 non-attack `touchUpdatedAt(...)` 分批改用既有 `MatchTimestampService`
-- 第一刀只替換單一 use case 或單一區塊
+- `MatchTimestampService` 已存在。
+- `MatchActionService.touchUpdatedAt(...)` 已委派到共用 service。
+- `MatchTimestampServiceTest` 已覆蓋 timestamp refresh。
 
 不做：
 
@@ -70,20 +81,31 @@ ATTACK pilot cleanup 已完成，`AttackArtApplicationAdapterFactory` 不再依�
 
 驗證：
 
-- focused timestamp unit test 已存在
-- 代表性 use case integration smoke
+- `MatchTimestampServiceTest`
+- 代表性 use case integration smoke 可依後續替換 call site 再補
 
-### Step LHC-3：Gift trigger action helper 評估
+### Step LHC-3：Gift trigger action helper 評估（進行中）
 
-目標：
+已完成：
 
-- 盤點 `appendGiftTriggerActionsIfPresent(...)` 的 payload shape
-- 確認 play support / stage enter / triggered gift confirm 是否能共用 writer
+- `appendGiftTriggerActionsIfPresent(...)` 已委派 `GiftTriggerActionWriter`。
+- `GiftTriggerActionWriterTest` 已覆蓋：
+  - empty payload 不寫入
+  - 單筆 payload action type / payload / action order
+  - 多筆 payload 在同一次 writer 呼叫中連續遞增 action order
+- `playToStageShouldTriggerGiftWhenQualifiedHolomemEntersStage` legacy API smoke 已通過。
+
+仍待評估：
+
+- `GIFT_TRIGGER` action payload snapshot 是否足以覆蓋 play support / stage enter / triggered gift confirm 三種來源。
+- `AttackActionLogService.ACTION_TYPE_GIFT_TRIGGER` 與 `GiftTriggerActionWriter.ACTION_TYPE_GIFT_TRIGGER` 是否需要後續合併成共用常數。
+- `MatchEffectService` 內直接寫 `GIFT_TRIGGER` 的 legacy SQL 是否應獨立規劃，不在本輪直接搬動。
 
 不做：
 
 - 不直接把 `appendAction(...)` 全域搬出
-- 不先改 action order 計算
+- 不改 action order 計算來源與 transaction boundary
+- 不把 attack action log writer 和 non-attack gift writer 一次合併
 
 驗證：
 
@@ -94,11 +116,11 @@ ATTACK pilot cleanup 已完成，`AttackArtApplicationAdapterFactory` 不再依�
 
 ## 四、下一步建議
 
-下一步先做 LHC-1 的前置拆分：
+下一步建議進 LHC-3 的第二段驗收，不再重做 LHC-1 / LHC-2：
 
-1. 建立共用 JSON serializer 小 service。
-2. 讓 `MatchActionService.toJson(...)` 先委派，不直接替換所有 call sites。
-3. 補 focused unit test。
-4. 跑 compile 與一個低風險 action payload smoke。
+1. 盤點現有 `GIFT_TRIGGER` integration assertions，確認是否已覆蓋 payload shape 與 action order。
+2. 若缺 snapshot，優先補一個低風險 focused integration assertion，不改 production code。
+3. 再決定是否需要抽共用 action type 常數；若只為去字串重複，不急著做。
+4. `MatchEffectService` 的 legacy SQL writer 另開規劃，不併入本輪 helper cleanup。
 
-這個切法能先移除 private helper 的實作責任，同時避免一次碰 36 個 call site。
+這個切法能維持 action writer 邊界穩定，同時逐步補足 action order / payload baseline。
