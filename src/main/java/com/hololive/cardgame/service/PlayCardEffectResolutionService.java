@@ -22,6 +22,7 @@ public class PlayCardEffectResolutionService {
     private final ObjectMapper objectMapper;
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final MatchEventHookService matchEventHookService;
+    private final FollowupCardCandidateLoader followupCardCandidateLoader;
 
     public PlayCardEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -33,6 +34,7 @@ public class PlayCardEffectResolutionService {
         this.objectMapper = objectMapper;
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.matchEventHookService = matchEventHookService;
+        this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
     }
 
     public PlayCardEffectResolution resolve(PlayCardAction action, PlayCardResolutionResult resolutionResult) {
@@ -357,67 +359,14 @@ public class PlayCardEffectResolutionService {
         String cardId,
         String fallbackZone
     ) {
-        return loadCardCandidateForDecision(matchId, userId, userId, cardInstanceId, fallbackZone, cardId);
-    }
-
-    private Map<String, Object> loadCardCandidateForDecision(
-        Long matchId,
-        Long viewerUserId,
-        Long ownerUserId,
-        Long cardInstanceId,
-        String fallbackZone,
-        String fallbackCardId
-    ) {
-        Map<String, Object> row = jdbcTemplate.query(
-            """
-            SELECT mc.id AS card_instance_id,
-                   mc.card_id,
-                   mc.zone,
-                   c.name,
-                   c.card_type,
-                   c.image_url,
-                   m.level_type
-            FROM match_cards mc
-            LEFT JOIN cards c ON c.card_id = mc.card_id
-            LEFT JOIN member_cards m ON m.card_id = mc.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> value = new LinkedHashMap<>();
-                value.put("cardInstanceId", rs.getLong("card_instance_id"));
-                value.put("cardId", rs.getString("card_id"));
-                value.put("zone", normalizeZone(rs.getString("zone")));
-                value.put("name", rs.getString("name"));
-                value.put("cardType", rs.getString("card_type"));
-                value.put("imageUrl", rs.getString("image_url"));
-                value.put("levelType", rs.getString("level_type"));
-                return value;
-            },
+        return followupCardCandidateLoader.loadCardCandidateForDecision(
             matchId,
-            ownerUserId,
-            cardInstanceId
+            userId,
+            userId,
+            cardInstanceId,
+            fallbackZone,
+            cardId
         );
-        if (row != null) {
-            if (!viewerUserId.equals(ownerUserId)) {
-                row.put("zone", null);
-            }
-            return row;
-        }
-        Map<String, Object> fallback = new LinkedHashMap<>();
-        fallback.put("cardInstanceId", cardInstanceId);
-        fallback.put("cardId", fallbackCardId);
-        fallback.put("zone", normalizeZone(fallbackZone));
-        fallback.put("name", null);
-        fallback.put("cardType", null);
-        fallback.put("imageUrl", null);
-        fallback.put("levelType", null);
-        return fallback;
     }
 
     private List<Map<String, Object>> buildTriggeredResolutionOrder(

@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -21,6 +20,7 @@ public class BloomEffectResolutionService {
     private final ObjectMapper objectMapper;
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchEventHookService matchEventHookService;
+    private final FollowupCardCandidateLoader followupCardCandidateLoader;
 
     public BloomEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -32,6 +32,7 @@ public class BloomEffectResolutionService {
         this.objectMapper = objectMapper;
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchEventHookService = matchEventHookService;
+        this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
     }
 
     public BloomEffectResolution resolveAfterBloom(
@@ -157,7 +158,7 @@ public class BloomEffectResolutionService {
         Long cardInstanceId,
         String fallbackCardId
     ) {
-        Map<String, Object> card = loadCardCandidateForDecision(
+        Map<String, Object> card = followupCardCandidateLoader.loadCardCandidateForDecision(
             matchId,
             userId,
             userId,
@@ -172,66 +173,6 @@ public class BloomEffectResolutionService {
             card.put("cardId", fallbackCardId);
         }
         return card;
-    }
-
-    private Map<String, Object> loadCardCandidateForDecision(
-        Long matchId,
-        Long viewerUserId,
-        Long ownerUserId,
-        Long cardInstanceId,
-        String fallbackZone,
-        String fallbackCardId
-    ) {
-        Map<String, Object> row = jdbcTemplate.query(
-            """
-            SELECT mc.id AS card_instance_id,
-                   mc.card_id,
-                   mc.zone,
-                   c.name,
-                   c.card_type,
-                   c.image_url,
-                   m.level_type
-            FROM match_cards mc
-            LEFT JOIN cards c ON c.card_id = mc.card_id
-            LEFT JOIN member_cards m ON m.card_id = mc.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> value = new LinkedHashMap<>();
-                value.put("cardInstanceId", rs.getLong("card_instance_id"));
-                value.put("cardId", rs.getString("card_id"));
-                value.put("zone", normalize(rs.getString("zone")));
-                value.put("name", rs.getString("name"));
-                value.put("cardType", rs.getString("card_type"));
-                value.put("imageUrl", rs.getString("image_url"));
-                value.put("levelType", rs.getString("level_type"));
-                return value;
-            },
-            matchId,
-            ownerUserId,
-            cardInstanceId
-        );
-        if (row != null) {
-            if (!viewerUserId.equals(ownerUserId)) {
-                row.put("zone", null);
-            }
-            return row;
-        }
-        Map<String, Object> fallback = new LinkedHashMap<>();
-        fallback.put("cardInstanceId", cardInstanceId);
-        fallback.put("cardId", fallbackCardId);
-        fallback.put("zone", normalize(fallbackZone));
-        fallback.put("name", null);
-        fallback.put("cardType", null);
-        fallback.put("imageUrl", null);
-        fallback.put("levelType", null);
-        return fallback;
     }
 
     private Map<String, Object> buildTriggeredEffectDeferredSummary(
@@ -297,10 +238,6 @@ public class BloomEffectResolutionService {
             PENDING_STATUS
         );
         return count != null && count > 0;
-    }
-
-    private String normalize(String value) {
-        return value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
     }
 
     private String toJson(Object value) {
