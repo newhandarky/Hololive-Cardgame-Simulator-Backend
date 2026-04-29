@@ -15,7 +15,7 @@ public class BloomEffectResolutionService {
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchEventHookService matchEventHookService;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
-    private final BloomTriggerConfirmPendingDecisionWriter bloomTriggerConfirmPendingDecisionWriter;
+    private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
 
     public BloomEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -26,7 +26,7 @@ public class BloomEffectResolutionService {
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchEventHookService = matchEventHookService;
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
-        this.bloomTriggerConfirmPendingDecisionWriter = new BloomTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
+        this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
     }
 
     public BloomEffectResolution resolveAfterBloom(
@@ -60,19 +60,24 @@ public class BloomEffectResolutionService {
             target.topCardInstanceId(),
             target.zone()
         );
-        BloomFollowupDecision triggerConfirmDecision = null;
+        FollowupInteractionDecision triggerConfirmDecision = null;
         if (bloomPreview.hasEffect()) {
             Map<String, Object> additionalContext = new LinkedHashMap<>();
             additionalContext.put("sourceLevelType", target.topLevelType());
-            triggerConfirmDecision = bloomTriggerConfirmPendingDecisionWriter.createTriggeredEffectConfirmPendingInteraction(
-                matchId,
-                userId,
-                bloomCardInstanceId,
-                bloomCardId,
-                buildTriggeredEffectConfirmMessage(bloomPreview),
-                List.of(buildInteractionSourceCardPayload(matchId, userId, bloomCardInstanceId, bloomCardId)),
-                turnNumber,
-                additionalContext
+            triggerConfirmDecision = followupTriggerConfirmPendingDecisionWriter.create(
+                new FollowupTriggerConfirmPendingDecisionInput(
+                    matchId,
+                    userId,
+                    "BLOOM",
+                    bloomCardInstanceId,
+                    bloomCardId,
+                    "BLOOM_EFFECT",
+                    "確認 Bloom 效果",
+                    buildTriggeredEffectConfirmMessage(bloomPreview),
+                    List.of(buildInteractionSourceCardPayload(matchId, userId, bloomCardInstanceId, bloomCardId)),
+                    turnNumber,
+                    additionalContext
+                )
             );
         }
         return new BloomEffectResolution(

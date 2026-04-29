@@ -18,34 +18,34 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.ResultSetExtractor;
 
-class PlayCardTriggerConfirmPendingDecisionWriterTest {
+class FollowupTriggerConfirmPendingDecisionWriterTest {
 
     private final JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-    private final PlayCardTriggerConfirmPendingDecisionWriter writer = new PlayCardTriggerConfirmPendingDecisionWriter(
+    private final FollowupTriggerConfirmPendingDecisionWriter writer = new FollowupTriggerConfirmPendingDecisionWriter(
         jdbcTemplate,
         new ObjectMapper()
     );
 
     @Test
-    void createTriggeredEffectConfirmPendingInteractionShouldInsertPendingDecision() throws Exception {
-        when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any())).thenReturn(0);
-        whenInsertReturns(601L);
+    void createShouldInsertPendingDecision() throws Exception {
+        when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any(), any())).thenReturn(0);
+        whenInsertReturns(901L);
 
-        PlayCardFollowupDecision decision = writer.createTriggeredEffectConfirmPendingInteraction(
+        FollowupInteractionDecision decision = writer.create(new FollowupTriggerConfirmPendingDecisionInput(
             100L,
             10L,
             "gift",
-            701L,
+            801L,
             "HBP99-001",
             "GIFT_TRIGGER",
             "確認 Gift 效果",
             "confirm?",
-            List.of(Map.of("cardInstanceId", 701L)),
+            List.of(Map.of("cardInstanceId", 801L)),
             4,
             Map.of("minSelect", 1, "maxSelect", 2, "giftCount", 1)
-        );
+        ));
 
-        assertThat(decision).isEqualTo(new PlayCardFollowupDecision(601L, "TRIGGER_EFFECT_CONFIRM"));
+        assertThat(decision).isEqualTo(new FollowupInteractionDecision(901L, "TRIGGER_EFFECT_CONFIRM"));
         ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
         verify(jdbcTemplate).query(
             anyString(),
@@ -57,7 +57,7 @@ class PlayCardTriggerConfirmPendingDecisionWriterTest {
             10L,
             "TRIGGER_EFFECT_CONFIRM",
             "GIFT",
-            701L,
+            801L,
             "HBP99-001",
             "GIFT_TRIGGER",
             1,
@@ -75,14 +75,14 @@ class PlayCardTriggerConfirmPendingDecisionWriterTest {
     }
 
     @Test
-    void createTriggeredEffectConfirmPendingInteractionShouldRejectBlockingPendingDecision() {
-        when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any())).thenReturn(1);
+    void createShouldRejectBlockingPendingDecision() {
+        when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any(), any())).thenReturn(1);
 
-        assertThatThrownBy(() -> writer.createTriggeredEffectConfirmPendingInteraction(
+        assertThatThrownBy(() -> writer.create(new FollowupTriggerConfirmPendingDecisionInput(
             100L,
             10L,
             "GIFT",
-            701L,
+            801L,
             "HBP99-001",
             "GIFT_TRIGGER",
             "確認 Gift 效果",
@@ -90,7 +90,7 @@ class PlayCardTriggerConfirmPendingDecisionWriterTest {
             List.of(),
             4,
             Map.of()
-        ))
+        )))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("待處理的互動");
     }

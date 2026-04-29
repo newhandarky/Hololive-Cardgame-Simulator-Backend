@@ -18,7 +18,7 @@ public class CollabEffectResolutionService {
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final MatchEventHookService matchEventHookService;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
-    private final CollabTriggerConfirmPendingDecisionWriter collabTriggerConfirmPendingDecisionWriter;
+    private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
 
     public CollabEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -31,7 +31,7 @@ public class CollabEffectResolutionService {
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.matchEventHookService = matchEventHookService;
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
-        this.collabTriggerConfirmPendingDecisionWriter = new CollabTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
+        this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
     }
 
     public CollabEffectResolution resolve(CollabAction action, CollabResolutionResult resolutionResult) {
@@ -64,7 +64,7 @@ public class CollabEffectResolutionService {
             resolutionResult.sourceCardInstanceId()
         );
 
-        CollabFollowupDecision pendingDecision = null;
+        FollowupInteractionDecision pendingDecision = null;
         if (collabPreview.hasEffect() || !giftTriggeredEffects.isEmpty()) {
             pendingDecision = createCollabTriggeredEffectConfirmPendingInteraction(
                 action.matchId(),
@@ -141,7 +141,7 @@ public class CollabEffectResolutionService {
         return summary;
     }
 
-    private CollabFollowupDecision createCollabTriggeredEffectConfirmPendingInteraction(
+    private FollowupInteractionDecision createCollabTriggeredEffectConfirmPendingInteraction(
         Long matchId,
         Long userId,
         Long sourceCardInstanceId,
@@ -170,7 +170,7 @@ public class CollabEffectResolutionService {
         appendGiftSelectionPendingContext(additionalContext, giftTriggeredEffects);
         additionalContext.put("triggerSections", buildCollabTriggerSections(collabPreview, giftTriggeredEffects));
 
-        return collabTriggerConfirmPendingDecisionWriter.createTriggeredEffectConfirmPendingInteraction(
+        return followupTriggerConfirmPendingDecisionWriter.create(new FollowupTriggerConfirmPendingDecisionInput(
             matchId,
             userId,
             "COLLAB",
@@ -182,7 +182,7 @@ public class CollabEffectResolutionService {
             cards,
             turnNumber,
             additionalContext
-        );
+        ));
     }
 
     private List<Map<String, Object>> buildGiftTriggerPayloads(List<Map<String, Object>> giftTriggeredEffects) {
