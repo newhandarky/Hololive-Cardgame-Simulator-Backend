@@ -16,7 +16,7 @@ public class CollabEffectResolutionService {
     private final MatchTriggeredCardEffectService matchTriggeredCardEffectService;
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final MatchEventHookService matchEventHookService;
-    private final FollowupSourceCardPayloadBuilder followupSourceCardPayloadBuilder;
+    private final GiftTriggerInteractionCardsBuilder giftTriggerInteractionCardsBuilder;
     private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
@@ -33,7 +33,7 @@ public class CollabEffectResolutionService {
         this.matchTriggeredCardEffectService = matchTriggeredCardEffectService;
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.matchEventHookService = matchEventHookService;
-        this.followupSourceCardPayloadBuilder = new FollowupSourceCardPayloadBuilder(jdbcTemplate);
+        this.giftTriggerInteractionCardsBuilder = new GiftTriggerInteractionCardsBuilder(jdbcTemplate);
         this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
@@ -136,17 +136,13 @@ public class CollabEffectResolutionService {
         List<Map<String, Object>> giftTriggeredEffects,
         int turnNumber
     ) {
-        List<Map<String, Object>> cards = buildGiftTriggerInteractionCards(
+        List<Map<String, Object>> cards = giftTriggerInteractionCardsBuilder.buildGiftTriggerInteractionCards(
             matchId,
             userId,
             sourceCardInstanceId,
             sourceCardId,
             giftTriggeredEffects
         );
-        if (cards.isEmpty() && sourceCardInstanceId != null && sourceCardInstanceId > 0) {
-            cards = List.of(followupSourceCardPayloadBuilder.buildOwnedCard(matchId, userId, sourceCardInstanceId, "COLLAB", sourceCardId));
-        }
-
         Map<String, Object> additionalContext = new LinkedHashMap<>();
         additionalContext.put("hasCollabEffect", collabPreview != null && collabPreview.hasEffect());
 
@@ -256,45 +252,6 @@ public class CollabEffectResolutionService {
         return giftTriggeredEffectDetailsMessageBuilder.buildGiftTriggeredEffectDetails(giftTriggeredEffects);
     }
 
-    private List<Map<String, Object>> buildGiftTriggerInteractionCards(
-        Long matchId,
-        Long userId,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        List<Map<String, Object>> giftTriggeredEffects
-    ) {
-        List<Map<String, Object>> cards = new ArrayList<>();
-        if (sourceCardInstanceId != null && sourceCardInstanceId > 0) {
-            cards.add(followupSourceCardPayloadBuilder.buildOwnedStageCard(matchId, userId, sourceCardInstanceId, sourceCardId));
-        }
-        if (giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
-            return cards;
-        }
-        for (Map<String, Object> trigger : giftTriggeredEffects) {
-            Long holderCardInstanceId = asLong(trigger.get("giftHolderCardInstanceId"));
-            String holderCardId = asString(trigger.get("giftHolderCardId"));
-            String holderZone = asString(trigger.get("giftHolderZone"));
-            if (holderCardInstanceId == null || holderCardInstanceId <= 0) {
-                continue;
-            }
-            boolean exists = cards.stream()
-                .anyMatch(card -> holderCardInstanceId.equals(asLong(card.get("cardInstanceId"))));
-            if (exists) {
-                continue;
-            }
-            cards.add(
-                followupSourceCardPayloadBuilder.buildOwnedCard(
-                    matchId,
-                    userId,
-                    holderCardInstanceId,
-                    StringUtils.hasText(holderZone) ? holderZone : "STAGE",
-                    holderCardId
-                )
-            );
-        }
-        return cards;
-    }
-
     private Map<String, Object> mergeEffectSummaryForChecks(
         Map<String, Object> primary,
         List<Map<String, Object>> additionalEffects
@@ -350,20 +307,6 @@ public class CollabEffectResolutionService {
         }
         String text = String.valueOf(value);
         return StringUtils.hasText(text) ? text : null;
-    }
-
-    private Long asLong(Object value) {
-        if (value == null) {
-            return null;
-        }
-        if (value instanceof Number number) {
-            return number.longValue();
-        }
-        try {
-            return Long.parseLong(String.valueOf(value));
-        } catch (NumberFormatException ignored) {
-            return null;
-        }
     }
 
     private List<String> toStringList(Object value) {
