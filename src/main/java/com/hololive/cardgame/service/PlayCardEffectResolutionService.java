@@ -1,6 +1,5 @@
 package com.hololive.cardgame.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -15,14 +14,10 @@ import org.springframework.util.StringUtils;
 @Service
 public class PlayCardEffectResolutionService {
 
-    private static final String INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM = "TRIGGER_EFFECT_CONFIRM";
-    private static final String PENDING_STATUS = "PENDING";
-
-    private final JdbcTemplate jdbcTemplate;
-    private final ObjectMapper objectMapper;
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final MatchEventHookService matchEventHookService;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
+    private final PlayCardTriggerConfirmPendingDecisionWriter playCardTriggerConfirmPendingDecisionWriter;
 
     public PlayCardEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -30,11 +25,10 @@ public class PlayCardEffectResolutionService {
         MatchGiftTriggerService matchGiftTriggerService,
         MatchEventHookService matchEventHookService
     ) {
-        this.jdbcTemplate = jdbcTemplate;
-        this.objectMapper = objectMapper;
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.matchEventHookService = matchEventHookService;
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
+        this.playCardTriggerConfirmPendingDecisionWriter = new PlayCardTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
     }
 
     public PlayCardEffectResolution resolve(PlayCardAction action, PlayCardResolutionResult resolutionResult) {
@@ -72,7 +66,7 @@ public class PlayCardEffectResolutionService {
         );
         Map<String, Object> giftEffectSummary = buildGiftTriggeredEffectDeferredSummary(giftTriggeredEffects);
 
-        PendingInteractionDecision pendingDecision = null;
+        PlayCardFollowupDecision pendingDecision = null;
         if (!giftTriggeredEffects.isEmpty()) {
             pendingDecision = createGiftTriggeredEffectConfirmPendingInteraction(
                 matchId,
@@ -136,7 +130,7 @@ public class PlayCardEffectResolutionService {
         return summary;
     }
 
-    private PendingInteractionDecision createGiftTriggeredEffectConfirmPendingInteraction(
+    private PlayCardFollowupDecision createGiftTriggeredEffectConfirmPendingInteraction(
         Long matchId,
         Long userId,
         Long sourceCardInstanceId,
@@ -151,7 +145,7 @@ public class PlayCardEffectResolutionService {
         additionalContext.put("giftCount", giftTriggers.size());
         appendGiftSelectionPendingContext(additionalContext, giftTriggeredEffects);
 
-        return createTriggeredEffectConfirmPendingInteraction(
+        return playCardTriggerConfirmPendingDecisionWriter.createTriggeredEffectConfirmPendingInteraction(
             matchId,
             userId,
             "GIFT",
@@ -164,91 +158,6 @@ public class PlayCardEffectResolutionService {
             turnNumber,
             additionalContext
         );
-    }
-
-    private PendingInteractionDecision createTriggeredEffectConfirmPendingInteraction(
-        Long matchId,
-        Long userId,
-        String sourceActionType,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        String effectType,
-        String title,
-        String message,
-        List<Map<String, Object>> cards,
-        int turnNumber,
-        Map<String, Object> additionalContext
-    ) {
-        if (hasBlockingPendingDecision(matchId, userId)) {
-            throw new IllegalStateException("你有待處理的互動，請先完成確認");
-        }
-        int minSelect = 0;
-        int maxSelect = 0;
-        if (additionalContext != null && !additionalContext.isEmpty()) {
-            minSelect = Math.max(asInt(additionalContext.get("minSelect")), 0);
-            maxSelect = Math.max(asInt(additionalContext.get("maxSelect")), minSelect);
-        }
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("interactionType", INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
-        context.put("sourceActionType", normalizeZone(sourceActionType));
-        context.put("title", title);
-        context.put("message", message);
-        context.put("cards", cards == null ? List.of() : cards);
-        context.put("turnNumber", turnNumber);
-        if (additionalContext != null && !additionalContext.isEmpty()) {
-            context.putAll(additionalContext);
-        }
-
-        Long decisionId = jdbcTemplate.query(
-            """
-            INSERT INTO match_pending_decisions (
-                match_id,
-                user_id,
-                decision_type,
-                source_action_type,
-                source_card_instance_id,
-                source_card_id,
-                effect_type,
-                min_select,
-                max_select,
-                status,
-                context_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM,
-            normalizeZone(sourceActionType),
-            sourceCardInstanceId,
-            sourceCardId,
-            effectType,
-            minSelect,
-            maxSelect,
-            PENDING_STATUS,
-            toJson(context)
-        );
-        if (decisionId == null) {
-            return null;
-        }
-        return new PendingInteractionDecision(decisionId, INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
-    }
-
-    private boolean hasBlockingPendingDecision(Long matchId, Long userId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = 'PENDING'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        return count != null && count > 0;
     }
 
     private List<Map<String, Object>> buildGiftTriggerPayloads(List<Map<String, Object>> giftTriggeredEffects) {
@@ -392,14 +301,6 @@ public class PlayCardEffectResolutionService {
         return order;
     }
 
-    private String toJson(Map<String, Object> payload) {
-        try {
-            return objectMapper.writeValueAsString(payload);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("無法序列化效果確認內容", e);
-        }
-    }
-
     private String normalizeZone(Object value) {
         if (value == null) {
             return "";
@@ -479,11 +380,5 @@ public class PlayCardEffectResolutionService {
             return result;
         }
         return List.of();
-    }
-
-    private record PendingInteractionDecision(
-        Long decisionId,
-        String decisionType
-    ) {
     }
 }
