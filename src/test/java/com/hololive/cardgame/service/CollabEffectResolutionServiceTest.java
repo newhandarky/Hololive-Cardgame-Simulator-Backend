@@ -94,6 +94,82 @@ class CollabEffectResolutionServiceTest {
         verify(jdbcTemplate).query(contains("INSERT INTO match_pending_decisions"), any(ResultSetExtractor.class), eq(100L), eq(10L), eq("TRIGGER_EFFECT_CONFIRM"), eq("COLLAB"), eq(701L), eq("hBP01-001"), eq("COLLAB_TRIGGER"), eq(0), eq(0), eq("PENDING"), any(String.class));
     }
 
+    @Test
+    void resolveShouldIncludeSourceAndGiftHolderCardsWhenGiftTriggerExists() {
+        CollabAction action = action();
+        CollabResolutionResult resolutionResult = resolutionResult();
+        Map<String, Object> giftTrigger = Map.of(
+            "triggerType",
+            "COLLAB",
+            "sourceCardInstanceId",
+            701L,
+            "triggerTargetCardInstanceId",
+            701L,
+            "giftHolderCardInstanceId",
+            801L,
+            "giftHolderCardId",
+            "hBP06-014",
+            "giftHolderZone",
+            "BACK",
+            "requestedEffects",
+            List.of("DRAW"),
+            "rawText",
+            "raw gift text"
+        );
+        when(triggeredCardEffectService.previewCollabTriggeredEffect(100L, 10L, "hBP01-001", 701L))
+            .thenReturn(new MatchEffectService.TriggeredEffectPreview(false, List.of(), null, null));
+        when(giftTriggerService.previewGiftTriggeredEffectsOnCollab(100L, 10L, 701L, 4))
+            .thenReturn(List.of(giftTrigger));
+        when(eventHookService.onHolomemCollab(100L, 10L, "hBP01-001", 701L))
+            .thenReturn(Map.of("triggered", true));
+        when(jdbcTemplate.queryForObject(contains("FROM match_pending_decisions"), eq(Integer.class), eq(100L), eq(10L)))
+            .thenReturn(0);
+        when(jdbcTemplate.query(contains("FROM match_cards"), any(ResultSetExtractor.class), eq(100L), eq(10L), eq(701L)))
+            .thenReturn(null);
+        when(jdbcTemplate.query(contains("FROM match_cards"), any(ResultSetExtractor.class), eq(100L), eq(10L), eq(801L)))
+            .thenReturn(null);
+        when(
+            jdbcTemplate.query(
+                contains("INSERT INTO match_pending_decisions"),
+                any(ResultSetExtractor.class),
+                eq(100L),
+                eq(10L),
+                eq("TRIGGER_EFFECT_CONFIRM"),
+                eq("COLLAB"),
+                eq(701L),
+                eq("hBP01-001"),
+                eq("COLLAB_TRIGGER"),
+                eq(0),
+                eq(0),
+                eq("PENDING"),
+                contains("\"cards\":[{\"cardInstanceId\":701,\"cardId\":\"hBP01-001\",\"zone\":\"STAGE\"")
+            )
+        ).thenReturn(7010L);
+
+        CollabEffectResolution result = service.resolve(action, resolutionResult);
+
+        assertThat(result.hasPendingInteraction()).isTrue();
+        assertThat(result.pendingInteractionDecisionId()).isEqualTo(7010L);
+        assertThat(result.pendingInteractionDecisionType()).isEqualTo("TRIGGER_EFFECT_CONFIRM");
+        assertThat(result.giftEffectSummary()).containsEntry("deferred", true);
+        assertThat(result.giftEffectSummary()).containsEntry("requestedEffects", List.of("DRAW"));
+        verify(jdbcTemplate).query(
+            contains("INSERT INTO match_pending_decisions"),
+            any(ResultSetExtractor.class),
+            eq(100L),
+            eq(10L),
+            eq("TRIGGER_EFFECT_CONFIRM"),
+            eq("COLLAB"),
+            eq(701L),
+            eq("hBP01-001"),
+            eq("COLLAB_TRIGGER"),
+            eq(0),
+            eq(0),
+            eq("PENDING"),
+            contains("{\"cardInstanceId\":801,\"cardId\":\"hBP06-014\",\"zone\":\"BACK\"")
+        );
+    }
+
     private CollabAction action() {
         return new CollabAction(
             "COLLAB",
