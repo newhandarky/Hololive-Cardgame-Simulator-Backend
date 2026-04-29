@@ -88,7 +88,7 @@ public class MatchActionService {
     private final GiftTriggerInteractionCardsBuilder giftTriggerInteractionCardsBuilder;
     private final GiftPendingDecisionCreator giftPendingDecisionCreator;
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
-    private final EffectPostTriggerConfirmMessageBuilder effectPostTriggerConfirmMessageBuilder;
+    private final EffectPostTriggerPendingService effectPostTriggerPendingService;
     private final FollowupInteractionContextBuilder followupInteractionContextBuilder;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
     private final FollowupPendingDecisionContextBuilder followupPendingDecisionContextBuilder;
@@ -193,7 +193,11 @@ public class MatchActionService {
             followupTriggerConfirmPendingDecisionWriter
         );
         this.attackArtPostTriggerConfirmPendingInputBuilder = new AttackArtPostTriggerConfirmPendingInputBuilder();
-        this.effectPostTriggerConfirmMessageBuilder = new EffectPostTriggerConfirmMessageBuilder();
+        this.effectPostTriggerPendingService = new EffectPostTriggerPendingService(
+            jdbcTemplate,
+            new EffectPostTriggerConfirmMessageBuilder(),
+            followupTriggerConfirmPendingDecisionCreator
+        );
         this.followupInteractionContextBuilder = new FollowupInteractionContextBuilder();
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
         this.followupPendingDecisionContextBuilder = new FollowupPendingDecisionContextBuilder();
@@ -5229,30 +5233,6 @@ public class MatchActionService {
         return pendingDownEventContextExtractor.extractDownEventContext(contextNode);
     }
 
-    private Map<String, Object> buildInteractionSourceCardPayload(
-        Long matchId,
-        Long userId,
-        Long cardInstanceId,
-        String fallbackCardId,
-        String fallbackZone
-    ) {
-        Map<String, Object> card = followupCardCandidateLoader.loadCardCandidateForDecision(
-            matchId,
-            userId,
-            userId,
-            cardInstanceId,
-            fallbackZone,
-            fallbackCardId
-        );
-        if (!card.containsKey("cardInstanceId")) {
-            card.put("cardInstanceId", cardInstanceId);
-        }
-        if (!card.containsKey("cardId")) {
-            card.put("cardId", fallbackCardId);
-        }
-        return card;
-    }
-
     private String buildTriggeredEffectConfirmMessage(
         String sourceActionType,
         MatchEffectService.TriggeredEffectPreview preview
@@ -5290,36 +5270,6 @@ public class MatchActionService {
             summary.put("diceRoll", preview.diceRoll());
         }
         return summary;
-    }
-
-    /**
-     * 從效果摘要萃取可延後確認的 down event 預覽（支援 top-level 與巢狀 executedEffects）。
-     */
-    private Map<String, Object> extractDownEventPreview(Map<String, Object> artSummary) {
-        if (artSummary == null || artSummary.isEmpty()) {
-            return null;
-        }
-        Object downEvent = artSummary.get("downEvent");
-        if (downEvent instanceof Map<?, ?> map) {
-            Map<String, Object> preview = castToMap(map);
-            if (toBoolean(preview.get("triggered")) && toBoolean(preview.get("deferred"))) {
-                return preview;
-            }
-        }
-        Object executedEffects = artSummary.get("executedEffects");
-        if (!(executedEffects instanceof List<?> list)) {
-            return null;
-        }
-        for (Object effect : list) {
-            if (!(effect instanceof Map<?, ?> map)) {
-                continue;
-            }
-            Map<String, Object> nested = extractDownEventPreview(castToMap(map));
-            if (nested != null) {
-                return nested;
-            }
-        }
-        return null;
     }
 
     private <T> T requireAttackStage(Object stageResult, Class<T> type, String stageName) {
@@ -5446,64 +5396,14 @@ public class MatchActionService {
         Map<String, Object> effectSummary,
         int turnNumber
     ) {
-        Map<String, Object> downEventPreview = extractDownEventPreview(effectSummary);
-        if (downEventPreview == null || downEventPreview.isEmpty()) {
-            return null;
-        }
-
-        List<Map<String, Object>> cards = new ArrayList<>();
-        if (sourceCardInstanceId != null && sourceCardInstanceId > 0) {
-            String fallbackZone = ACTION_TYPE_USE_OSHI_SKILL.equals(normalizeZone(originSourceActionType))
-                ? "OSHI"
-                : "ARCHIVE";
-            cards.add(
-                buildInteractionSourceCardPayload(
-                    matchId,
-                    userId,
-                    sourceCardInstanceId,
-                    sourceCardId,
-                    fallbackZone
-                )
-            );
-        }
-
-        Map<String, Object> downEventContext = new LinkedHashMap<>();
-        downEventContext.put("downedOwnerUserId", asLong(downEventPreview.get("downedOwnerUserId")));
-        downEventContext.put("downedCardId", asString(downEventPreview.get("downedCardId")));
-        downEventContext.put("downedStageZone", asString(downEventPreview.get("downedStageZone")));
-        downEventContext.put("turnNumber", asInt(downEventPreview.get("turnNumber")));
-        downEventContext.put("rawText", asString(downEventPreview.get("rawText")));
-        downEventContext.put("requestedLifeLoss", asInt(downEventPreview.get("requestedLifeLoss")));
-
-        Map<String, Object> additionalContext = new LinkedHashMap<>();
-        additionalContext.put("downEvent", downEventContext);
-        additionalContext.put("originSourceActionType", normalizeZone(originSourceActionType));
-
-        return followupTriggerConfirmPendingDecisionCreator.create(
+        return effectPostTriggerPendingService.createEffectPostTriggerConfirmPendingInteractionIfNeeded(
             matchId,
             userId,
-            ACTION_TYPE_EFFECT_POST_TRIGGER,
+            originSourceActionType,
             sourceCardInstanceId,
             sourceCardId,
-            "DOWN_EVENT",
-            "確認觸發效果",
-            buildEffectPostTriggerConfirmMessage(originSourceActionType, downEventPreview),
-            cards,
-            turnNumber,
-            additionalContext
-        );
-    }
-
-    /**
-     * 組裝非攻擊來源 down event 的確認訊息。
-     */
-    private String buildEffectPostTriggerConfirmMessage(
-        String originSourceActionType,
-        Map<String, Object> downEventPreview
-    ) {
-        return effectPostTriggerConfirmMessageBuilder.buildEffectPostTriggerConfirmMessage(
-            originSourceActionType,
-            downEventPreview
+            effectSummary,
+            turnNumber
         );
     }
 
@@ -5875,23 +5775,6 @@ public class MatchActionService {
                 continue;
             }
             result.add(text);
-        }
-        return result;
-    }
-
-    /**
-     * 將 Map<?,?> 安全轉成 Map<String,Object>。
-     */
-    private Map<String, Object> castToMap(Map<?, ?> source) {
-        if (source == null || source.isEmpty()) {
-            return new LinkedHashMap<>();
-        }
-        Map<String, Object> result = new LinkedHashMap<>();
-        for (Map.Entry<?, ?> entry : source.entrySet()) {
-            if (entry == null || entry.getKey() == null) {
-                continue;
-            }
-            result.put(String.valueOf(entry.getKey()), entry.getValue());
         }
         return result;
     }
