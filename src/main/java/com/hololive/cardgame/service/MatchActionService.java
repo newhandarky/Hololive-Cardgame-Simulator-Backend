@@ -84,6 +84,7 @@ public class MatchActionService {
     private final AttackPostTriggerSectionBuilder attackPostTriggerSectionBuilder;
     private final AttackPostTriggerConfirmMessageBuilder attackPostTriggerConfirmMessageBuilder;
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
+    private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -175,6 +176,7 @@ public class MatchActionService {
         this.attackPostTriggerSectionBuilder = new AttackPostTriggerSectionBuilder();
         this.attackPostTriggerConfirmMessageBuilder = new AttackPostTriggerConfirmMessageBuilder();
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
+        this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5649,31 +5651,10 @@ public class MatchActionService {
         Map<String, Object> additionalContext,
         List<Map<String, Object>> giftTriggeredEffects
     ) {
-        if (additionalContext == null || giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
+        if (additionalContext == null) {
             return;
         }
-        List<Map<String, Object>> selectableTriggers = giftTriggeredEffects.stream()
-            .filter(Objects::nonNull)
-            .filter(trigger -> toBoolean(trigger.get("selectionRequired")))
-            .toList();
-        if (selectableTriggers.size() != 1) {
-            return;
-        }
-        Map<String, Object> selectionTrigger = selectableTriggers.get(0);
-        List<Long> candidateCardInstanceIds = toLongList(selectionTrigger.get("selectionCandidateCardInstanceIds"));
-        if (candidateCardInstanceIds.isEmpty()) {
-            return;
-        }
-        additionalContext.put("candidateCardInstanceIds", candidateCardInstanceIds);
-        additionalContext.put("selectionGiftHolderCardInstanceId", asLong(selectionTrigger.get("giftHolderCardInstanceId")));
-        additionalContext.put("minSelect", Math.max(asInt(selectionTrigger.get("selectionMinSelect")), 1));
-        additionalContext.put(
-            "maxSelect",
-            Math.max(
-                asInt(selectionTrigger.get("selectionMaxSelect")),
-                Math.max(asInt(selectionTrigger.get("selectionMinSelect")), 1)
-            )
-        );
+        additionalContext.putAll(giftSelectionPendingContextBuilder.buildSelectionPendingContext(giftTriggeredEffects));
     }
 
     /**
