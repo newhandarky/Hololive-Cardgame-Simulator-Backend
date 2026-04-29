@@ -11,6 +11,7 @@ public class AttackDownService {
 
     private final MatchGiftTriggerService matchGiftTriggerService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
+    private final DownEventPreviewExtractor downEventPreviewExtractor;
 
     public AttackDownService(
         MatchGiftTriggerService matchGiftTriggerService,
@@ -18,6 +19,7 @@ public class AttackDownService {
     ) {
         this.matchGiftTriggerService = matchGiftTriggerService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
+        this.downEventPreviewExtractor = new DownEventPreviewExtractor();
     }
 
     public AttackDownResult resolveDown(AttackDownContext context) {
@@ -72,7 +74,7 @@ public class AttackDownService {
             hasDownedHolomem,
             giftTriggeredEffects,
             artDownTriggeredEffectSummary,
-            extractDownEventPreview(context.artSummary())
+            downEventPreviewExtractor.extractDownEventPreview(context.artSummary())
         );
     }
 
@@ -133,33 +135,6 @@ public class AttackDownService {
         return false;
     }
 
-    private Map<String, Object> extractDownEventPreview(Map<String, Object> artSummary) {
-        if (artSummary == null || artSummary.isEmpty()) {
-            return null;
-        }
-        Object downEvent = artSummary.get("downEvent");
-        if (downEvent instanceof Map<?, ?> map) {
-            Map<String, Object> preview = castToMap(map);
-            if (toBoolean(preview.get("triggered")) && toBoolean(preview.get("deferred"))) {
-                return preview;
-            }
-        }
-        Object executedEffects = artSummary.get("executedEffects");
-        if (!(executedEffects instanceof List<?> list)) {
-            return null;
-        }
-        for (Object effect : list) {
-            if (!(effect instanceof Map<?, ?> map)) {
-                continue;
-            }
-            Map<String, Object> nested = extractDownEventPreview(castToMap(map));
-            if (nested != null) {
-                return nested;
-            }
-        }
-        return null;
-    }
-
     private Map<String, Object> noOpArtDownTriggeredEffectSummary() {
         return Map.of(
             "triggerType", "ART_DOWNED_OPPONENT",
@@ -169,14 +144,6 @@ public class AttackDownService {
             "skippedEffects", List.of(),
             "applied", false
         );
-    }
-
-    private Map<String, Object> castToMap(Map<?, ?> map) {
-        Map<String, Object> typed = new LinkedHashMap<>();
-        for (Map.Entry<?, ?> entry : map.entrySet()) {
-            typed.put(String.valueOf(entry.getKey()), entry.getValue());
-        }
-        return typed;
     }
 
     private boolean toBoolean(Object value) {

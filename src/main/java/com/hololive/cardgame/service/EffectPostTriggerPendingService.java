@@ -13,6 +13,7 @@ class EffectPostTriggerPendingService {
     private static final String ACTION_TYPE_EFFECT_POST_TRIGGER = "EFFECT_POST_TRIGGER";
 
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
+    private final DownEventPreviewExtractor downEventPreviewExtractor;
     private final EffectPostTriggerConfirmMessageBuilder effectPostTriggerConfirmMessageBuilder;
     private final FollowupTriggerConfirmPendingDecisionCreator followupTriggerConfirmPendingDecisionCreator;
 
@@ -22,6 +23,7 @@ class EffectPostTriggerPendingService {
         FollowupTriggerConfirmPendingDecisionCreator followupTriggerConfirmPendingDecisionCreator
     ) {
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
+        this.downEventPreviewExtractor = new DownEventPreviewExtractor();
         this.effectPostTriggerConfirmMessageBuilder = effectPostTriggerConfirmMessageBuilder;
         this.followupTriggerConfirmPendingDecisionCreator = followupTriggerConfirmPendingDecisionCreator;
     }
@@ -35,7 +37,7 @@ class EffectPostTriggerPendingService {
         Map<String, Object> effectSummary,
         int turnNumber
     ) {
-        Map<String, Object> downEventPreview = extractDownEventPreview(effectSummary);
+        Map<String, Object> downEventPreview = downEventPreviewExtractor.extractDownEventPreview(effectSummary);
         if (downEventPreview == null || downEventPreview.isEmpty()) {
             return null;
         }
@@ -103,57 +105,6 @@ class EffectPostTriggerPendingService {
         downEventContext.put("rawText", asString(downEventPreview.get("rawText")));
         downEventContext.put("requestedLifeLoss", asInt(downEventPreview.get("requestedLifeLoss")));
         return downEventContext;
-    }
-
-    private Map<String, Object> extractDownEventPreview(Map<String, Object> effectSummary) {
-        if (effectSummary == null || effectSummary.isEmpty()) {
-            return null;
-        }
-        Object downEvent = effectSummary.get("downEvent");
-        if (downEvent instanceof Map<?, ?> map) {
-            Map<String, Object> preview = castToMap(map);
-            if (toBoolean(preview.get("triggered")) && toBoolean(preview.get("deferred"))) {
-                return preview;
-            }
-        }
-        Object executedEffects = effectSummary.get("executedEffects");
-        if (!(executedEffects instanceof List<?> list)) {
-            return null;
-        }
-        for (Object effect : list) {
-            if (!(effect instanceof Map<?, ?> map)) {
-                continue;
-            }
-            Map<String, Object> nested = extractDownEventPreview(castToMap(map));
-            if (nested != null) {
-                return nested;
-            }
-        }
-        return null;
-    }
-
-    private Map<String, Object> castToMap(Map<?, ?> source) {
-        Map<String, Object> result = new LinkedHashMap<>();
-        if (source == null || source.isEmpty()) {
-            return result;
-        }
-        for (Map.Entry<?, ?> entry : source.entrySet()) {
-            if (entry == null || entry.getKey() == null) {
-                continue;
-            }
-            result.put(String.valueOf(entry.getKey()), entry.getValue());
-        }
-        return result;
-    }
-
-    private boolean toBoolean(Object value) {
-        if (value instanceof Boolean bool) {
-            return bool;
-        }
-        if (value == null) {
-            return false;
-        }
-        return Boolean.parseBoolean(value.toString());
     }
 
     private String normalize(Object value) {
