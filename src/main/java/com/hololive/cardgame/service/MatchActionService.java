@@ -85,6 +85,7 @@ public class MatchActionService {
     private final AttackPostTriggerConfirmMessageBuilder attackPostTriggerConfirmMessageBuilder;
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
+    private final EffectPostTriggerConfirmMessageBuilder effectPostTriggerConfirmMessageBuilder;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -177,6 +178,7 @@ public class MatchActionService {
         this.attackPostTriggerConfirmMessageBuilder = new AttackPostTriggerConfirmMessageBuilder();
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
+        this.effectPostTriggerConfirmMessageBuilder = new EffectPostTriggerConfirmMessageBuilder();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -5816,23 +5818,10 @@ public class MatchActionService {
         String originSourceActionType,
         Map<String, Object> downEventPreview
     ) {
-        String source = normalizeZone(originSourceActionType);
-        String sourceLabel = ACTION_TYPE_USE_OSHI_SKILL.equals(source) ? "Oshi 技能" : "卡片效果";
-        Integer requestedLifeLoss = asInt(downEventPreview.get("requestedLifeLoss"));
-        String downedCardId = asString(downEventPreview.get("downedCardId"));
-        String rawText = asString(downEventPreview.get("rawText"));
-
-        StringBuilder line = new StringBuilder("DOWN_EVENT");
-        if (StringUtils.hasText(downedCardId)) {
-            line.append(" (").append(downedCardId).append(")");
-        }
-        if (requestedLifeLoss != null && requestedLifeLoss > 0) {
-            line.append("：額外失去生命 ").append(requestedLifeLoss);
-        }
-        if (StringUtils.hasText(rawText)) {
-            line.append("\n").append(rawText);
-        }
-        return "是否要執行此 " + sourceLabel + " 的後續觸發效果？\n" + line;
+        return effectPostTriggerConfirmMessageBuilder.buildEffectPostTriggerConfirmMessage(
+            originSourceActionType,
+            downEventPreview
+        );
     }
 
     /**
