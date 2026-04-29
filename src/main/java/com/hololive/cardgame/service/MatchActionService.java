@@ -5445,34 +5445,6 @@ public class MatchActionService {
     }
 
     /**
-     * 建立 ATTACK_ART 後續觸發確認互動（Gift + Down Event）。
-     */
-    private FollowupInteractionDecision createAttackArtPostTriggerConfirmPendingInteraction(
-        Long matchId,
-        Long userId,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        List<Map<String, Object>> cards,
-        List<Map<String, Object>> giftTriggeredEffects,
-        Map<String, Object> downEventPreview,
-        int turnNumber
-    ) {
-        FollowupTriggerConfirmPendingDecisionInput input = attackArtPostTriggerConfirmPendingInputBuilder
-            .buildAttackArtPostTriggerConfirmPendingInput(
-                matchId,
-                userId,
-                sourceCardInstanceId,
-                sourceCardId,
-                cards,
-                giftTriggeredEffects,
-                downEventPreview,
-                turnNumber
-            );
-
-        return followupTriggerConfirmPendingDecisionWriter.create(input);
-    }
-
-    /**
      * 建立 Gift 觸發待確認摘要（不立即執行效果）。
      */
     private Map<String, Object> buildGiftTriggeredEffectDeferredSummary(List<Map<String, Object>> giftTriggeredEffects) {
