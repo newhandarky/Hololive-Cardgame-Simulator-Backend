@@ -81,14 +81,11 @@ public class MatchActionService {
     private final GiftTriggerActionWriter giftTriggerActionWriter;
     private final PendingGiftTriggerContextExtractor pendingGiftTriggerContextExtractor;
     private final PendingDownEventContextExtractor pendingDownEventContextExtractor;
-    private final AttackPostTriggerSectionBuilder attackPostTriggerSectionBuilder;
-    private final AttackPostTriggerConfirmMessageBuilder attackPostTriggerConfirmMessageBuilder;
     private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
-    private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
-    private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
     private final GiftTriggeredEffectConfirmPendingInputBuilder giftTriggeredEffectConfirmPendingInputBuilder;
     private final GiftTriggerInteractionCardsBuilder giftTriggerInteractionCardsBuilder;
+    private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
     private final EffectPostTriggerConfirmMessageBuilder effectPostTriggerConfirmMessageBuilder;
     private final FollowupInteractionContextBuilder followupInteractionContextBuilder;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
@@ -181,14 +178,11 @@ public class MatchActionService {
         this.giftTriggerActionWriter = new GiftTriggerActionWriter(matchActionRepository, matchPayloadJsonService);
         this.pendingGiftTriggerContextExtractor = new PendingGiftTriggerContextExtractor();
         this.pendingDownEventContextExtractor = new PendingDownEventContextExtractor();
-        this.attackPostTriggerSectionBuilder = new AttackPostTriggerSectionBuilder();
-        this.attackPostTriggerConfirmMessageBuilder = new AttackPostTriggerConfirmMessageBuilder();
         this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
-        this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
-        this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
         this.giftTriggeredEffectConfirmPendingInputBuilder = new GiftTriggeredEffectConfirmPendingInputBuilder();
         this.giftTriggerInteractionCardsBuilder = new GiftTriggerInteractionCardsBuilder(jdbcTemplate);
+        this.attackArtPostTriggerConfirmPendingInputBuilder = new AttackArtPostTriggerConfirmPendingInputBuilder();
         this.effectPostTriggerConfirmMessageBuilder = new EffectPostTriggerConfirmMessageBuilder();
         this.followupInteractionContextBuilder = new FollowupInteractionContextBuilder();
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
@@ -5507,60 +5501,19 @@ public class MatchActionService {
         Map<String, Object> downEventPreview,
         int turnNumber
     ) {
-        List<Map<String, Object>> giftTriggers = buildGiftTriggerPayloads(giftTriggeredEffects);
+        FollowupTriggerConfirmPendingDecisionInput input = attackArtPostTriggerConfirmPendingInputBuilder
+            .buildAttackArtPostTriggerConfirmPendingInput(
+                matchId,
+                userId,
+                sourceCardInstanceId,
+                sourceCardId,
+                cards,
+                giftTriggeredEffects,
+                downEventPreview,
+                turnNumber
+            );
 
-        Map<String, Object> additionalContext = new LinkedHashMap<>();
-        additionalContext.put("giftTriggers", giftTriggers);
-        additionalContext.put("giftCount", giftTriggers.size());
-        appendGiftSelectionPendingContext(additionalContext, giftTriggeredEffects);
-        if (downEventPreview != null && !downEventPreview.isEmpty()) {
-            Map<String, Object> downEvent = new LinkedHashMap<>();
-            downEvent.put("downedOwnerUserId", asLong(downEventPreview.get("downedOwnerUserId")));
-            downEvent.put("downedCardId", asString(downEventPreview.get("downedCardId")));
-            downEvent.put("downedStageZone", asString(downEventPreview.get("downedStageZone")));
-            downEvent.put("turnNumber", asInt(downEventPreview.get("turnNumber")));
-            downEvent.put("rawText", asString(downEventPreview.get("rawText")));
-            downEvent.put("requestedLifeLoss", asInt(downEventPreview.get("requestedLifeLoss")));
-            additionalContext.put("downEvent", downEvent);
-        }
-        additionalContext.put("triggerSections", buildAttackArtPostTriggerSections(giftTriggeredEffects, downEventPreview));
-
-        return createTriggeredEffectConfirmPendingInteraction(
-            matchId,
-            userId,
-            "ATTACK_ART_POST_TRIGGER",
-            sourceCardInstanceId,
-            sourceCardId,
-            "ATTACK_ART_POST_TRIGGER",
-            "確認攻擊後觸發效果",
-            buildAttackArtPostTriggerConfirmMessage(giftTriggeredEffects, downEventPreview),
-            cards,
-            turnNumber,
-            additionalContext
-        );
-    }
-
-    /**
-     * 組裝 ATTACK_ART 後續觸發確認訊息。
-     */
-    private String buildAttackArtPostTriggerConfirmMessage(
-        List<Map<String, Object>> giftTriggeredEffects,
-        Map<String, Object> downEventPreview
-    ) {
-        return attackPostTriggerConfirmMessageBuilder.buildAttackArtPostTriggerConfirmMessage(
-            giftTriggeredEffects,
-            downEventPreview
-        );
-    }
-
-    /**
-     * 建立 ATTACK_ART_POST_TRIGGER 互動分區資料（供前端 modal 分塊渲染）。
-     */
-    private List<Map<String, Object>> buildAttackArtPostTriggerSections(
-        List<Map<String, Object>> giftTriggeredEffects,
-        Map<String, Object> downEventPreview
-    ) {
-        return attackPostTriggerSectionBuilder.buildAttackArtPostTriggerSections(giftTriggeredEffects, downEventPreview);
+        return followupTriggerConfirmPendingDecisionWriter.create(input);
     }
 
     /**
@@ -5568,20 +5521,6 @@ public class MatchActionService {
      */
     private Map<String, Object> buildGiftTriggeredEffectDeferredSummary(List<Map<String, Object>> giftTriggeredEffects) {
         return giftTriggeredEffectDeferredSummaryBuilder.buildGiftTriggeredEffectDeferredSummary(giftTriggeredEffects);
-    }
-
-    private List<Map<String, Object>> buildGiftTriggerPayloads(List<Map<String, Object>> giftTriggeredEffects) {
-        return giftTriggerPendingPayloadBuilder.buildGiftTriggerPayloads(giftTriggeredEffects);
-    }
-
-    private void appendGiftSelectionPendingContext(
-        Map<String, Object> additionalContext,
-        List<Map<String, Object>> giftTriggeredEffects
-    ) {
-        if (additionalContext == null) {
-            return;
-        }
-        additionalContext.putAll(giftSelectionPendingContextBuilder.buildSelectionPendingContext(giftTriggeredEffects));
     }
 
     /**
