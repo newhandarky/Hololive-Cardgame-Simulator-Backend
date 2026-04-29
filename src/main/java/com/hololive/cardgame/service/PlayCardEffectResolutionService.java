@@ -15,10 +15,8 @@ public class PlayCardEffectResolutionService {
     private final MatchEventHookService matchEventHookService;
     private final FollowupSourceCardPayloadBuilder followupSourceCardPayloadBuilder;
     private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
-    private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
-    private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
-    private final GiftTriggeredEffectConfirmMessageBuilder giftTriggeredEffectConfirmMessageBuilder;
+    private final GiftTriggeredEffectConfirmPendingInputBuilder giftTriggeredEffectConfirmPendingInputBuilder;
 
     public PlayCardEffectResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -30,10 +28,8 @@ public class PlayCardEffectResolutionService {
         this.matchEventHookService = matchEventHookService;
         this.followupSourceCardPayloadBuilder = new FollowupSourceCardPayloadBuilder(jdbcTemplate);
         this.followupTriggerConfirmPendingDecisionWriter = new FollowupTriggerConfirmPendingDecisionWriter(jdbcTemplate, objectMapper);
-        this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
-        this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
-        this.giftTriggeredEffectConfirmMessageBuilder = new GiftTriggeredEffectConfirmMessageBuilder();
+        this.giftTriggeredEffectConfirmPendingInputBuilder = new GiftTriggeredEffectConfirmPendingInputBuilder();
     }
 
     public PlayCardEffectResolution resolve(PlayCardAction action, PlayCardResolutionResult resolutionResult) {
@@ -123,43 +119,17 @@ public class PlayCardEffectResolutionService {
         List<Map<String, Object>> giftTriggeredEffects,
         int turnNumber
     ) {
-        List<Map<String, Object>> giftTriggers = buildGiftTriggerPayloads(giftTriggeredEffects);
-        Map<String, Object> additionalContext = new LinkedHashMap<>();
-        additionalContext.put("giftTriggers", giftTriggers);
-        additionalContext.put("giftCount", giftTriggers.size());
-        appendGiftSelectionPendingContext(additionalContext, giftTriggeredEffects);
-
-        return followupTriggerConfirmPendingDecisionWriter.create(new FollowupTriggerConfirmPendingDecisionInput(
-            matchId,
-            userId,
-            "GIFT",
-            sourceCardInstanceId,
-            sourceCardId,
-            "GIFT_TRIGGER",
-            "確認 Gift 效果",
-            buildGiftTriggeredEffectConfirmMessage(giftTriggeredEffects),
-            cards,
-            turnNumber,
-            additionalContext
-        ));
-    }
-
-    private List<Map<String, Object>> buildGiftTriggerPayloads(List<Map<String, Object>> giftTriggeredEffects) {
-        return giftTriggerPendingPayloadBuilder.buildGiftTriggerPayloads(giftTriggeredEffects);
-    }
-
-    private void appendGiftSelectionPendingContext(
-        Map<String, Object> additionalContext,
-        List<Map<String, Object>> giftTriggeredEffects
-    ) {
-        if (additionalContext == null) {
-            return;
-        }
-        additionalContext.putAll(giftSelectionPendingContextBuilder.buildSelectionPendingContext(giftTriggeredEffects));
-    }
-
-    private String buildGiftTriggeredEffectConfirmMessage(List<Map<String, Object>> giftTriggeredEffects) {
-        return giftTriggeredEffectConfirmMessageBuilder.buildGiftTriggeredEffectConfirmMessage(giftTriggeredEffects);
+        return followupTriggerConfirmPendingDecisionWriter.create(
+            giftTriggeredEffectConfirmPendingInputBuilder.buildGiftTriggeredEffectConfirmPendingInput(
+                matchId,
+                userId,
+                sourceCardInstanceId,
+                sourceCardId,
+                cards,
+                giftTriggeredEffects,
+                turnNumber
+            )
+        );
     }
 
     private List<Map<String, Object>> buildTriggeredResolutionOrder(

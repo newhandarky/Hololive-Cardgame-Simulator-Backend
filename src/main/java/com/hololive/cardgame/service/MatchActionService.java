@@ -86,7 +86,7 @@ public class MatchActionService {
     private final GiftTriggerPendingPayloadBuilder giftTriggerPendingPayloadBuilder;
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
-    private final GiftTriggeredEffectConfirmMessageBuilder giftTriggeredEffectConfirmMessageBuilder;
+    private final GiftTriggeredEffectConfirmPendingInputBuilder giftTriggeredEffectConfirmPendingInputBuilder;
     private final EffectPostTriggerConfirmMessageBuilder effectPostTriggerConfirmMessageBuilder;
     private final FollowupInteractionContextBuilder followupInteractionContextBuilder;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
@@ -184,7 +184,7 @@ public class MatchActionService {
         this.giftTriggerPendingPayloadBuilder = new GiftTriggerPendingPayloadBuilder();
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
-        this.giftTriggeredEffectConfirmMessageBuilder = new GiftTriggeredEffectConfirmMessageBuilder();
+        this.giftTriggeredEffectConfirmPendingInputBuilder = new GiftTriggeredEffectConfirmPendingInputBuilder();
         this.effectPostTriggerConfirmMessageBuilder = new EffectPostTriggerConfirmMessageBuilder();
         this.followupInteractionContextBuilder = new FollowupInteractionContextBuilder();
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
@@ -5660,32 +5660,30 @@ public class MatchActionService {
         List<Map<String, Object>> giftTriggeredEffects,
         int turnNumber
     ) {
-        List<Map<String, Object>> giftTriggers = buildGiftTriggerPayloads(giftTriggeredEffects);
-        Map<String, Object> additionalContext = new LinkedHashMap<>();
-        additionalContext.put("giftTriggers", giftTriggers);
-        additionalContext.put("giftCount", giftTriggers.size());
-        appendGiftSelectionPendingContext(additionalContext, giftTriggeredEffects);
+        FollowupTriggerConfirmPendingDecisionInput input = giftTriggeredEffectConfirmPendingInputBuilder
+            .buildGiftTriggeredEffectConfirmPendingInput(
+                matchId,
+                userId,
+                sourceCardInstanceId,
+                sourceCardId,
+                cards,
+                giftTriggeredEffects,
+                turnNumber
+            );
 
         return createTriggeredEffectConfirmPendingInteraction(
-            matchId,
-            userId,
-            "GIFT",
-            sourceCardInstanceId,
-            sourceCardId,
-            "GIFT_TRIGGER",
-            "確認 Gift 效果",
-            buildGiftTriggeredEffectConfirmMessage(giftTriggeredEffects),
-            cards,
-            turnNumber,
-            additionalContext
+            input.matchId(),
+            input.userId(),
+            input.sourceActionType(),
+            input.sourceCardInstanceId(),
+            input.sourceCardId(),
+            input.effectType(),
+            input.title(),
+            input.message(),
+            input.cards(),
+            input.turnNumber(),
+            input.additionalContext()
         );
-    }
-
-    /**
-     * 組裝 Gift 觸發確認訊息（含卡文與 effectType 摘要）。
-     */
-    private String buildGiftTriggeredEffectConfirmMessage(List<Map<String, Object>> giftTriggeredEffects) {
-        return giftTriggeredEffectConfirmMessageBuilder.buildGiftTriggeredEffectConfirmMessage(giftTriggeredEffects);
     }
 
     /**
