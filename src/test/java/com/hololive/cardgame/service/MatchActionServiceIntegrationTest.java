@@ -3374,10 +3374,35 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
         matchActionService.bloom(matchId, hostId, request);
 
-        int handAfter = countZone(matchId, hostId, "HAND");
-        int deckAfter = countZone(matchId, hostId, "DECK");
-        assertThat(handAfter).isEqualTo(handBefore);
-        assertThat(deckAfter).isEqualTo(deckBefore - 1);
+        int handAfterBloom = countZone(matchId, hostId, "HAND");
+        int deckAfterBloom = countZone(matchId, hostId, "DECK");
+        assertThat(handAfterBloom).isEqualTo(handBefore - 1);
+        assertThat(deckAfterBloom).isEqualTo(deckBefore);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).containsPattern("\"sourceActionType\"\\s*:\\s*\"BLOOM\"");
+        assertThat(pendingContextText).contains("DRAW");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int handAfterConfirm = countZone(matchId, hostId, "HAND");
+        int deckAfterConfirm = countZone(matchId, hostId, "DECK");
+        assertThat(handAfterConfirm).isEqualTo(handBefore);
+        assertThat(deckAfterConfirm).isEqualTo(deckBefore - 1);
 
         String payload = jdbcTemplate.queryForObject(
             """
@@ -3385,7 +3410,7 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             FROM match_actions
             WHERE match_id = ?
               AND user_id = ?
-              AND action_type = 'RESOLVE_DECISION'
+              AND action_type = 'TRIGGER_EFFECT_EXECUTED'
             ORDER BY id DESC
             LIMIT 1
             """,
@@ -3393,8 +3418,9 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
             matchId,
             hostId
         );
-        assertThat(payload).contains("bloomEffect");
-        assertThat(payload).contains("DRAW");
+        assertThat(payload).containsPattern("\"sourceActionType\"\\s*:\\s*\"BLOOM\"");
+        assertThat(payload).containsPattern("\"effectType\"\\s*:\\s*\"DRAW\"");
+        assertThat(payload).containsPattern("\"drawApplied\"\\s*:\\s*1");
     }
 
     @Test
