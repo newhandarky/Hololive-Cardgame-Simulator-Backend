@@ -88,6 +88,7 @@ public class MatchActionService {
     private final GiftSelectionPendingContextBuilder giftSelectionPendingContextBuilder;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
     private final GiftTriggeredEffectConfirmPendingInputBuilder giftTriggeredEffectConfirmPendingInputBuilder;
+    private final GiftTriggerInteractionCardsBuilder giftTriggerInteractionCardsBuilder;
     private final EffectPostTriggerConfirmMessageBuilder effectPostTriggerConfirmMessageBuilder;
     private final FollowupInteractionContextBuilder followupInteractionContextBuilder;
     private final FollowupCardCandidateLoader followupCardCandidateLoader;
@@ -187,6 +188,7 @@ public class MatchActionService {
         this.giftSelectionPendingContextBuilder = new GiftSelectionPendingContextBuilder();
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
         this.giftTriggeredEffectConfirmPendingInputBuilder = new GiftTriggeredEffectConfirmPendingInputBuilder();
+        this.giftTriggerInteractionCardsBuilder = new GiftTriggerInteractionCardsBuilder(jdbcTemplate);
         this.effectPostTriggerConfirmMessageBuilder = new EffectPostTriggerConfirmMessageBuilder();
         this.followupInteractionContextBuilder = new FollowupInteractionContextBuilder();
         this.followupCardCandidateLoader = new FollowupCardCandidateLoader(jdbcTemplate);
@@ -5630,36 +5632,13 @@ public class MatchActionService {
         String sourceCardId,
         List<Map<String, Object>> giftTriggeredEffects
     ) {
-        List<Map<String, Object>> cards = new ArrayList<>();
-        if (sourceCardInstanceId != null && sourceCardInstanceId > 0) {
-            cards.add(buildInteractionSourceCardPayload(matchId, userId, sourceCardInstanceId, sourceCardId, "STAGE"));
-        }
-        if (giftTriggeredEffects == null || giftTriggeredEffects.isEmpty()) {
-            return cards;
-        }
-        for (Map<String, Object> trigger : giftTriggeredEffects) {
-            Long holderCardInstanceId = asLong(trigger.get("giftHolderCardInstanceId"));
-            String holderCardId = asString(trigger.get("giftHolderCardId"));
-            String holderZone = asString(trigger.get("giftHolderZone"));
-            if (holderCardInstanceId == null || holderCardInstanceId <= 0) {
-                continue;
-            }
-            boolean exists = cards.stream()
-                .anyMatch(card -> holderCardInstanceId.equals(asLong(card.get("cardInstanceId"))));
-            if (exists) {
-                continue;
-            }
-            cards.add(
-                buildInteractionSourceCardPayload(
-                    matchId,
-                    userId,
-                    holderCardInstanceId,
-                    holderCardId,
-                    StringUtils.hasText(holderZone) ? holderZone : "STAGE"
-                )
-            );
-        }
-        return cards;
+        return giftTriggerInteractionCardsBuilder.buildGiftTriggerInteractionCards(
+            matchId,
+            userId,
+            sourceCardInstanceId,
+            sourceCardId,
+            giftTriggeredEffects
+        );
     }
 
     /**
