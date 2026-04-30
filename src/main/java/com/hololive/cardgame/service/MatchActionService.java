@@ -89,6 +89,7 @@ public class MatchActionService {
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
     private final EffectFollowupDecisionResolver effectFollowupDecisionResolver;
     private final FollowupDecisionPayloadAppender followupDecisionPayloadAppender;
+    private final AdvancePhasePayloadBuilder advancePhasePayloadBuilder;
     private final SupportOshiEffectPayloadBuilder supportOshiEffectPayloadBuilder;
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
     private final TriggerEffectConfirmPayloadBuilder triggerEffectConfirmPayloadBuilder;
@@ -213,6 +214,11 @@ public class MatchActionService {
             followupInteractionPendingDecisionWriter
         );
         this.followupDecisionPayloadAppender = new FollowupDecisionPayloadAppender();
+        this.advancePhasePayloadBuilder = new AdvancePhasePayloadBuilder(
+            matchPhaseAdvanceGiftTransitionService,
+            giftTriggeredEffectDeferredSummaryBuilder,
+            followupDecisionPayloadAppender
+        );
         this.supportOshiEffectPayloadBuilder = new SupportOshiEffectPayloadBuilder();
         this.interactionConfirmedPayloadBuilder = new InteractionConfirmedPayloadBuilder();
         this.triggerEffectConfirmPayloadBuilder = new TriggerEffectConfirmPayloadBuilder();
@@ -1563,21 +1569,16 @@ public class MatchActionService {
         AdvancePhaseFollowup followup,
         MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition transition
     ) {
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("fromPhase", currentPhase.name());
-        payload.put("toPhase", nextPhase.name());
-        payload.put("firstPlayerFirstTurnSkip", currentPhase == MatchPhase.MAIN && nextPhase == MatchPhase.END);
-        if (followup != null && transition != null) {
-            matchPhaseAdvanceGiftTransitionService.putAdvancePhaseGiftEffectPayload(
-                payload,
-                transition,
-                buildGiftTriggeredEffectDeferredSummary(followup.ownGiftEffects()),
-                buildGiftTriggeredEffectDeferredSummary(followup.opponentGiftEffects())
-            );
-            followupDecisionPayloadAppender.append(payload, followup.ownDecision());
-            followupDecisionPayloadAppender.appendOpponent(payload, followup.opponentDecision());
-        }
-        return payload;
+        AdvancePhaseFollowup safeFollowup = followup == null ? AdvancePhaseFollowup.empty() : followup;
+        return advancePhasePayloadBuilder.buildAdvancePhasePayload(
+            currentPhase,
+            nextPhase,
+            transition,
+            safeFollowup.ownGiftEffects(),
+            safeFollowup.opponentGiftEffects(),
+            safeFollowup.ownDecision(),
+            safeFollowup.opponentDecision()
+        );
     }
 
     /**
