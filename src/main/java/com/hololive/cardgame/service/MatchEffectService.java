@@ -2078,14 +2078,7 @@ public class MatchEffectService {
                 if (id == null || selectedIds.contains(id)) {
                     continue;
                 }
-                Map<String, Object> candidate = new LinkedHashMap<>();
-                candidate.put("cardInstanceId", id);
-                candidate.put("cardId", asText(row.get("card_id")));
-                candidate.put("name", asText(row.get("name")));
-                candidate.put("cardType", normalize(asText(row.get("card_type"))));
-                candidate.put("levelType", normalizeLevelType(asText(row.get("level_type"))));
-                candidate.put("zone", "DECK");
-                reorderCandidates.add(candidate);
+                reorderCandidates.add(buildDeckBottomReorderCandidate(row, id));
             }
             if (reorderCandidates.size() == 1) {
                 Long onlyCardInstanceId = asLong(reorderCandidates.get(0).get("cardInstanceId"));
@@ -2094,6 +2087,51 @@ public class MatchEffectService {
             }
         }
 
+        return buildSearchEffectSummary(
+            effectType,
+            searchCount,
+            candidates,
+            searchPool,
+            lookTopCount,
+            searchSourceZone,
+            archiveUnselectedTopWindow,
+            archivedRemainderCardInstanceIds,
+            archivedRemainderCardIds,
+            selectedCardInstanceIds,
+            movedCardInstanceIds,
+            movedCardIds,
+            reorderCandidates,
+            criteria
+        );
+    }
+
+    private Map<String, Object> buildDeckBottomReorderCandidate(Map<String, Object> row, Long cardInstanceId) {
+        Map<String, Object> candidate = new LinkedHashMap<>();
+        candidate.put("cardInstanceId", cardInstanceId);
+        candidate.put("cardId", asText(row.get("card_id")));
+        candidate.put("name", asText(row.get("name")));
+        candidate.put("cardType", normalize(asText(row.get("card_type"))));
+        candidate.put("levelType", normalizeLevelType(asText(row.get("level_type"))));
+        candidate.put("zone", "DECK");
+        return candidate;
+    }
+
+    private Map<String, Object> buildSearchEffectSummary(
+        String effectType,
+        int searchCount,
+        List<Map<String, Object>> candidates,
+        List<Map<String, Object>> searchPool,
+        int lookTopCount,
+        String searchSourceZone,
+        boolean archiveUnselectedTopWindow,
+        List<Long> archivedRemainderCardInstanceIds,
+        List<String> archivedRemainderCardIds,
+        List<Long> selectedCardInstanceIds,
+        List<Long> movedCardInstanceIds,
+        List<String> movedCardIds,
+        List<Map<String, Object>> reorderCandidates,
+        SearchCriteria criteria
+    ) {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
         summary.put("applied", true);
