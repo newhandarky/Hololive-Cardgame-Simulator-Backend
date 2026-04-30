@@ -6813,24 +6813,13 @@ public class MatchEffectService {
         Integer diceRoll = normalizedCardId.startsWith("HBP04-059") ? null : resolveBloomDiceRoll(bloomText);
         Map<String, Object> bloomEffectPayload = buildFallbackEffectPayload(effectTypes, bloomText, null);
         if (normalizedCardId.startsWith("HSD02-007")) {
-            bloomEffectPayload.put("effects", List.of("SEARCH"));
-            bloomEffectPayload.put("value", 1);
-            bloomEffectPayload.put("lookTopCount", 2);
-            bloomEffectPayload.put("searchSourceZone", "DECK");
-            bloomEffectPayload.put("archiveUnselectedTopWindow", true);
-            effectTypes = List.of("SEARCH");
+            effectTypes = applyHsd02007BloomFallbackPayload(bloomEffectPayload);
         }
         if (normalizedCardId.startsWith("HSD13-011")) {
-            bloomEffectPayload.put("effects", List.of("ARCHIVE_STACK_CARD", "DAMAGE"));
-            bloomEffectPayload.put("stackArchiveCount", 1);
-            bloomEffectPayload.put("stackCostLevelType", "DEBUT");
-            bloomEffectPayload.put("value", 20);
-            bloomEffectPayload.put("damageTargetZone", "COLLAB");
-            effectTypes = List.of("ARCHIVE_STACK_CARD", "DAMAGE");
+            effectTypes = applyHsd13011BloomFallbackPayload(bloomEffectPayload);
         }
         if (normalizedCardId.startsWith("HSD07-007")) {
-            bloomEffectPayload.put("effects", List.of("SWAP_WITH_COLLAB"));
-            effectTypes = List.of("SWAP_WITH_COLLAB");
+            effectTypes = applyHsd07007BloomFallbackPayload(bloomEffectPayload);
         }
         if (normalizedCardId.startsWith("HBP04-059")) {
             int ownHandCount = runtimeContext == null || runtimeContext.common() == null
@@ -6839,28 +6828,13 @@ public class MatchEffectService {
             if (ownHandCount <= 0) {
                 return emptyBloomEffectPlan(bloomText, diceRoll);
             }
-            bloomEffectPayload.put("effects", List.of("DISCARD_HAND", "DRAW"));
-            bloomEffectPayload.put("value", 0);
-            bloomEffectPayload.put("diceRollCount", 3);
-            bloomEffectPayload.put("oddRollsDrawCount", true);
-            effectTypes = List.of("DISCARD_HAND", "DRAW");
+            effectTypes = applyHbp04059BloomFallbackPayload(bloomEffectPayload);
         }
         if (normalizedCardId.startsWith("HBP02-016")) {
             if (!"DEBUT".equals(normalizeLevelType(runtimeContext == null ? null : runtimeContext.sourceLevelType()))) {
                 return emptyBloomEffectPlan(bloomText, diceRoll);
             }
-            bloomEffectPayload.put("effects", List.of("SEARCH"));
-            bloomEffectPayload.put("value", 1);
-            bloomEffectPayload.put("searchSourceZone", "DECK");
-            ObjectNode criteriaNode = objectMapper.createObjectNode();
-            criteriaNode.put("cardType", "MEMBER");
-            criteriaNode.put("tag", "#3期生");
-            var anyOf = criteriaNode.putArray("anyOf");
-            anyOf.addObject().put("levelType", "DEBUT");
-            anyOf.addObject().put("levelType", "FIRST");
-            anyOf.addObject().put("levelType", "SPOT");
-            bloomEffectPayload.put("searchCriteria", criteriaNode);
-            effectTypes = List.of("SEARCH");
+            effectTypes = applyHbp02016BloomFallbackPayload(bloomEffectPayload);
         }
         if (normalizedCardId.startsWith("HBP06-081")) {
             String oshiCardName = runtimeContext == null || runtimeContext.common() == null
@@ -6872,14 +6846,7 @@ public class MatchEffectService {
             if (!StringUtils.hasText(oshiCardName) || !"大空スバル".equals(oshiCardName.trim()) || ownedStageCheerCount <= 0) {
                 return emptyBloomEffectPlan(bloomText, diceRoll);
             }
-            bloomEffectPayload.put("effects", List.of("REMOVE_STAGE_CHEER", "SEARCH"));
-            bloomEffectPayload.put("value", 1);
-            bloomEffectPayload.put("searchSourceZone", "DECK");
-            ObjectNode criteriaNode = objectMapper.createObjectNode();
-            criteriaNode.put("cardType", "MEMBER");
-            criteriaNode.put("nameContains", "大空スバル");
-            bloomEffectPayload.put("searchCriteria", criteriaNode);
-            effectTypes = List.of("REMOVE_STAGE_CHEER", "SEARCH");
+            effectTypes = applyHbp06081BloomFallbackPayload(bloomEffectPayload);
         }
         if (diceRoll != null) {
             bloomEffectPayload.put("diceRoll", diceRoll);
@@ -7357,6 +7324,69 @@ public class MatchEffectService {
             payload.put("diceRoll", diceRoll);
         }
         return payload;
+    }
+
+    private List<String> applyHsd02007BloomFallbackPayload(Map<String, Object> payload) {
+        List<String> effectTypes = List.of("SEARCH");
+        payload.put("effects", effectTypes);
+        payload.put("value", 1);
+        payload.put("lookTopCount", 2);
+        payload.put("searchSourceZone", "DECK");
+        payload.put("archiveUnselectedTopWindow", true);
+        return effectTypes;
+    }
+
+    private List<String> applyHsd13011BloomFallbackPayload(Map<String, Object> payload) {
+        List<String> effectTypes = List.of("ARCHIVE_STACK_CARD", "DAMAGE");
+        payload.put("effects", effectTypes);
+        payload.put("stackArchiveCount", 1);
+        payload.put("stackCostLevelType", "DEBUT");
+        payload.put("value", 20);
+        payload.put("damageTargetZone", "COLLAB");
+        return effectTypes;
+    }
+
+    private List<String> applyHsd07007BloomFallbackPayload(Map<String, Object> payload) {
+        List<String> effectTypes = List.of("SWAP_WITH_COLLAB");
+        payload.put("effects", effectTypes);
+        return effectTypes;
+    }
+
+    private List<String> applyHbp04059BloomFallbackPayload(Map<String, Object> payload) {
+        List<String> effectTypes = List.of("DISCARD_HAND", "DRAW");
+        payload.put("effects", effectTypes);
+        payload.put("value", 0);
+        payload.put("diceRollCount", 3);
+        payload.put("oddRollsDrawCount", true);
+        return effectTypes;
+    }
+
+    private List<String> applyHbp02016BloomFallbackPayload(Map<String, Object> payload) {
+        List<String> effectTypes = List.of("SEARCH");
+        payload.put("effects", effectTypes);
+        payload.put("value", 1);
+        payload.put("searchSourceZone", "DECK");
+        ObjectNode criteriaNode = objectMapper.createObjectNode();
+        criteriaNode.put("cardType", "MEMBER");
+        criteriaNode.put("tag", "#3期生");
+        var anyOf = criteriaNode.putArray("anyOf");
+        anyOf.addObject().put("levelType", "DEBUT");
+        anyOf.addObject().put("levelType", "FIRST");
+        anyOf.addObject().put("levelType", "SPOT");
+        payload.put("searchCriteria", criteriaNode);
+        return effectTypes;
+    }
+
+    private List<String> applyHbp06081BloomFallbackPayload(Map<String, Object> payload) {
+        List<String> effectTypes = List.of("REMOVE_STAGE_CHEER", "SEARCH");
+        payload.put("effects", effectTypes);
+        payload.put("value", 1);
+        payload.put("searchSourceZone", "DECK");
+        ObjectNode criteriaNode = objectMapper.createObjectNode();
+        criteriaNode.put("cardType", "MEMBER");
+        criteriaNode.put("nameContains", "大空スバル");
+        payload.put("searchCriteria", criteriaNode);
+        return effectTypes;
     }
 
     /**
