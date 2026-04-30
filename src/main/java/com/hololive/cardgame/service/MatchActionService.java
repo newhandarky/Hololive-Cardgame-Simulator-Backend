@@ -92,6 +92,7 @@ public class MatchActionService {
     private final FollowupDecisionPayloadAppender followupDecisionPayloadAppender;
     private final SupportOshiEffectPayloadBuilder supportOshiEffectPayloadBuilder;
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
+    private final TriggerEffectConfirmPayloadBuilder triggerEffectConfirmPayloadBuilder;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -211,6 +212,7 @@ public class MatchActionService {
         this.followupDecisionPayloadAppender = new FollowupDecisionPayloadAppender();
         this.supportOshiEffectPayloadBuilder = new SupportOshiEffectPayloadBuilder();
         this.interactionConfirmedPayloadBuilder = new InteractionConfirmedPayloadBuilder();
+        this.triggerEffectConfirmPayloadBuilder = new TriggerEffectConfirmPayloadBuilder();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -799,11 +801,11 @@ public class MatchActionService {
         touchUpdatedAt(context.match);
         matchRepository.saveAndFlush(context.match);
 
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("decisionId", pending.decisionId());
-        payload.put("interactionType", INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM);
-        payload.put("sourceActionType", pending.sourceActionType());
-        payload.put("confirmed", confirmed);
+        Map<String, Object> payload = triggerEffectConfirmPayloadBuilder.buildBasePayload(
+            pending.decisionId(),
+            pending.sourceActionType(),
+            confirmed
+        );
 
         if (confirmed) {
             applyConfirmedTriggerEffectResolution(context, matchId, userId, pending, request, payload);
