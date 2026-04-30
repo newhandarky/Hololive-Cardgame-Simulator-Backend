@@ -8237,20 +8237,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 依多重條件載入可檢索候選清單。
-     */
-    private List<Map<String, Object>> loadSearchCandidates(
-        Long matchId,
-        Long userId,
-        String cardType,
-        String levelType,
-        String tag,
-        String nameContains
-    ) {
-        return searchService.loadSearchCandidates(matchId, userId, cardType, levelType, tag, nameContains);
-    }
-
-    /**
      * 從指定區域載入候選卡（可帶條件過濾）。
      */
     private List<Map<String, Object>> loadCandidatesFromZone(
@@ -8309,27 +8295,6 @@ public class MatchEffectService {
      */
     private boolean matchesSearchCriteria(Map<String, Object> row, SearchCriteria criteria) {
         return searchService.matchesSearchCriteria(row, criteria);
-    }
-
-    /**
-     * 驗證單一卡片資料列是否符合基本條件（不含巢狀組合）。
-     */
-    private boolean matchesBasicSearchCriteria(Map<String, Object> row, SearchCriteria criteria) {
-        return searchService.matchesBasicSearchCriteria(row, criteria);
-    }
-
-    /**
-     * 判斷 tags_json 是否包含指定 tag。
-     */
-    private boolean rowTagsContains(String tagsJson, String targetTag) {
-        return searchService.rowTagsContains(tagsJson, targetTag);
-    }
-
-    /**
-     * 檢查卡片主/副色或 cheer 色是否命中指定顏色。
-     */
-    private boolean matchesAnyColor(Map<String, Object> row, String color) {
-        return searchService.matchesAnyColor(row, color);
     }
 
     /**
