@@ -91,6 +91,7 @@ public class MatchActionService {
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
     private final EffectFollowupDecisionResolver effectFollowupDecisionResolver;
     private final FollowupDecisionPayloadAppender followupDecisionPayloadAppender;
+    private final MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender;
     private final AdvancePhasePayloadBuilder advancePhasePayloadBuilder;
     private final SupportOshiEffectPayloadBuilder supportOshiEffectPayloadBuilder;
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
@@ -223,6 +224,12 @@ public class MatchActionService {
             followupInteractionPendingDecisionWriter
         );
         this.followupDecisionPayloadAppender = new FollowupDecisionPayloadAppender();
+        this.mainStepGiftFollowupPayloadAppender = new MainStepGiftFollowupPayloadAppender(
+            matchGiftTriggerService,
+            giftTriggeredEffectDeferredSummaryBuilder,
+            sourcelessGiftPendingDecisionCreator,
+            followupDecisionPayloadAppender
+        );
         this.advancePhasePayloadBuilder = new AdvancePhasePayloadBuilder(
             matchPhaseAdvanceGiftTransitionService,
             giftTriggeredEffectDeferredSummaryBuilder,
@@ -1104,7 +1111,7 @@ public class MatchActionService {
         boolean requiresTurnCheer = canPerformTurnCheerAction(matchId, userId);
         Map<String, Object> payload = new LinkedHashMap<>();
         if (!requiresTurnCheer) {
-            appendMainStepGiftFollowupPayload(payload, matchId, userId, context.turnNumber);
+            mainStepGiftFollowupPayloadAppender.append(payload, matchId, userId, context.turnNumber);
         }
         matchTurnLifecycleService.confirmDrawRevealDecision(
             context.match,
@@ -1203,7 +1210,7 @@ public class MatchActionService {
             targetHolomemCardInstanceId
         );
         if (ACTION_TYPE_TURN_CHEER.equals(pending.sourceActionType())) {
-            appendMainStepGiftFollowupPayload(payload, matchId, userId, context.turnNumber);
+            mainStepGiftFollowupPayloadAppender.append(payload, matchId, userId, context.turnNumber);
         }
         appendAction(
             context.match,
@@ -1463,30 +1470,6 @@ public class MatchActionService {
             case PERFORMANCE -> MatchPhase.END;
             default -> throw new IllegalStateException("目前 phase 不支援推進：" + context.phase);
         };
-    }
-
-    private void appendMainStepGiftFollowupPayload(
-        Map<String, Object> payload,
-        Long matchId,
-        Long userId,
-        int turnNumber
-    ) {
-        List<Map<String, Object>> mainStepGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnMainStep(
-            matchId,
-            userId,
-            turnNumber
-        );
-        payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
-        if (mainStepGiftEffects.isEmpty()) {
-            return;
-        }
-        FollowupInteractionDecision mainStepGiftDecision = sourcelessGiftPendingDecisionCreator.create(
-            matchId,
-            userId,
-            mainStepGiftEffects,
-            turnNumber
-        );
-        followupDecisionPayloadAppender.append(payload, mainStepGiftDecision);
     }
 
     private FollowupInteractionDecision createBatonTouchGiftTriggerDecision(
