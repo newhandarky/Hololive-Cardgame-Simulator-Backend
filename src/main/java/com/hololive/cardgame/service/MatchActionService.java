@@ -198,7 +198,10 @@ public class MatchActionService {
             giftTriggeredEffectConfirmPendingInputBuilder,
             followupTriggerConfirmPendingDecisionWriter
         );
-        this.advancePhaseFollowupCreator = new AdvancePhaseFollowupCreator(giftPendingDecisionCreator);
+        this.advancePhaseFollowupCreator = new AdvancePhaseFollowupCreator(
+            matchPhaseAdvanceGiftTransitionService,
+            giftPendingDecisionCreator
+        );
         this.attackArtPostTriggerConfirmPendingInputBuilder = new AttackArtPostTriggerConfirmPendingInputBuilder();
         EffectPostTriggerPendingService effectPostTriggerPendingService = new EffectPostTriggerPendingService(
             jdbcTemplate,
@@ -1412,7 +1415,13 @@ public class MatchActionService {
 
         MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition transition =
             matchPhaseAdvanceGiftTransitionService.resolveAdvancePhaseTransition(context.phase, nextPhase);
-        AdvancePhaseFollowup followup = prepareAdvancePhaseFollowup(matchId, userId, context, transition);
+        AdvancePhaseFollowup followup = advancePhaseFollowupCreator.prepareAdvancePhaseFollowup(
+            matchId,
+            userId,
+            context.opponentUserId,
+            context.turnNumber,
+            transition
+        );
         Map<String, Object> payload = buildAdvancePhasePayload(context.phase, nextPhase, followup, transition);
         matchTurnLifecycleService.advancePhase(
             context.match,
@@ -1445,30 +1454,6 @@ public class MatchActionService {
             case PERFORMANCE -> MatchPhase.END;
             default -> throw new IllegalStateException("目前 phase 不支援推進：" + context.phase);
         };
-    }
-
-    private AdvancePhaseFollowup prepareAdvancePhaseFollowup(
-        Long matchId,
-        Long userId,
-        ActionContext context,
-        MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition transition
-    ) {
-        if (transition == null) {
-            return AdvancePhaseFollowup.empty();
-        }
-        return advancePhaseFollowupCreator.createAdvancePhaseFollowup(
-            matchId,
-            userId,
-            context.opponentUserId,
-            context.turnNumber,
-            matchPhaseAdvanceGiftTransitionService.prepareAdvancePhaseTransition(
-                transition,
-                matchId,
-                userId,
-                context.opponentUserId,
-                context.turnNumber
-            )
-        );
     }
 
     private void appendMainStepGiftFollowupPayload(

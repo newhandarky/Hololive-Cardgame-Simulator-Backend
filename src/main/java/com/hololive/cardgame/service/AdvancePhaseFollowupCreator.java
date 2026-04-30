@@ -5,10 +5,40 @@ import java.util.Map;
 
 class AdvancePhaseFollowupCreator {
 
+    private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
     private final GiftPendingDecisionCreator giftPendingDecisionCreator;
 
-    AdvancePhaseFollowupCreator(GiftPendingDecisionCreator giftPendingDecisionCreator) {
+    AdvancePhaseFollowupCreator(
+        MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
+        GiftPendingDecisionCreator giftPendingDecisionCreator
+    ) {
+        this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
         this.giftPendingDecisionCreator = giftPendingDecisionCreator;
+    }
+
+    AdvancePhaseFollowup prepareAdvancePhaseFollowup(
+        Long matchId,
+        Long userId,
+        Long opponentUserId,
+        int turnNumber,
+        MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition transition
+    ) {
+        if (transition == null) {
+            return AdvancePhaseFollowup.empty();
+        }
+        return createAdvancePhaseFollowup(
+            matchId,
+            userId,
+            opponentUserId,
+            turnNumber,
+            matchPhaseAdvanceGiftTransitionService.prepareAdvancePhaseTransition(
+                transition,
+                matchId,
+                userId,
+                opponentUserId,
+                turnNumber
+            )
+        );
     }
 
     AdvancePhaseFollowup createAdvancePhaseFollowup(

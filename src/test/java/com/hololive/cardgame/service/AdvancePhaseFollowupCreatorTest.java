@@ -12,8 +12,84 @@ import org.junit.jupiter.api.Test;
 
 class AdvancePhaseFollowupCreatorTest {
 
+    private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService = mock(
+        MatchPhaseAdvanceGiftTransitionService.class
+    );
     private final GiftPendingDecisionCreator giftPendingDecisionCreator = mock(GiftPendingDecisionCreator.class);
-    private final AdvancePhaseFollowupCreator creator = new AdvancePhaseFollowupCreator(giftPendingDecisionCreator);
+    private final AdvancePhaseFollowupCreator creator = new AdvancePhaseFollowupCreator(
+        matchPhaseAdvanceGiftTransitionService,
+        giftPendingDecisionCreator
+    );
+
+    @Test
+    void prepareAdvancePhaseFollowupShouldReturnEmptyWhenTransitionIsNull() {
+        AdvancePhaseFollowup followup = creator.prepareAdvancePhaseFollowup(
+            100L,
+            10L,
+            20L,
+            3,
+            null
+        );
+
+        assertThat(followup.ownGiftEffects()).isEmpty();
+        assertThat(followup.opponentGiftEffects()).isEmpty();
+        assertThat(followup.ownDecision()).isNull();
+        assertThat(followup.opponentDecision()).isNull();
+        verifyNoInteractions(matchPhaseAdvanceGiftTransitionService, giftPendingDecisionCreator);
+    }
+
+    @Test
+    void prepareAdvancePhaseFollowupShouldPrepareTransitionPreviewAndCreateFollowup() {
+        MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition transition =
+            MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition.forPerformanceStart();
+        List<Map<String, Object>> ownGiftEffects = List.of(giftTrigger("PERFORMANCE_START_SELF", 701L));
+        List<Map<String, Object>> opponentGiftEffects = List.of(giftTrigger("PERFORMANCE_START_OPPONENT", 801L));
+        FollowupInteractionDecision ownDecision = new FollowupInteractionDecision(501L, "TRIGGER_EFFECT_CONFIRM");
+        FollowupInteractionDecision opponentDecision = new FollowupInteractionDecision(502L, "TRIGGER_EFFECT_CONFIRM");
+        when(matchPhaseAdvanceGiftTransitionService.prepareAdvancePhaseTransition(
+            transition,
+            100L,
+            10L,
+            20L,
+            3
+        )).thenReturn(new MatchPhaseAdvanceGiftTransitionService.GiftTransitionPreview(ownGiftEffects, opponentGiftEffects));
+        when(giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
+            100L,
+            10L,
+            null,
+            null,
+            ownGiftEffects,
+            3
+        )).thenReturn(ownDecision);
+        when(giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
+            100L,
+            20L,
+            null,
+            null,
+            opponentGiftEffects,
+            3
+        )).thenReturn(opponentDecision);
+
+        AdvancePhaseFollowup followup = creator.prepareAdvancePhaseFollowup(
+            100L,
+            10L,
+            20L,
+            3,
+            transition
+        );
+
+        assertThat(followup.ownGiftEffects()).isEqualTo(ownGiftEffects);
+        assertThat(followup.opponentGiftEffects()).isEqualTo(opponentGiftEffects);
+        assertThat(followup.ownDecision()).isEqualTo(ownDecision);
+        assertThat(followup.opponentDecision()).isEqualTo(opponentDecision);
+        verify(matchPhaseAdvanceGiftTransitionService).prepareAdvancePhaseTransition(
+            transition,
+            100L,
+            10L,
+            20L,
+            3
+        );
+    }
 
     @Test
     void createAdvancePhaseFollowupShouldReturnEmptyWhenTransitionPreviewIsNull() {
