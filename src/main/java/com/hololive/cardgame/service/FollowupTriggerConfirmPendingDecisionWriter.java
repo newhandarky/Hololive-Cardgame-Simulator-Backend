@@ -15,10 +15,12 @@ class FollowupTriggerConfirmPendingDecisionWriter {
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
+    private final PendingDecisionReader pendingDecisionReader;
 
     FollowupTriggerConfirmPendingDecisionWriter(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
     }
 
     FollowupInteractionDecision create(FollowupTriggerConfirmPendingDecisionInput input) {
@@ -84,20 +86,7 @@ class FollowupTriggerConfirmPendingDecisionWriter {
     }
 
     private boolean hasBlockingPendingDecision(Long matchId, Long userId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = ?
-            """,
-            Integer.class,
-            matchId,
-            userId,
-            PENDING_STATUS
-        );
-        return count != null && count > 0;
+        return pendingDecisionReader.hasBlockingPendingDecision(matchId, userId);
     }
 
     private String toJson(Map<String, Object> payload) {

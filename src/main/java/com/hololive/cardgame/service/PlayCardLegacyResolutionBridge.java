@@ -21,6 +21,7 @@ public class PlayCardLegacyResolutionBridge {
     private final MatchPlayerRepository matchPlayerRepository;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
+    private final PendingDecisionReader pendingDecisionReader;
 
     public PlayCardLegacyResolutionBridge(
         MatchRepository matchRepository,
@@ -32,6 +33,7 @@ public class PlayCardLegacyResolutionBridge {
         this.matchPlayerRepository = matchPlayerRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
     }
 
     public PlayCardValidationContext loadValidationContext(PlayCardAction action) {
@@ -115,33 +117,11 @@ public class PlayCardLegacyResolutionBridge {
     }
 
     private boolean hasPendingDecision(Long matchId, Long userId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = 'PENDING'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        return count != null && count > 0;
+        return pendingDecisionReader.hasAnyPendingDecision(matchId, userId);
     }
 
     private boolean hasAnyPendingDecision(Long matchId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND status = 'PENDING'
-            """,
-            Integer.class,
-            matchId
-        );
-        return count != null && count > 0;
+        return pendingDecisionReader.hasAnyPendingDecision(matchId);
     }
 
     private boolean isActorMulliganDone(Long matchId, Long userId) {

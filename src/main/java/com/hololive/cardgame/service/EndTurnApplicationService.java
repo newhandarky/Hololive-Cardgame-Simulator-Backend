@@ -24,6 +24,7 @@ public class EndTurnApplicationService {
     private final MatchRepository matchRepository;
     private final MatchPlayerRepository matchPlayerRepository;
     private final JdbcTemplate jdbcTemplate;
+    private final PendingDecisionReader pendingDecisionReader;
 
     public EndTurnApplicationService(
         EndTurnActionValidator endTurnActionValidator,
@@ -45,6 +46,7 @@ public class EndTurnApplicationService {
         this.matchRepository = matchRepository;
         this.matchPlayerRepository = matchPlayerRepository;
         this.jdbcTemplate = jdbcTemplate;
+        this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
     }
 
     public void handle(EndTurnAction action) {
@@ -236,33 +238,11 @@ public class EndTurnApplicationService {
     }
 
     private boolean hasPendingDecision(Long matchId, Long userId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = 'PENDING'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        return count != null && count > 0;
+        return pendingDecisionReader.hasAnyPendingDecision(matchId, userId);
     }
 
     private boolean hasAnyPendingDecision(Long matchId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND status = 'PENDING'
-            """,
-            Integer.class,
-            matchId
-        );
-        return count != null && count > 0;
+        return pendingDecisionReader.hasAnyPendingDecision(matchId);
     }
 
     private Long resolveOpponent(MatchEntity match, Long actorUserId) {

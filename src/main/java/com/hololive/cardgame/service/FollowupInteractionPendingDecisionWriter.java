@@ -10,6 +10,7 @@ class FollowupInteractionPendingDecisionWriter {
     private final JdbcTemplate jdbcTemplate;
     private final MatchPayloadJsonService matchPayloadJsonService;
     private final FollowupPendingDecisionContextBuilder followupPendingDecisionContextBuilder;
+    private final PendingDecisionReader pendingDecisionReader;
 
     FollowupInteractionPendingDecisionWriter(
         JdbcTemplate jdbcTemplate,
@@ -19,6 +20,7 @@ class FollowupInteractionPendingDecisionWriter {
         this.jdbcTemplate = jdbcTemplate;
         this.matchPayloadJsonService = matchPayloadJsonService;
         this.followupPendingDecisionContextBuilder = followupPendingDecisionContextBuilder;
+        this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
     }
 
     FollowupInteractionDecision create(
@@ -79,19 +81,6 @@ class FollowupInteractionPendingDecisionWriter {
     }
 
     private boolean hasBlockingPendingDecision(Long matchId, Long userId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = ?
-            """,
-            Integer.class,
-            matchId,
-            userId,
-            PENDING_STATUS
-        );
-        return count != null && count > 0;
+        return pendingDecisionReader.hasBlockingPendingDecision(matchId, userId);
     }
 }

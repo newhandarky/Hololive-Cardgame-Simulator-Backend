@@ -34,6 +34,7 @@ public class MatchTurnLifecycleService {
     private final MatchActionRepository matchActionRepository;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
+    private final PendingDecisionReader pendingDecisionReader;
 
     public MatchTurnLifecycleService(
         MatchRepository matchRepository,
@@ -45,6 +46,7 @@ public class MatchTurnLifecycleService {
         this.matchActionRepository = matchActionRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
     }
 
     public void completeEndTurn(
@@ -591,20 +593,7 @@ public class MatchTurnLifecycleService {
     }
 
     private boolean hasAnyPendingDecision(Long matchId, Long userId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = ?
-            """,
-            Integer.class,
-            matchId,
-            userId,
-            PENDING_STATUS
-        );
-        return count != null && count > 0;
+        return pendingDecisionReader.hasAnyPendingDecision(matchId, userId);
     }
 
     private boolean isStageActionLocked(
