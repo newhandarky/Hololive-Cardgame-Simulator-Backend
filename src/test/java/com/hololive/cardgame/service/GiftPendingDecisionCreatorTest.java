@@ -93,6 +93,38 @@ class GiftPendingDecisionCreatorTest {
     }
 
     @Test
+    void createWithGiftTriggerInteractionCardsShouldKeepMainStepGiftWithoutSourceCard() throws Exception {
+        when(jdbcTemplate.queryForObject(anyString(), eq(Integer.class), any(), any(), any())).thenReturn(0);
+        whenInsertReturns(503L);
+
+        FollowupInteractionDecision decision = creator.createWithGiftTriggerInteractionCards(
+            100L,
+            10L,
+            null,
+            null,
+            List.of(giftTrigger("MAIN_STEP", 801L, "hBP06-014")),
+            4
+        );
+
+        assertThat(decision).isEqualTo(new FollowupInteractionDecision(503L, "TRIGGER_EFFECT_CONFIRM"));
+        ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
+        verify(jdbcTemplate, atLeastOnce()).query(anyString(), any(ResultSetExtractor.class), argsCaptor.capture());
+        Object[] insertArgs = argsCaptor.getAllValues().get(argsCaptor.getAllValues().size() - 1);
+        assertThat(insertArgs[3]).isEqualTo("GIFT");
+        assertThat(insertArgs[4]).isNull();
+        assertThat(insertArgs[5]).isNull();
+        assertThat(insertArgs[6]).isEqualTo("GIFT_TRIGGER");
+        assertThat((String) insertArgs[10])
+            .contains("\"sourceActionType\":\"GIFT\"")
+            .contains("\"cardInstanceId\":801")
+            .contains("\"cardId\":\"hBP06-014\"")
+            .contains("\"zone\":\"BACK\"")
+            .contains("\"triggerType\":\"MAIN_STEP\"")
+            .contains("\"giftHolderCardInstanceId\":801")
+            .contains("\"giftCount\":1");
+    }
+
+    @Test
     void createWithGiftTriggerInteractionCardsShouldReturnNullWhenNoGiftEffects() {
         FollowupInteractionDecision decision = creator.createWithGiftTriggerInteractionCards(
             100L,
