@@ -94,7 +94,7 @@ public class MatchActionService {
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
     private final TriggerEffectConfirmPayloadBuilder triggerEffectConfirmPayloadBuilder;
     private final SendCheerInteractionPayloadBuilder sendCheerInteractionPayloadBuilder;
-    private final PlayCardActionLogPayloadBuilder playCardActionLogPayloadBuilder;
+    private final PlayCardActionLogWriter playCardActionLogWriter;
     private final PlayCardMatchPhaseFinalizer playCardMatchPhaseFinalizer;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
@@ -217,7 +217,11 @@ public class MatchActionService {
         this.interactionConfirmedPayloadBuilder = new InteractionConfirmedPayloadBuilder();
         this.triggerEffectConfirmPayloadBuilder = new TriggerEffectConfirmPayloadBuilder();
         this.sendCheerInteractionPayloadBuilder = new SendCheerInteractionPayloadBuilder();
-        this.playCardActionLogPayloadBuilder = new PlayCardActionLogPayloadBuilder();
+        this.playCardActionLogWriter = new PlayCardActionLogWriter(
+            matchActionRepository,
+            matchPayloadJsonService,
+            new PlayCardActionLogPayloadBuilder()
+        );
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -331,18 +335,10 @@ public class MatchActionService {
         PlayCardEffectResolution effectResolution = playCardEffectResolutionService.resolve(action, resolutionResult);
         playCardApplicationService.dispatchResolvedEvents(action, resolutionResult, effectResolution);
 
-        Map<String, Object> payload = playCardActionLogPayloadBuilder.buildPayload(
+        playCardActionLogWriter.appendPlayCardAction(
             action,
             resolutionResult,
             effectResolution
-        );
-
-        appendAction(
-            resolutionResult.match(),
-            userId,
-            playCardActionLogPayloadBuilder.resolveLegacyActionType(resolutionResult),
-            toJson(payload),
-            resolutionResult.turnNumber()
         );
     }
 
