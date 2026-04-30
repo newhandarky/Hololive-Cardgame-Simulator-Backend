@@ -44,4 +44,36 @@ class FollowupDecisionPayloadAppenderTest {
 
         assertThat(payload).isEmpty();
     }
+
+    @Test
+    void appendOpponentShouldAddOpponentPendingInteractionFields() {
+        Map<String, Object> payload = new LinkedHashMap<>();
+
+        appender.appendOpponent(payload, new FollowupInteractionDecision(404L, "TRIGGER_EFFECT_CONFIRM"));
+
+        assertThat(payload)
+            .containsEntry("opponentPendingInteractionDecisionId", 404L)
+            .containsEntry("opponentPendingInteractionDecisionType", "TRIGGER_EFFECT_CONFIRM");
+    }
+
+    @Test
+    void appendOpponentShouldPreserveNullDecisionId() {
+        Map<String, Object> payload = new LinkedHashMap<>();
+
+        appender.appendOpponent(payload, new FollowupInteractionDecision(null, "TRIGGER_EFFECT_CONFIRM"));
+
+        assertThat(payload)
+            .containsEntry("opponentPendingInteractionDecisionId", null)
+            .containsEntry("opponentPendingInteractionDecisionType", "TRIGGER_EFFECT_CONFIRM");
+    }
+
+    @Test
+    void appendOpponentShouldIgnoreNullInputs() {
+        Map<String, Object> payload = new LinkedHashMap<>();
+
+        appender.appendOpponent(payload, null);
+        appender.appendOpponent(null, new FollowupInteractionDecision(505L, "TRIGGER_EFFECT_CONFIRM"));
+
+        assertThat(payload).isEmpty();
+    }
 }

@@ -1610,20 +1610,9 @@ public class MatchActionService {
                 buildGiftTriggeredEffectDeferredSummary(followup.opponentGiftEffects())
             );
             followupDecisionPayloadAppender.append(payload, followup.ownDecision());
-            putOpponentFollowupDecisionPayload(payload, followup.opponentDecision());
+            followupDecisionPayloadAppender.appendOpponent(payload, followup.opponentDecision());
         }
         return payload;
-    }
-
-    private void putOpponentFollowupDecisionPayload(
-        Map<String, Object> payload,
-        FollowupInteractionDecision followupDecision
-    ) {
-        if (payload == null || followupDecision == null) {
-            return;
-        }
-        payload.put("opponentPendingInteractionDecisionId", followupDecision.decisionId());
-        payload.put("opponentPendingInteractionDecisionType", followupDecision.decisionType());
     }
 
     /**

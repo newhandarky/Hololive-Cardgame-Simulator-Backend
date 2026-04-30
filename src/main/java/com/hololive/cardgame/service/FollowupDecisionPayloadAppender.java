@@ -16,4 +16,12 @@ class FollowupDecisionPayloadAppender {
             payload.put("pendingLookTopDeckDecisionId", followupDecision.decisionId());
         }
     }
+
+    void appendOpponent(Map<String, Object> payload, FollowupInteractionDecision followupDecision) {
+        if (payload == null || followupDecision == null) {
+            return;
+        }
+        payload.put("opponentPendingInteractionDecisionId", followupDecision.decisionId());
+        payload.put("opponentPendingInteractionDecisionType", followupDecision.decisionType());
+    }
 }
