@@ -77,6 +77,7 @@ public class MatchActionService {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final MatchPayloadJsonService matchPayloadJsonService;
+    private final PendingDecisionReader pendingDecisionReader;
     private final GiftTriggerActionPayloadExtractor giftTriggerActionPayloadExtractor;
     private final GiftTriggerActionWriter giftTriggerActionWriter;
     private final PendingGiftTriggerContextExtractor pendingGiftTriggerContextExtractor;
@@ -184,6 +185,7 @@ public class MatchActionService {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.matchPayloadJsonService = new MatchPayloadJsonService(objectMapper);
+        this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
         this.giftTriggerActionPayloadExtractor = new GiftTriggerActionPayloadExtractor();
         this.giftTriggerActionWriter = new GiftTriggerActionWriter(matchActionRepository, matchPayloadJsonService);
         this.pendingGiftTriggerContextExtractor = new PendingGiftTriggerContextExtractor();
@@ -4450,58 +4452,21 @@ public class MatchActionService {
      * 判斷是否存在會阻擋操作的 pending 決策。
      */
     private boolean hasBlockingPendingDecision(Long matchId, Long userId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = ?
-            """,
-            Integer.class,
-            matchId,
-            userId,
-            PENDING_STATUS
-        );
-        return count != null && count > 0;
+        return pendingDecisionReader.hasBlockingPendingDecision(matchId, userId);
     }
 
     /**
      * 判斷此對戰是否存在任何 pending 決策。
      */
     private boolean hasAnyPendingDecision(Long matchId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND status = ?
-            """,
-            Integer.class,
-            matchId,
-            PENDING_STATUS
-        );
-        return count != null && count > 0;
+        return pendingDecisionReader.hasAnyPendingDecision(matchId);
     }
 
     /**
      * 判斷是否存在任何 pending 決策。
      */
     private boolean hasAnyPendingDecision(Long matchId, Long userId) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_pending_decisions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND status = ?
-            """,
-            Integer.class,
-            matchId,
-            userId,
-            PENDING_STATUS
-        );
-        return count != null && count > 0;
+        return pendingDecisionReader.hasAnyPendingDecision(matchId, userId);
     }
 
     /**
