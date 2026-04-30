@@ -7291,70 +7291,27 @@ public class MatchEffectService {
      * 由結構化 passive JSON 解析 Bloom 效果計畫。
      */
     private BloomEffectPlan resolveStructuredBloomEffectPlan(JsonNode passiveNode) {
-        if (passiveNode == null || passiveNode.isNull() || !passiveNode.isObject()) {
-            return null;
-        }
-        JsonNode bloomNode = passiveNode.get("bloomEffect");
-        if (bloomNode == null || bloomNode.isNull() || !bloomNode.isObject()) {
-            return null;
-        }
-
-        List<String> effectTypes = resolveEffectTypes(readText(bloomNode, "type"), bloomNode);
-        String rawText = readText(bloomNode, "rawText", "rawEffect", "text");
-        if (effectTypes.isEmpty() && StringUtils.hasText(rawText)) {
-            effectTypes = inferBloomEffectTypes(rawText);
-        }
-        if (effectTypes.isEmpty()) {
-            effectTypes = List.of("UNIMPLEMENTED");
-        }
-
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("type", effectTextParser.normalizeEffectType(readText(bloomNode, "type")));
-        payload.put("effects", effectTypes);
-        if (StringUtils.hasText(rawText)) {
-            payload.put("rawText", rawText);
-        }
-        if (bloomNode.has("searchCriteria")) {
-            payload.put("searchCriteria", bloomNode.get("searchCriteria"));
-        }
-        if (bloomNode.has("value")) {
-            payload.put("value", bloomNode.get("value").asInt());
-        }
-        if (bloomNode.has("cards")) {
-            payload.put("cards", bloomNode.get("cards").asInt());
-        }
-        if (bloomNode.has("amount")) {
-            payload.put("amount", bloomNode.get("amount").asInt());
-        }
-        if (bloomNode.has("diceCondition")) {
-            payload.put("diceCondition", readText(bloomNode, "diceCondition"));
-        }
-        if (bloomNode.has("effectDiceConditions")) {
-            payload.put("effectDiceConditions", bloomNode.get("effectDiceConditions"));
-        }
-
-        Integer diceRoll = null;
-        if (bloomNode.has("diceCondition") || bloomNode.has("effectDiceConditions")) {
-            diceRoll = resolveDiceRoll(bloomNode);
-            payload.put("diceRoll", diceRoll);
-        }
-        return new BloomEffectPlan(true, effectTypes, objectMapper.valueToTree(payload), rawText, diceRoll);
+        return resolveStructuredEffectPlan(passiveNode, "bloomEffect");
     }
 
     /**
      * 由結構化 passive JSON 解析 Collab 效果計畫。
      */
     private BloomEffectPlan resolveStructuredCollabEffectPlan(JsonNode passiveNode) {
+        return resolveStructuredEffectPlan(passiveNode, "collabEffect");
+    }
+
+    private BloomEffectPlan resolveStructuredEffectPlan(JsonNode passiveNode, String effectFieldName) {
         if (passiveNode == null || passiveNode.isNull() || !passiveNode.isObject()) {
             return null;
         }
-        JsonNode collabNode = passiveNode.get("collabEffect");
-        if (collabNode == null || collabNode.isNull() || !collabNode.isObject()) {
+        JsonNode structuredNode = passiveNode.get(effectFieldName);
+        if (structuredNode == null || structuredNode.isNull() || !structuredNode.isObject()) {
             return null;
         }
 
-        List<String> effectTypes = resolveEffectTypes(readText(collabNode, "type"), collabNode);
-        String rawText = readText(collabNode, "rawText", "rawEffect", "text");
+        List<String> effectTypes = resolveEffectTypes(readText(structuredNode, "type"), structuredNode);
+        String rawText = readText(structuredNode, "rawText", "rawEffect", "text");
         if (effectTypes.isEmpty() && StringUtils.hasText(rawText)) {
             effectTypes = inferBloomEffectTypes(rawText);
         }
@@ -7363,33 +7320,33 @@ public class MatchEffectService {
         }
 
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("type", effectTextParser.normalizeEffectType(readText(collabNode, "type")));
+        payload.put("type", effectTextParser.normalizeEffectType(readText(structuredNode, "type")));
         payload.put("effects", effectTypes);
         if (StringUtils.hasText(rawText)) {
             payload.put("rawText", rawText);
         }
-        if (collabNode.has("searchCriteria")) {
-            payload.put("searchCriteria", collabNode.get("searchCriteria"));
+        if (structuredNode.has("searchCriteria")) {
+            payload.put("searchCriteria", structuredNode.get("searchCriteria"));
         }
-        if (collabNode.has("value")) {
-            payload.put("value", collabNode.get("value").asInt());
+        if (structuredNode.has("value")) {
+            payload.put("value", structuredNode.get("value").asInt());
         }
-        if (collabNode.has("cards")) {
-            payload.put("cards", collabNode.get("cards").asInt());
+        if (structuredNode.has("cards")) {
+            payload.put("cards", structuredNode.get("cards").asInt());
         }
-        if (collabNode.has("amount")) {
-            payload.put("amount", collabNode.get("amount").asInt());
+        if (structuredNode.has("amount")) {
+            payload.put("amount", structuredNode.get("amount").asInt());
         }
-        if (collabNode.has("diceCondition")) {
-            payload.put("diceCondition", readText(collabNode, "diceCondition"));
+        if (structuredNode.has("diceCondition")) {
+            payload.put("diceCondition", readText(structuredNode, "diceCondition"));
         }
-        if (collabNode.has("effectDiceConditions")) {
-            payload.put("effectDiceConditions", collabNode.get("effectDiceConditions"));
+        if (structuredNode.has("effectDiceConditions")) {
+            payload.put("effectDiceConditions", structuredNode.get("effectDiceConditions"));
         }
 
         Integer diceRoll = null;
-        if (collabNode.has("diceCondition") || collabNode.has("effectDiceConditions")) {
-            diceRoll = resolveDiceRoll(collabNode);
+        if (structuredNode.has("diceCondition") || structuredNode.has("effectDiceConditions")) {
+            diceRoll = resolveDiceRoll(structuredNode);
             payload.put("diceRoll", diceRoll);
         }
         return new BloomEffectPlan(true, effectTypes, objectMapper.valueToTree(payload), rawText, diceRoll);
