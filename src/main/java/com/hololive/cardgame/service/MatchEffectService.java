@@ -110,6 +110,7 @@ public class MatchEffectService {
     private final MatchGiftTriggerConditionService giftTriggerConditionService;
     private final MatchGiftTriggerContextService giftTriggerContextService;
     private final PassiveGiftTriggerActionWriter passiveGiftTriggerActionWriter;
+    private final GiftTurnUsageReader giftTurnUsageReader;
 
     /**
      * 效果結算服務建構子。
@@ -146,6 +147,7 @@ public class MatchEffectService {
             objectMapper,
             effectTextParser
         );
+        this.giftTurnUsageReader = new GiftTurnUsageReader(jdbcTemplate);
     }
 
     /**
@@ -11385,26 +11387,7 @@ public class MatchEffectService {
      * 檢查同一張 Gift 是否在本回合已觸發過（turn once）。
      */
     boolean isGiftAlreadyUsedThisTurn(Long matchId, Long userId, int turnNumber, Long holderHolomemId) {
-        if (matchId == null || userId == null || turnNumber <= 0 || holderHolomemId == null || holderHolomemId <= 0) {
-            return false;
-        }
-        Integer used = jdbcTemplate.query(
-            """
-            SELECT COUNT(*)
-            FROM match_actions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND turn_number = ?
-              AND action_type = 'GIFT_TRIGGER'
-              AND payload ->> 'giftHolderHolomemId' = ?
-            """,
-            rs -> rs.next() ? rs.getInt(1) : 0,
-            matchId,
-            userId,
-            turnNumber,
-            holderHolomemId.toString()
-        );
-        return used != null && used > 0;
+        return giftTurnUsageReader.isGiftAlreadyUsedThisTurn(matchId, userId, turnNumber, holderHolomemId);
     }
 
     /**
