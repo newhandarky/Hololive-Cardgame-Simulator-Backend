@@ -93,6 +93,7 @@ public class MatchActionService {
     private final SupportOshiEffectPayloadBuilder supportOshiEffectPayloadBuilder;
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
     private final TriggerEffectConfirmPayloadBuilder triggerEffectConfirmPayloadBuilder;
+    private final SendCheerInteractionPayloadBuilder sendCheerInteractionPayloadBuilder;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -213,6 +214,7 @@ public class MatchActionService {
         this.supportOshiEffectPayloadBuilder = new SupportOshiEffectPayloadBuilder();
         this.interactionConfirmedPayloadBuilder = new InteractionConfirmedPayloadBuilder();
         this.triggerEffectConfirmPayloadBuilder = new TriggerEffectConfirmPayloadBuilder();
+        this.sendCheerInteractionPayloadBuilder = new SendCheerInteractionPayloadBuilder();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -1213,13 +1215,13 @@ public class MatchActionService {
         touchUpdatedAt(context.match);
         matchRepository.saveAndFlush(context.match);
 
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("decisionId", pending.decisionId());
-        payload.put("interactionType", INTERACTION_TYPE_SEND_CHEER);
-        payload.put("sourceActionType", pending.sourceActionType());
-        payload.put("sourceCardInstanceId", sourceCardInstanceId);
-        payload.put("sourceCardId", cheerCardId);
-        payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
+        Map<String, Object> payload = sendCheerInteractionPayloadBuilder.buildInteractionConfirmedPayload(
+            pending.decisionId(),
+            pending.sourceActionType(),
+            sourceCardInstanceId,
+            cheerCardId,
+            targetHolomemCardInstanceId
+        );
         if (ACTION_TYPE_TURN_CHEER.equals(pending.sourceActionType())) {
             List<Map<String, Object>> mainStepGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnMainStep(
                 matchId,
@@ -1247,10 +1249,11 @@ public class MatchActionService {
         if (!ACTION_TYPE_TURN_CHEER.equals(pending.sourceActionType())) {
             return;
         }
-        Map<String, Object> turnCheerPayload = new LinkedHashMap<>();
-        turnCheerPayload.put("sourceCardInstanceId", sourceCardInstanceId);
-        turnCheerPayload.put("sourceCardId", cheerCardId);
-        turnCheerPayload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
+        Map<String, Object> turnCheerPayload = sendCheerInteractionPayloadBuilder.buildTurnCheerActionPayload(
+            sourceCardInstanceId,
+            cheerCardId,
+            targetHolomemCardInstanceId
+        );
         appendAction(
             context.match,
             userId,
