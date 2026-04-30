@@ -393,9 +393,7 @@ public class MatchActionService {
             target
         );
 
-        context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
+        transitionMatchToMainAndSave(context.match);
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
@@ -584,9 +582,7 @@ public class MatchActionService {
                 supportType
             );
 
-            context.match.setCurrentPhase(MatchPhase.MAIN.name());
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
+            transitionMatchToMainAndSave(context.match);
 
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("cardInstanceId", cardInstanceId);
@@ -672,9 +668,7 @@ public class MatchActionService {
                 throw new IllegalStateException("建立效果選擇決策失敗");
             }
 
-            context.match.setCurrentPhase(MatchPhase.MAIN.name());
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
+            transitionMatchToMainAndSave(context.match);
 
             Map<String, Object> pendingPayload = supportOshiEffectPayloadBuilder.buildSupportSelectionPendingPayload(
                 decisionId,
@@ -703,9 +697,7 @@ public class MatchActionService {
             true
         );
 
-        context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
+        transitionMatchToMainAndSave(context.match);
 
         Map<String, Object> payload = supportOshiEffectPayloadBuilder.buildPlaySupportEffectPayload(
             cardInstanceId,
@@ -905,9 +897,7 @@ public class MatchActionService {
         }
         markDecisionResolved(pending.decisionId());
 
-        context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
+        transitionMatchToMainAndSave(context.match);
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("decisionId", pending.decisionId());
@@ -932,9 +922,7 @@ public class MatchActionService {
     ) {
         markDecisionResolved(pending.decisionId());
 
-        context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
+        transitionMatchToMainAndSave(context.match);
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("decisionId", pending.decisionId());
@@ -970,9 +958,7 @@ public class MatchActionService {
         }
 
         markDecisionResolved(pending.decisionId());
-        context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
+        transitionMatchToMainAndSave(context.match);
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("decisionId", pending.decisionId());
@@ -1018,9 +1004,7 @@ public class MatchActionService {
         );
         markDecisionResolved(pending.decisionId());
 
-        context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
+        transitionMatchToMainAndSave(context.match);
 
         String sourceActionType = normalizeZone(pending.sourceActionType());
         String resolvedActionType = ACTION_TYPE_USE_OSHI_SKILL.equals(sourceActionType)
@@ -1917,9 +1901,7 @@ public class MatchActionService {
             targetHolomemCardInstanceId,
             true
         );
-        context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
+        transitionMatchToMainAndSave(context.match);
 
         Map<String, Object> payload = supportOshiEffectPayloadBuilder.buildOshiSkillEffectPayload(
             requestedSkillType,
@@ -2128,9 +2110,7 @@ public class MatchActionService {
             );
         }
 
-        context.match.setCurrentPhase(MatchPhase.MAIN.name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
+        transitionMatchToMainAndSave(context.match);
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("sourceHolomemCardInstanceId", sourceHolomemCardInstanceId);
@@ -6270,6 +6250,12 @@ public class MatchActionService {
      */
     private void touchUpdatedAt(MatchEntity match) {
         matchTimestampService.touchUpdatedAt(match);
+    }
+
+    private void transitionMatchToMainAndSave(MatchEntity match) {
+        match.setCurrentPhase(MatchPhase.MAIN.name());
+        touchUpdatedAt(match);
+        matchRepository.saveAndFlush(match);
     }
 
     private record ActionContext(
