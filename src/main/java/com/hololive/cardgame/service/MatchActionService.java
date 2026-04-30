@@ -5149,13 +5149,6 @@ public class MatchActionService {
     }
 
     /**
-     * 建立 Gift 觸發待確認摘要（不立即執行效果）。
-     */
-    private Map<String, Object> buildGiftTriggeredEffectDeferredSummary(List<Map<String, Object>> giftTriggeredEffects) {
-        return giftTriggeredEffectDeferredSummaryBuilder.buildGiftTriggeredEffectDeferredSummary(giftTriggeredEffects);
-    }
-
-    /**
      * 正規化決策中的 placement 欄位（例如 TOP/BOTTOM）。
      */
     private String normalizeDecisionPlacement(String placement) {
