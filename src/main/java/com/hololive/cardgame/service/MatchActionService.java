@@ -87,6 +87,7 @@ public class MatchActionService {
     private final GiftTriggerInteractionCardsBuilder giftTriggerInteractionCardsBuilder;
     private final GiftPendingDecisionCreator giftPendingDecisionCreator;
     private final SourcelessGiftPendingDecisionCreator sourcelessGiftPendingDecisionCreator;
+    private final BatonTouchGiftFollowupCreator batonTouchGiftFollowupCreator;
     private final AdvancePhaseFollowupCreator advancePhaseFollowupCreator;
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
     private final EffectFollowupDecisionResolver effectFollowupDecisionResolver;
@@ -201,6 +202,11 @@ public class MatchActionService {
             followupTriggerConfirmPendingDecisionWriter
         );
         this.sourcelessGiftPendingDecisionCreator = new SourcelessGiftPendingDecisionCreator(
+            giftPendingDecisionCreator
+        );
+        this.batonTouchGiftFollowupCreator = new BatonTouchGiftFollowupCreator(
+            matchGiftTriggerService,
+            giftTriggeredEffectDeferredSummaryBuilder,
             giftPendingDecisionCreator
         );
         this.advancePhaseFollowupCreator = new AdvancePhaseFollowupCreator(
@@ -1472,24 +1478,6 @@ public class MatchActionService {
         };
     }
 
-    private FollowupInteractionDecision createBatonTouchGiftTriggerDecision(
-        Long matchId,
-        Long userId,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        List<Map<String, Object>> giftEffects,
-        int turnNumber
-    ) {
-        return giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
-            matchId,
-            userId,
-            sourceCardInstanceId,
-            sourceCardId,
-            giftEffects,
-            turnNumber
-        );
-    }
-
     /**
      * 推進開場設置流程。
      */
@@ -1985,25 +1973,13 @@ public class MatchActionService {
             throw new IllegalStateException("バトンタッチ 移動失敗，請重新整理後重試");
         }
 
-        List<Map<String, Object>> batonTouchGiftTriggeredEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnBatonTouchBack(
+        BatonTouchGiftFollowup batonTouchGiftFollowup = batonTouchGiftFollowupCreator.create(
             matchId,
             userId,
             targetCenterHolomemCardInstanceId,
+            asString(target.get("card_id")),
             context.turnNumber
         );
-        Map<String, Object> batonTouchGiftEffectSummary = null;
-        FollowupInteractionDecision batonTouchGiftDecision = null;
-        if (!batonTouchGiftTriggeredEffects.isEmpty()) {
-            batonTouchGiftEffectSummary = buildGiftTriggeredEffectDeferredSummary(batonTouchGiftTriggeredEffects);
-            batonTouchGiftDecision = createBatonTouchGiftTriggerDecision(
-                matchId,
-                userId,
-                targetCenterHolomemCardInstanceId,
-                asString(target.get("card_id")),
-                batonTouchGiftTriggeredEffects,
-                context.turnNumber
-            );
-        }
 
         transitionMatchToMainAndSave(context.match);
 
@@ -2019,9 +1995,9 @@ public class MatchActionService {
         payload.put("requiredColorless", requiredColorless);
         payload.put("modifierColorless", batonTouchModifier);
         payload.put("cost", costSummary);
-        if (batonTouchGiftEffectSummary != null) {
-            payload.put("batonTouchGiftEffect", batonTouchGiftEffectSummary);
-            followupDecisionPayloadAppender.append(payload, batonTouchGiftDecision);
+        if (batonTouchGiftFollowup.hasGiftEffects()) {
+            payload.put("batonTouchGiftEffect", batonTouchGiftFollowup.giftEffectSummary());
+            followupDecisionPayloadAppender.append(payload, batonTouchGiftFollowup.decision());
         }
 
         appendAction(
