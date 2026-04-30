@@ -91,6 +91,7 @@ public class MatchActionService {
     private final EffectFollowupDecisionResolver effectFollowupDecisionResolver;
     private final FollowupDecisionPayloadAppender followupDecisionPayloadAppender;
     private final SupportOshiEffectPayloadBuilder supportOshiEffectPayloadBuilder;
+    private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -209,6 +210,7 @@ public class MatchActionService {
         );
         this.followupDecisionPayloadAppender = new FollowupDecisionPayloadAppender();
         this.supportOshiEffectPayloadBuilder = new SupportOshiEffectPayloadBuilder();
+        this.interactionConfirmedPayloadBuilder = new InteractionConfirmedPayloadBuilder();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -899,12 +901,13 @@ public class MatchActionService {
 
         transitionMatchToMainAndSave(context.match);
 
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("decisionId", pending.decisionId());
-        payload.put("decisionType", DECISION_TYPE_LOOK_TOP_DECK);
-        payload.put("sourceActionType", pending.sourceActionType());
-        payload.put("lookedCardInstanceId", lookedCardInstanceId);
-        payload.put("placement", keepOnTop ? "TOP" : "BOTTOM");
+        Map<String, Object> payload = interactionConfirmedPayloadBuilder.buildLookTopDeckPayload(
+            pending.decisionId(),
+            DECISION_TYPE_LOOK_TOP_DECK,
+            pending.sourceActionType(),
+            lookedCardInstanceId,
+            keepOnTop
+        );
         appendAction(
             context.match,
             userId,
@@ -924,11 +927,12 @@ public class MatchActionService {
 
         transitionMatchToMainAndSave(context.match);
 
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("decisionId", pending.decisionId());
-        payload.put("decisionType", decisionType);
-        payload.put("sourceActionType", pending.sourceActionType());
-        payload.put("lookedCardCount", pending.candidateCardInstanceIds().size());
+        Map<String, Object> payload = interactionConfirmedPayloadBuilder.buildLookZonePayload(
+            pending.decisionId(),
+            decisionType,
+            pending.sourceActionType(),
+            pending.candidateCardInstanceIds().size()
+        );
         appendAction(
             context.match,
             userId,
@@ -960,11 +964,12 @@ public class MatchActionService {
         markDecisionResolved(pending.decisionId());
         transitionMatchToMainAndSave(context.match);
 
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("decisionId", pending.decisionId());
-        payload.put("decisionType", DECISION_TYPE_REORDER_DECK_BOTTOM);
-        payload.put("sourceActionType", pending.sourceActionType());
-        payload.put("orderedCardInstanceIds", orderedCardInstanceIds);
+        Map<String, Object> payload = interactionConfirmedPayloadBuilder.buildReorderDeckBottomPayload(
+            pending.decisionId(),
+            DECISION_TYPE_REORDER_DECK_BOTTOM,
+            pending.sourceActionType(),
+            orderedCardInstanceIds
+        );
         appendAction(
             context.match,
             userId,
