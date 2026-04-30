@@ -676,15 +676,12 @@ public class MatchActionService {
             touchUpdatedAt(context.match);
             matchRepository.saveAndFlush(context.match);
 
-            Map<String, Object> pendingPayload = new LinkedHashMap<>();
-            pendingPayload.put("decisionId", decisionId);
-            pendingPayload.put("decisionType", SUPPORT_DECISION_TYPE_CARD_SELECTION);
-            pendingPayload.put("cardInstanceId", cardInstanceId);
-            pendingPayload.put("cardId", cardId);
-            pendingPayload.put("effectType", decisionPlan.effectType());
-            pendingPayload.put("candidateCount", decisionPlan.candidates().size());
-            pendingPayload.put("minSelect", decisionPlan.minSelect());
-            pendingPayload.put("maxSelect", decisionPlan.maxSelect());
+            Map<String, Object> pendingPayload = supportOshiEffectPayloadBuilder.buildSupportSelectionPendingPayload(
+                decisionId,
+                cardInstanceId,
+                cardId,
+                decisionPlan
+            );
             appendAction(
                 context.match,
                 userId,
@@ -1890,19 +1887,16 @@ public class MatchActionService {
             if (decisionId == null) {
                 throw new IllegalStateException("建立 OSHI 技能決策失敗");
             }
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("decisionId", decisionId);
-            payload.put("decisionType", SUPPORT_DECISION_TYPE_CARD_SELECTION);
-            payload.put("skillType", requestedSkillType);
-            payload.put("skillName", skillName);
-            payload.put("oshiCardInstanceId", oshiCardInstanceId);
-            payload.put("oshiCardId", oshiCardId);
-            payload.put("effectType", decisionPlan.effectType());
-            payload.put("holopowerCost", holopowerCost);
-            payload.put("holopowerPayment", holopowerPayment);
-            payload.put("candidateCount", decisionPlan.candidates().size());
-            payload.put("minSelect", decisionPlan.minSelect());
-            payload.put("maxSelect", decisionPlan.maxSelect());
+            Map<String, Object> payload = supportOshiEffectPayloadBuilder.buildOshiSkillSelectionPendingPayload(
+                decisionId,
+                requestedSkillType,
+                skillName,
+                oshiCardInstanceId,
+                oshiCardId,
+                holopowerCost,
+                holopowerPayment,
+                decisionPlan
+            );
             appendAction(
                 context.match,
                 userId,

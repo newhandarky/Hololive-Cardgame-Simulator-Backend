@@ -11,6 +11,59 @@ class SupportOshiEffectPayloadBuilderTest {
     private final SupportOshiEffectPayloadBuilder builder = new SupportOshiEffectPayloadBuilder();
 
     @Test
+    void buildSupportSelectionPendingPayloadShouldKeepSupportPendingFields() {
+        MatchEffectService.SupportDecisionPlan decisionPlan = decisionPlan();
+
+        Map<String, Object> payload = builder.buildSupportSelectionPendingPayload(
+            901L,
+            501L,
+            "hBP01-001",
+            decisionPlan
+        );
+
+        assertThat(payload)
+            .containsEntry("decisionId", 901L)
+            .containsEntry("decisionType", "CARD_SELECTION")
+            .containsEntry("cardInstanceId", 501L)
+            .containsEntry("cardId", "hBP01-001")
+            .containsEntry("effectType", "LOOK_TOP_DECK")
+            .containsEntry("candidateCount", 2)
+            .containsEntry("minSelect", 1)
+            .containsEntry("maxSelect", 2);
+    }
+
+    @Test
+    void buildOshiSkillSelectionPendingPayloadShouldKeepSkillPendingFields() {
+        MatchEffectService.SupportDecisionPlan decisionPlan = decisionPlan();
+        Map<String, Object> holopowerPayment = Map.of("paid", List.of(301L));
+
+        Map<String, Object> payload = builder.buildOshiSkillSelectionPendingPayload(
+            902L,
+            "SP",
+            "skill",
+            502L,
+            "hBP01-002",
+            2,
+            holopowerPayment,
+            decisionPlan
+        );
+
+        assertThat(payload)
+            .containsEntry("decisionId", 902L)
+            .containsEntry("decisionType", "CARD_SELECTION")
+            .containsEntry("skillType", "SP")
+            .containsEntry("skillName", "skill")
+            .containsEntry("oshiCardInstanceId", 502L)
+            .containsEntry("oshiCardId", "hBP01-002")
+            .containsEntry("holopowerCost", 2)
+            .containsEntry("holopowerPayment", holopowerPayment)
+            .containsEntry("effectType", "LOOK_TOP_DECK")
+            .containsEntry("candidateCount", 2)
+            .containsEntry("minSelect", 1)
+            .containsEntry("maxSelect", 2);
+    }
+
+    @Test
     void buildPlaySupportEffectPayloadShouldKeepSupportFields() {
         Map<String, Object> effectSummary = Map.of("effectType", "DRAW");
 
@@ -112,5 +165,17 @@ class SupportOshiEffectPayloadBuilderTest {
             .containsEntry("targetHolomemCardInstanceId", 703L)
             .containsEntry("selectedCardInstanceIds", List.of(803L))
             .containsEntry("effect", effectSummary);
+    }
+
+    private MatchEffectService.SupportDecisionPlan decisionPlan() {
+        return new MatchEffectService.SupportDecisionPlan(
+            "LOOK_TOP_DECK",
+            1,
+            2,
+            List.of(
+                new MatchEffectService.DecisionCandidate(801L, "hBP02-001", "card 1", "holomem", "Debut", "DECK"),
+                new MatchEffectService.DecisionCandidate(802L, "hBP02-002", "card 2", "holomem", "Debut", "DECK")
+            )
+        );
     }
 }
