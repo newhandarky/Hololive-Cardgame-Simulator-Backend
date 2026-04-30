@@ -1110,21 +1110,7 @@ public class MatchActionService {
         boolean requiresTurnCheer = canPerformTurnCheerAction(matchId, userId);
         Map<String, Object> payload = new LinkedHashMap<>();
         if (!requiresTurnCheer) {
-            List<Map<String, Object>> mainStepGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnMainStep(
-                matchId,
-                userId,
-                context.turnNumber
-            );
-            payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
-            if (!mainStepGiftEffects.isEmpty()) {
-                FollowupInteractionDecision mainStepGiftDecision = createGiftTriggerDecisionWithoutSourceCard(
-                    matchId,
-                    userId,
-                    context.turnNumber,
-                    mainStepGiftEffects
-                );
-                followupDecisionPayloadAppender.append(payload, mainStepGiftDecision);
-            }
+            appendMainStepGiftFollowupPayload(payload, matchId, userId, context.turnNumber);
         }
         matchTurnLifecycleService.confirmDrawRevealDecision(
             context.match,
@@ -1223,21 +1209,7 @@ public class MatchActionService {
             targetHolomemCardInstanceId
         );
         if (ACTION_TYPE_TURN_CHEER.equals(pending.sourceActionType())) {
-            List<Map<String, Object>> mainStepGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnMainStep(
-                matchId,
-                userId,
-                context.turnNumber
-            );
-            payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
-            if (!mainStepGiftEffects.isEmpty()) {
-                FollowupInteractionDecision mainStepGiftDecision = createGiftTriggerDecisionWithoutSourceCard(
-                    matchId,
-                    userId,
-                    context.turnNumber,
-                    mainStepGiftEffects
-                );
-                followupDecisionPayloadAppender.append(payload, mainStepGiftDecision);
-            }
+            appendMainStepGiftFollowupPayload(payload, matchId, userId, context.turnNumber);
         }
         appendAction(
             context.match,
@@ -1546,6 +1518,30 @@ public class MatchActionService {
             ownDecision,
             opponentDecision
         );
+    }
+
+    private void appendMainStepGiftFollowupPayload(
+        Map<String, Object> payload,
+        Long matchId,
+        Long userId,
+        int turnNumber
+    ) {
+        List<Map<String, Object>> mainStepGiftEffects = matchGiftTriggerService.previewGiftTriggeredEffectsOnOwnMainStep(
+            matchId,
+            userId,
+            turnNumber
+        );
+        payload.put("mainStepGiftEffects", buildGiftTriggeredEffectDeferredSummary(mainStepGiftEffects));
+        if (mainStepGiftEffects.isEmpty()) {
+            return;
+        }
+        FollowupInteractionDecision mainStepGiftDecision = createGiftTriggerDecisionWithoutSourceCard(
+            matchId,
+            userId,
+            turnNumber,
+            mainStepGiftEffects
+        );
+        followupDecisionPayloadAppender.append(payload, mainStepGiftDecision);
     }
 
     private FollowupInteractionDecision createGiftTriggerDecisionWithoutSourceCard(
