@@ -5043,45 +5043,6 @@ public class MatchActionService {
         return pendingDownEventContextExtractor.extractDownEventContext(contextNode);
     }
 
-    private String buildTriggeredEffectConfirmMessage(
-        String sourceActionType,
-        MatchEffectService.TriggeredEffectPreview preview
-    ) {
-        String actionName = "BLOOM".equals(normalizeZone(sourceActionType)) ? "BLOOM" : "連動";
-        String rawText = preview == null ? null : preview.rawText();
-        List<String> effectTypes = preview == null ? List.of() : preview.effectTypes();
-        String effectSummary = effectTypes == null || effectTypes.isEmpty()
-            ? "無可解析效果類型"
-            : String.join("、", effectTypes);
-        if (!StringUtils.hasText(rawText)) {
-            return "是否要執行此 " + actionName + " 特殊效果？\n效果類型：" + effectSummary;
-        }
-        return "是否要執行此 " + actionName + " 特殊效果？\n能力文本：" + rawText + "\n效果類型：" + effectSummary;
-    }
-
-    private Map<String, Object> buildTriggeredEffectDeferredSummary(
-        String sourceActionType,
-        MatchEffectService.TriggeredEffectPreview preview
-    ) {
-        Map<String, Object> summary = new LinkedHashMap<>();
-        String normalizedSourceActionType = normalizeZone(sourceActionType);
-        boolean hasEffect = preview != null && preview.hasEffect();
-        if ("COLLAB".equals(normalizedSourceActionType)) {
-            summary.put("hasCollabEffect", hasEffect);
-        } else {
-            summary.put("hasBloomEffect", hasEffect);
-        }
-        summary.put("deferred", hasEffect);
-        summary.put("requestedEffects", preview == null || preview.effectTypes() == null ? List.of() : preview.effectTypes());
-        summary.put("executedEffects", List.of());
-        summary.put("unsupportedEffects", List.of());
-        summary.put("rawText", preview == null ? null : preview.rawText());
-        if (preview != null && preview.diceRoll() != null) {
-            summary.put("diceRoll", preview.diceRoll());
-        }
-        return summary;
-    }
-
     private <T> T requireAttackStage(Object stageResult, Class<T> type, String stageName) {
         if (type.isInstance(stageResult)) {
             return type.cast(stageResult);
