@@ -32162,6 +32162,157 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
     }
 
     @Test
+    void advancePhaseShouldCreatePerformanceEndGiftConfirmForBothPlayers() {
+        StartedMatchContext context = createStartedMatch("gift-performance-end-both-host", "gift-performance-end-both-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String hostGiftHolderCardId = createMemberCardDefinition(
+            "TGIFT_PERF_END_BOTH_SELF",
+            "自方表演結束 Both Gift",
+            "DEBUT",
+            150,
+            "BLUE",
+            "{\"キーワード\":\"ギフト自己的表演結束 \\n自分のパフォーマンスステップが終了する時、自分のデッキを1枚引く。\"}"
+        );
+        String guestGiftHolderCardId = createMemberCardDefinition(
+            "TGIFT_PERF_END_BOTH_OPP",
+            "對手表演結束 Both Gift",
+            "DEBUT",
+            150,
+            "PURPLE",
+            "{\"キーワード\":\"ギフト對手表演結束 \\n相手のパフォーマンスステップが終了する時、自分のデッキを1枚引く。\"}"
+        );
+
+        Long hostCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        Long guestCenterCardInstanceId = loadFirstCenterCardInstanceId(matchId, guestId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            hostGiftHolderCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            hostGiftHolderCardId,
+            matchId,
+            hostId,
+            hostCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            guestGiftHolderCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            guestGiftHolderCardId,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+
+        jdbcTemplate.update(
+            """
+            UPDATE matches
+            SET turn_number = 2,
+                current_turn_player_id = ?,
+                current_phase = 'MAIN',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            hostId,
+            matchId
+        );
+        entityManager.clear();
+
+        executeRequiredTurnActions(matchId, hostId, hostCenterCardInstanceId);
+        int hostDeckBefore = countZone(matchId, hostId, "DECK");
+        int guestDeckBefore = countZone(matchId, guestId, "DECK");
+
+        matchActionService.advancePhase(matchId, hostId);
+        matchActionService.advancePhase(matchId, hostId);
+
+        String hostPendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(hostPendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"PERFORMANCE_END_SELF\"");
+
+        String guestPendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            guestId
+        );
+        assertThat(guestPendingContextText).containsPattern("\"triggerType\"\\s*:\\s*\"PERFORMANCE_END_OPPONENT\"");
+        assertThat(jdbcTemplate.queryForObject("SELECT current_phase FROM matches WHERE id = ?", String.class, matchId))
+            .isEqualTo("END");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+        resolvePendingInteractionIfExists(matchId, guestId, "TRIGGER_EFFECT_CONFIRM");
+
+        int hostDeckAfterConfirm = countZone(matchId, hostId, "DECK");
+        int guestDeckAfterConfirm = countZone(matchId, guestId, "DECK");
+        assertThat(hostDeckAfterConfirm).isEqualTo(hostDeckBefore - 1);
+        assertThat(guestDeckAfterConfirm).isEqualTo(guestDeckBefore - 1);
+    }
+
+    @Test
     void advancePhaseShouldCreateOpponentPerformanceEndGiftConfirmWhenHolderHpUnchanged() {
         StartedMatchContext context = createStartedMatch("gift-performance-end-hp-host", "gift-performance-end-hp-guest");
         Long matchId = context.matchId();
