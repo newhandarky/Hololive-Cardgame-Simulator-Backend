@@ -86,6 +86,7 @@ public class MatchActionService {
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
     private final GiftTriggerInteractionCardsBuilder giftTriggerInteractionCardsBuilder;
     private final GiftPendingDecisionCreator giftPendingDecisionCreator;
+    private final AdvancePhaseFollowupCreator advancePhaseFollowupCreator;
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
     private final EffectFollowupDecisionResolver effectFollowupDecisionResolver;
     private final FollowupDecisionPayloadAppender followupDecisionPayloadAppender;
@@ -197,6 +198,7 @@ public class MatchActionService {
             giftTriggeredEffectConfirmPendingInputBuilder,
             followupTriggerConfirmPendingDecisionWriter
         );
+        this.advancePhaseFollowupCreator = new AdvancePhaseFollowupCreator(giftPendingDecisionCreator);
         this.attackArtPostTriggerConfirmPendingInputBuilder = new AttackArtPostTriggerConfirmPendingInputBuilder();
         EffectPostTriggerPendingService effectPostTriggerPendingService = new EffectPostTriggerPendingService(
             jdbcTemplate,
@@ -1454,7 +1456,7 @@ public class MatchActionService {
         if (transition == null) {
             return AdvancePhaseFollowup.empty();
         }
-        return createAdvancePhaseFollowup(
+        return advancePhaseFollowupCreator.createAdvancePhaseFollowup(
             matchId,
             userId,
             context.opponentUserId,
@@ -1466,42 +1468,6 @@ public class MatchActionService {
                 context.opponentUserId,
                 context.turnNumber
             )
-        );
-    }
-
-    private AdvancePhaseFollowup createAdvancePhaseFollowup(
-        Long matchId,
-        Long userId,
-        Long opponentUserId,
-        int turnNumber,
-        MatchPhaseAdvanceGiftTransitionService.GiftTransitionPreview transitionPreview
-    ) {
-        if (transitionPreview == null) {
-            return AdvancePhaseFollowup.empty();
-        }
-        List<Map<String, Object>> ownGiftEffects = transitionPreview.ownGiftEffects();
-        FollowupInteractionDecision ownDecision = createGiftTriggerDecisionWithoutSourceCard(
-            matchId,
-            userId,
-            turnNumber,
-            ownGiftEffects
-        );
-
-        List<Map<String, Object>> opponentGiftEffects = transitionPreview.opponentGiftEffects();
-        FollowupInteractionDecision opponentDecision = null;
-        if (opponentUserId != null) {
-            opponentDecision = createGiftTriggerDecisionWithoutSourceCard(
-                matchId,
-                opponentUserId,
-                turnNumber,
-                opponentGiftEffects
-            );
-        }
-        return new AdvancePhaseFollowup(
-            ownGiftEffects,
-            opponentGiftEffects,
-            ownDecision,
-            opponentDecision
         );
     }
 
@@ -6264,17 +6230,6 @@ public class MatchActionService {
 
         private static DrawTurnResult deckedOut() {
             return new DrawTurnResult(null, null, true);
-        }
-    }
-
-    private record AdvancePhaseFollowup(
-        List<Map<String, Object>> ownGiftEffects,
-        List<Map<String, Object>> opponentGiftEffects,
-        FollowupInteractionDecision ownDecision,
-        FollowupInteractionDecision opponentDecision
-    ) {
-        private static AdvancePhaseFollowup empty() {
-            return new AdvancePhaseFollowup(List.of(), List.of(), null, null);
         }
     }
 
