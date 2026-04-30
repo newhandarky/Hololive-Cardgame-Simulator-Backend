@@ -90,6 +90,7 @@ public class MatchActionService {
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
     private final EffectFollowupDecisionResolver effectFollowupDecisionResolver;
     private final FollowupDecisionPayloadAppender followupDecisionPayloadAppender;
+    private final SupportOshiEffectPayloadBuilder supportOshiEffectPayloadBuilder;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -207,6 +208,7 @@ public class MatchActionService {
             followupInteractionPendingDecisionWriter
         );
         this.followupDecisionPayloadAppender = new FollowupDecisionPayloadAppender();
+        this.supportOshiEffectPayloadBuilder = new SupportOshiEffectPayloadBuilder();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -708,13 +710,14 @@ public class MatchActionService {
         touchUpdatedAt(context.match);
         matchRepository.saveAndFlush(context.match);
 
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("cardInstanceId", cardInstanceId);
-        payload.put("cardId", cardId);
-        payload.put("limited", isLimited);
-        payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
-        payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
-        payload.put("effect", effectSummary);
+        Map<String, Object> payload = supportOshiEffectPayloadBuilder.buildPlaySupportEffectPayload(
+            cardInstanceId,
+            cardId,
+            isLimited,
+            targetHolomemCardInstanceId,
+            selectedCardInstanceIds,
+            effectSummary
+        );
         FollowupInteractionDecision followupDecision = effectFollowupDecisionResolver.resolvePostTriggerOrInteraction(
             matchId,
             userId,
@@ -1022,24 +1025,20 @@ public class MatchActionService {
         touchUpdatedAt(context.match);
         matchRepository.saveAndFlush(context.match);
 
-        Map<String, Object> payload = new LinkedHashMap<>();
         String sourceActionType = normalizeZone(pending.sourceActionType());
         String resolvedActionType = ACTION_TYPE_USE_OSHI_SKILL.equals(sourceActionType)
             ? ACTION_TYPE_USE_OSHI_SKILL
             : "PLAY_SUPPORT";
-        payload.put("decisionId", pending.decisionId());
-        payload.put("sourceActionType", sourceActionType);
-        payload.put("targetHolomemCardInstanceId", pending.targetHolomemCardInstanceId());
-        payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
-        payload.put("effect", effectSummary);
-        if (ACTION_TYPE_USE_OSHI_SKILL.equals(sourceActionType)) {
-            payload.put("oshiCardInstanceId", pending.sourceCardInstanceId());
-            payload.put("oshiCardId", pending.sourceCardId());
-        } else {
-            payload.put("cardInstanceId", pending.sourceCardInstanceId());
-            payload.put("cardId", pending.sourceCardId());
-            payload.put("limited", pending.limited());
-        }
+        Map<String, Object> payload = supportOshiEffectPayloadBuilder.buildResolvedSelectionEffectPayload(
+            pending.decisionId(),
+            sourceActionType,
+            pending.sourceCardInstanceId(),
+            pending.sourceCardId(),
+            pending.limited(),
+            pending.targetHolomemCardInstanceId(),
+            selectedCardInstanceIds,
+            effectSummary
+        );
         FollowupInteractionDecision followupDecision = effectFollowupDecisionResolver.resolvePostTriggerOrInteraction(
             matchId,
             userId,
@@ -1928,16 +1927,17 @@ public class MatchActionService {
         touchUpdatedAt(context.match);
         matchRepository.saveAndFlush(context.match);
 
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("skillType", requestedSkillType);
-        payload.put("skillName", skillName);
-        payload.put("oshiCardInstanceId", oshiCardInstanceId);
-        payload.put("oshiCardId", oshiCardId);
-        payload.put("holopowerCost", holopowerCost);
-        payload.put("holopowerPayment", holopowerPayment);
-        payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
-        payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
-        payload.put("effect", effectSummary);
+        Map<String, Object> payload = supportOshiEffectPayloadBuilder.buildOshiSkillEffectPayload(
+            requestedSkillType,
+            skillName,
+            oshiCardInstanceId,
+            oshiCardId,
+            holopowerCost,
+            holopowerPayment,
+            targetHolomemCardInstanceId,
+            selectedCardInstanceIds,
+            effectSummary
+        );
         FollowupInteractionDecision followupDecision = effectFollowupDecisionResolver.resolvePostTriggerOrInteraction(
             matchId,
             userId,
