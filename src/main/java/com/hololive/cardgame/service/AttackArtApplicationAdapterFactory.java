@@ -1,6 +1,5 @@
 package com.hololive.cardgame.service;
 
-import com.hololive.cardgame.model.MatchPhase;
 import com.hololive.cardgame.repository.MatchRepository;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -24,12 +23,10 @@ class AttackArtApplicationAdapterFactory {
     private final AttackEffectSummaryExtractor attackEffectSummaryExtractor;
     private final AttackFinishCheckService attackFinishCheckService;
     private final AttackEffectFollowupService attackEffectFollowupService;
+    private final AttackPerformanceStateUpdater attackPerformanceStateUpdater;
     private final AttackPerformanceAvailabilityService attackPerformanceAvailabilityService;
-    private final MatchTimestampService matchTimestampService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchGiftTriggerService matchGiftTriggerService;
-    private final JdbcTemplate jdbcTemplate;
-    private final MatchRepository matchRepository;
 
     AttackArtApplicationAdapterFactory(
         AttackCostService attackCostService,
@@ -67,12 +64,15 @@ class AttackArtApplicationAdapterFactory {
         this.attackEffectSummaryExtractor = attackEffectSummaryExtractor;
         this.attackFinishCheckService = attackFinishCheckService;
         this.attackEffectFollowupService = attackEffectFollowupService;
+        this.attackPerformanceStateUpdater = new AttackPerformanceStateUpdater(
+            jdbcTemplate,
+            attackPerformanceAvailabilityService,
+            matchTimestampService,
+            matchRepository
+        );
         this.attackPerformanceAvailabilityService = attackPerformanceAvailabilityService;
-        this.matchTimestampService = matchTimestampService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchGiftTriggerService = matchGiftTriggerService;
-        this.jdbcTemplate = jdbcTemplate;
-        this.matchRepository = matchRepository;
     }
 
     AttackArtApplicationService create() {
@@ -615,32 +615,7 @@ class AttackArtApplicationAdapterFactory {
                 AttackApplicationPendingStage.class
             );
 
-            int attackerRested = jdbcTemplate.update(
-                """
-                UPDATE match_holomems
-                SET is_rested = TRUE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND is_rested = FALSE
-                """,
-                context.attackerHolomemId(),
-                context.matchId(),
-                context.attackerUserId()
-            );
-            if (attackerRested != 1) {
-                throw new IllegalStateException("藝能結算失敗，請重新整理後再試");
-            }
-
-            boolean hasNextPerformanceAction = attackPerformanceAvailabilityService.hasAvailableArtAttacker(
-                context.matchId(),
-                context.attackerUserId(),
-                context.turnNumber()
-            );
-            context.match().setCurrentPhase(MatchPhase.PERFORMANCE.name());
-            matchTimestampService.touchUpdatedAt(context.match());
-            matchRepository.saveAndFlush(context.match());
+            boolean hasNextPerformanceAction = attackPerformanceStateUpdater.restAttackerAndSavePerformancePhase(context);
 
             AttackEffectPostDamageResult postDamageResult = postDamageStage.result();
             AttackEffectFollowupResult preDamageResult = preDamageStage.result();
