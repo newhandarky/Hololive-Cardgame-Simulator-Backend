@@ -590,19 +590,13 @@ public class MatchActionService {
 
             transitionMatchToMainAndSave(context.match);
 
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("cardInstanceId", cardInstanceId);
-            payload.put("cardId", cardId);
-            payload.put("limited", isLimited);
-            payload.put("attached", true);
-            payload.put("supportType", supportType);
-            payload.put("targetHolomemCardInstanceId", normalizedTargetHolomemCardInstanceId);
-            payload.put("selectedCardInstanceIds", List.of());
-            payload.put("effect", Map.of(
-                "effectType", "ATTACH_SUPPORT",
-                "applied", true,
-                "note", "附加型 SUPPORT 已掛到 Holomem，持續效果待後續回合/事件觸發"
-            ));
+            Map<String, Object> payload = supportOshiEffectPayloadBuilder.buildAttachSupportPayload(
+                cardInstanceId,
+                cardId,
+                isLimited,
+                supportType,
+                normalizedTargetHolomemCardInstanceId
+            );
             appendAction(
                 context.match,
                 userId,

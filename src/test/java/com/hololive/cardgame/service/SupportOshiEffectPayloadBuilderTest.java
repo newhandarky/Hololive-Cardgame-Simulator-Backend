@@ -86,6 +86,32 @@ class SupportOshiEffectPayloadBuilderTest {
     }
 
     @Test
+    void buildAttachSupportPayloadShouldKeepAttachSupportFields() {
+        Map<String, Object> payload = builder.buildAttachSupportPayload(
+            501L,
+            "hBP01-001",
+            true,
+            "TOOL",
+            701L
+        );
+
+        assertThat(payload)
+            .containsEntry("cardInstanceId", 501L)
+            .containsEntry("cardId", "hBP01-001")
+            .containsEntry("limited", true)
+            .containsEntry("attached", true)
+            .containsEntry("supportType", "TOOL")
+            .containsEntry("targetHolomemCardInstanceId", 701L)
+            .containsEntry("selectedCardInstanceIds", List.of());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> effect = (Map<String, Object>) payload.get("effect");
+        assertThat(effect)
+            .containsEntry("effectType", "ATTACH_SUPPORT")
+            .containsEntry("applied", true)
+            .containsEntry("note", "附加型 SUPPORT 已掛到 Holomem，持續效果待後續回合/事件觸發");
+    }
+
+    @Test
     void buildResolvedSelectionEffectPayloadShouldUseOshiFieldsForOshiSource() {
         Map<String, Object> effectSummary = Map.of("effectType", "LOOK_TOP_DECK");
 

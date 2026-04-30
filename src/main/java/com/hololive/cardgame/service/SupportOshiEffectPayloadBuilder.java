@@ -59,6 +59,29 @@ class SupportOshiEffectPayloadBuilder {
         return payload;
     }
 
+    Map<String, Object> buildAttachSupportPayload(
+        Long cardInstanceId,
+        String cardId,
+        boolean limited,
+        String supportType,
+        Long targetHolomemCardInstanceId
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("cardInstanceId", cardInstanceId);
+        payload.put("cardId", cardId);
+        payload.put("limited", limited);
+        payload.put("attached", true);
+        payload.put("supportType", supportType);
+        payload.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
+        payload.put("selectedCardInstanceIds", List.of());
+        payload.put("effect", Map.of(
+            "effectType", "ATTACH_SUPPORT",
+            "applied", true,
+            "note", "附加型 SUPPORT 已掛到 Holomem，持續效果待後續回合/事件觸發"
+        ));
+        return payload;
+    }
+
     Map<String, Object> buildResolvedSelectionEffectPayload(
         Long decisionId,
         String sourceActionType,
