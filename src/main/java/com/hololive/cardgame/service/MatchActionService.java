@@ -95,6 +95,7 @@ public class MatchActionService {
     private final TriggerEffectConfirmPayloadBuilder triggerEffectConfirmPayloadBuilder;
     private final SendCheerInteractionPayloadBuilder sendCheerInteractionPayloadBuilder;
     private final PlayCardActionLogPayloadBuilder playCardActionLogPayloadBuilder;
+    private final PlayCardMatchPhaseFinalizer playCardMatchPhaseFinalizer;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -249,6 +250,7 @@ public class MatchActionService {
         this.attackPayloadJsonService = new AttackPayloadJsonService(objectMapper);
         this.attackEffectSummaryExtractor = new AttackEffectSummaryExtractor();
         this.matchTimestampService = new MatchTimestampService();
+        this.playCardMatchPhaseFinalizer = new PlayCardMatchPhaseFinalizer(this.matchTimestampService, matchRepository);
         this.attackPerformanceAvailabilityService = new AttackPerformanceAvailabilityService(jdbcTemplate);
         this.attackFinishCheckService = new AttackFinishCheckService(
             this::evaluateCardEffectMatchFinish,
@@ -324,9 +326,7 @@ public class MatchActionService {
         PlayCardValidationContext validationContext = playCardApplicationService.validate(action);
         PlayCardResolutionResult resolutionResult = playCardApplicationService.resolveState(action, validationContext);
 
-        resolutionResult.match().setCurrentPhase(openingReset ? MatchPhase.RESET.name() : MatchPhase.MAIN.name());
-        touchUpdatedAt(resolutionResult.match());
-        matchRepository.saveAndFlush(resolutionResult.match());
+        playCardMatchPhaseFinalizer.finalizePhase(resolutionResult);
 
         PlayCardEffectResolution effectResolution = playCardEffectResolutionService.resolve(action, resolutionResult);
         playCardApplicationService.dispatchResolvedEvents(action, resolutionResult, effectResolution);
