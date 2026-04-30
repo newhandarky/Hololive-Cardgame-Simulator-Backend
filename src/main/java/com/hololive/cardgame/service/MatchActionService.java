@@ -84,7 +84,6 @@ public class MatchActionService {
     private final FollowupTriggerConfirmPendingDecisionWriter followupTriggerConfirmPendingDecisionWriter;
     private final FollowupTriggerConfirmPendingDecisionCreator followupTriggerConfirmPendingDecisionCreator;
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
-    private final GiftTriggeredEffectConfirmPendingInputBuilder giftTriggeredEffectConfirmPendingInputBuilder;
     private final GiftTriggerInteractionCardsBuilder giftTriggerInteractionCardsBuilder;
     private final GiftPendingDecisionCreator giftPendingDecisionCreator;
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
@@ -189,7 +188,8 @@ public class MatchActionService {
             followupTriggerConfirmPendingDecisionWriter
         );
         this.giftTriggeredEffectDeferredSummaryBuilder = new GiftTriggeredEffectDeferredSummaryBuilder();
-        this.giftTriggeredEffectConfirmPendingInputBuilder = new GiftTriggeredEffectConfirmPendingInputBuilder();
+        GiftTriggeredEffectConfirmPendingInputBuilder giftTriggeredEffectConfirmPendingInputBuilder =
+            new GiftTriggeredEffectConfirmPendingInputBuilder();
         this.giftTriggerInteractionCardsBuilder = new GiftTriggerInteractionCardsBuilder(jdbcTemplate);
         this.giftPendingDecisionCreator = new GiftPendingDecisionCreator(
             giftTriggerInteractionCardsBuilder,
@@ -245,7 +245,7 @@ public class MatchActionService {
         this.attackPostTriggerPendingService = new AttackPostTriggerPendingService(new AttackArtPendingDecisionCreator(
             this.giftTriggerInteractionCardsBuilder,
             this.attackArtPostTriggerConfirmPendingInputBuilder,
-            this.giftTriggeredEffectConfirmPendingInputBuilder,
+            giftTriggeredEffectConfirmPendingInputBuilder,
             this.followupTriggerConfirmPendingDecisionWriter,
             this.attackPendingDecisionConversionService
         ));
