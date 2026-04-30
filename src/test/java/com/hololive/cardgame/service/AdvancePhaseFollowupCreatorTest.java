@@ -15,10 +15,12 @@ class AdvancePhaseFollowupCreatorTest {
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService = mock(
         MatchPhaseAdvanceGiftTransitionService.class
     );
-    private final GiftPendingDecisionCreator giftPendingDecisionCreator = mock(GiftPendingDecisionCreator.class);
+    private final SourcelessGiftPendingDecisionCreator sourcelessGiftPendingDecisionCreator = mock(
+        SourcelessGiftPendingDecisionCreator.class
+    );
     private final AdvancePhaseFollowupCreator creator = new AdvancePhaseFollowupCreator(
         matchPhaseAdvanceGiftTransitionService,
-        giftPendingDecisionCreator
+        sourcelessGiftPendingDecisionCreator
     );
 
     @Test
@@ -35,7 +37,7 @@ class AdvancePhaseFollowupCreatorTest {
         assertThat(followup.opponentGiftEffects()).isEmpty();
         assertThat(followup.ownDecision()).isNull();
         assertThat(followup.opponentDecision()).isNull();
-        verifyNoInteractions(matchPhaseAdvanceGiftTransitionService, giftPendingDecisionCreator);
+        verifyNoInteractions(matchPhaseAdvanceGiftTransitionService, sourcelessGiftPendingDecisionCreator);
     }
 
     @Test
@@ -53,19 +55,15 @@ class AdvancePhaseFollowupCreatorTest {
             20L,
             3
         )).thenReturn(new MatchPhaseAdvanceGiftTransitionService.GiftTransitionPreview(ownGiftEffects, opponentGiftEffects));
-        when(giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
+        when(sourcelessGiftPendingDecisionCreator.create(
             100L,
             10L,
-            null,
-            null,
             ownGiftEffects,
             3
         )).thenReturn(ownDecision);
-        when(giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
+        when(sourcelessGiftPendingDecisionCreator.create(
             100L,
             20L,
-            null,
-            null,
             opponentGiftEffects,
             3
         )).thenReturn(opponentDecision);
@@ -105,7 +103,7 @@ class AdvancePhaseFollowupCreatorTest {
         assertThat(followup.opponentGiftEffects()).isEmpty();
         assertThat(followup.ownDecision()).isNull();
         assertThat(followup.opponentDecision()).isNull();
-        verifyNoInteractions(giftPendingDecisionCreator);
+        verifyNoInteractions(sourcelessGiftPendingDecisionCreator);
     }
 
     @Test
@@ -113,11 +111,9 @@ class AdvancePhaseFollowupCreatorTest {
         List<Map<String, Object>> ownGiftEffects = List.of(giftTrigger("PERFORMANCE_START_SELF", 701L));
         List<Map<String, Object>> opponentGiftEffects = List.of();
         FollowupInteractionDecision ownDecision = new FollowupInteractionDecision(501L, "TRIGGER_EFFECT_CONFIRM");
-        when(giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
+        when(sourcelessGiftPendingDecisionCreator.create(
             100L,
             10L,
-            null,
-            null,
             ownGiftEffects,
             3
         )).thenReturn(ownDecision);
@@ -134,11 +130,9 @@ class AdvancePhaseFollowupCreatorTest {
         assertThat(followup.opponentGiftEffects()).isEqualTo(opponentGiftEffects);
         assertThat(followup.ownDecision()).isEqualTo(ownDecision);
         assertThat(followup.opponentDecision()).isNull();
-        verify(giftPendingDecisionCreator).createWithGiftTriggerInteractionCards(
+        verify(sourcelessGiftPendingDecisionCreator).create(
             100L,
             10L,
-            null,
-            null,
             ownGiftEffects,
             3
         );
@@ -150,19 +144,15 @@ class AdvancePhaseFollowupCreatorTest {
         List<Map<String, Object>> opponentGiftEffects = List.of(giftTrigger("PERFORMANCE_START_OPPONENT", 801L));
         FollowupInteractionDecision ownDecision = new FollowupInteractionDecision(501L, "TRIGGER_EFFECT_CONFIRM");
         FollowupInteractionDecision opponentDecision = new FollowupInteractionDecision(502L, "TRIGGER_EFFECT_CONFIRM");
-        when(giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
+        when(sourcelessGiftPendingDecisionCreator.create(
             100L,
             10L,
-            null,
-            null,
             ownGiftEffects,
             3
         )).thenReturn(ownDecision);
-        when(giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
+        when(sourcelessGiftPendingDecisionCreator.create(
             100L,
             20L,
-            null,
-            null,
             opponentGiftEffects,
             3
         )).thenReturn(opponentDecision);
@@ -179,11 +169,9 @@ class AdvancePhaseFollowupCreatorTest {
         assertThat(followup.opponentGiftEffects()).isEqualTo(opponentGiftEffects);
         assertThat(followup.ownDecision()).isEqualTo(ownDecision);
         assertThat(followup.opponentDecision()).isEqualTo(opponentDecision);
-        verify(giftPendingDecisionCreator).createWithGiftTriggerInteractionCards(
+        verify(sourcelessGiftPendingDecisionCreator).create(
             100L,
             20L,
-            null,
-            null,
             opponentGiftEffects,
             3
         );

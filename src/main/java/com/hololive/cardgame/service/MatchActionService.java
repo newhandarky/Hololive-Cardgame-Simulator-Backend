@@ -86,6 +86,7 @@ public class MatchActionService {
     private final GiftTriggeredEffectDeferredSummaryBuilder giftTriggeredEffectDeferredSummaryBuilder;
     private final GiftTriggerInteractionCardsBuilder giftTriggerInteractionCardsBuilder;
     private final GiftPendingDecisionCreator giftPendingDecisionCreator;
+    private final SourcelessGiftPendingDecisionCreator sourcelessGiftPendingDecisionCreator;
     private final AdvancePhaseFollowupCreator advancePhaseFollowupCreator;
     private final AttackArtPostTriggerConfirmPendingInputBuilder attackArtPostTriggerConfirmPendingInputBuilder;
     private final EffectFollowupDecisionResolver effectFollowupDecisionResolver;
@@ -198,9 +199,12 @@ public class MatchActionService {
             giftTriggeredEffectConfirmPendingInputBuilder,
             followupTriggerConfirmPendingDecisionWriter
         );
+        this.sourcelessGiftPendingDecisionCreator = new SourcelessGiftPendingDecisionCreator(
+            giftPendingDecisionCreator
+        );
         this.advancePhaseFollowupCreator = new AdvancePhaseFollowupCreator(
             matchPhaseAdvanceGiftTransitionService,
-            giftPendingDecisionCreator
+            sourcelessGiftPendingDecisionCreator
         );
         this.attackArtPostTriggerConfirmPendingInputBuilder = new AttackArtPostTriggerConfirmPendingInputBuilder();
         EffectPostTriggerPendingService effectPostTriggerPendingService = new EffectPostTriggerPendingService(
@@ -1476,29 +1480,13 @@ public class MatchActionService {
         if (mainStepGiftEffects.isEmpty()) {
             return;
         }
-        FollowupInteractionDecision mainStepGiftDecision = createGiftTriggerDecisionWithoutSourceCard(
+        FollowupInteractionDecision mainStepGiftDecision = sourcelessGiftPendingDecisionCreator.create(
             matchId,
             userId,
-            turnNumber,
-            mainStepGiftEffects
-        );
-        followupDecisionPayloadAppender.append(payload, mainStepGiftDecision);
-    }
-
-    private FollowupInteractionDecision createGiftTriggerDecisionWithoutSourceCard(
-        Long matchId,
-        Long userId,
-        int turnNumber,
-        List<Map<String, Object>> giftEffects
-    ) {
-        return giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
-            matchId,
-            userId,
-            null,
-            null,
-            giftEffects,
+            mainStepGiftEffects,
             turnNumber
         );
+        followupDecisionPayloadAppender.append(payload, mainStepGiftDecision);
     }
 
     private FollowupInteractionDecision createBatonTouchGiftTriggerDecision(

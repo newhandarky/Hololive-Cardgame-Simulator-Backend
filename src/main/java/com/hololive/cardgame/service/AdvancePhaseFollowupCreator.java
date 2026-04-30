@@ -6,14 +6,14 @@ import java.util.Map;
 class AdvancePhaseFollowupCreator {
 
     private final MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService;
-    private final GiftPendingDecisionCreator giftPendingDecisionCreator;
+    private final SourcelessGiftPendingDecisionCreator sourcelessGiftPendingDecisionCreator;
 
     AdvancePhaseFollowupCreator(
         MatchPhaseAdvanceGiftTransitionService matchPhaseAdvanceGiftTransitionService,
-        GiftPendingDecisionCreator giftPendingDecisionCreator
+        SourcelessGiftPendingDecisionCreator sourcelessGiftPendingDecisionCreator
     ) {
         this.matchPhaseAdvanceGiftTransitionService = matchPhaseAdvanceGiftTransitionService;
-        this.giftPendingDecisionCreator = giftPendingDecisionCreator;
+        this.sourcelessGiftPendingDecisionCreator = sourcelessGiftPendingDecisionCreator;
     }
 
     AdvancePhaseFollowup prepareAdvancePhaseFollowup(
@@ -52,21 +52,21 @@ class AdvancePhaseFollowupCreator {
             return AdvancePhaseFollowup.empty();
         }
         List<Map<String, Object>> ownGiftEffects = transitionPreview.ownGiftEffects();
-        FollowupInteractionDecision ownDecision = createGiftTriggerDecisionWithoutSourceCard(
+        FollowupInteractionDecision ownDecision = sourcelessGiftPendingDecisionCreator.create(
             matchId,
             userId,
-            turnNumber,
-            ownGiftEffects
+            ownGiftEffects,
+            turnNumber
         );
 
         List<Map<String, Object>> opponentGiftEffects = transitionPreview.opponentGiftEffects();
         FollowupInteractionDecision opponentDecision = null;
         if (opponentUserId != null) {
-            opponentDecision = createGiftTriggerDecisionWithoutSourceCard(
+            opponentDecision = sourcelessGiftPendingDecisionCreator.create(
                 matchId,
                 opponentUserId,
-                turnNumber,
-                opponentGiftEffects
+                opponentGiftEffects,
+                turnNumber
             );
         }
         return new AdvancePhaseFollowup(
@@ -74,22 +74,6 @@ class AdvancePhaseFollowupCreator {
             opponentGiftEffects,
             ownDecision,
             opponentDecision
-        );
-    }
-
-    private FollowupInteractionDecision createGiftTriggerDecisionWithoutSourceCard(
-        Long matchId,
-        Long userId,
-        int turnNumber,
-        List<Map<String, Object>> giftEffects
-    ) {
-        return giftPendingDecisionCreator.createWithGiftTriggerInteractionCards(
-            matchId,
-            userId,
-            null,
-            null,
-            giftEffects,
-            turnNumber
         );
     }
 }
