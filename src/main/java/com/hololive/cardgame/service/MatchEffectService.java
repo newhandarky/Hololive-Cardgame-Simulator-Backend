@@ -6796,7 +6796,7 @@ public class MatchEffectService {
     BloomEffectPlan resolveBloomEffectPlan(String bloomCardId, BloomRuntimeContext runtimeContext) {
         String passiveText = loadPassiveEffectText(bloomCardId);
         if (!StringUtils.hasText(passiveText)) {
-            return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
+            return emptyBloomEffectPlan(null, null);
         }
         JsonNode passiveNode = effectTextParser.parseEffectJson(passiveText);
         BloomEffectPlan structured = resolveStructuredBloomEffectPlan(passiveNode);
@@ -6806,15 +6806,12 @@ public class MatchEffectService {
 
         String bloomText = loadBloomEffectText(passiveText);
         if (!StringUtils.hasText(bloomText)) {
-            return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
+            return emptyBloomEffectPlan(null, null);
         }
         List<String> effectTypes = inferBloomEffectTypes(bloomText);
         String normalizedCardId = normalize(bloomCardId);
         Integer diceRoll = normalizedCardId.startsWith("HBP04-059") ? null : resolveBloomDiceRoll(bloomText);
-        Map<String, Object> bloomEffectPayload = new LinkedHashMap<>();
-        bloomEffectPayload.put("type", "UNIMPLEMENTED");
-        bloomEffectPayload.put("effects", effectTypes);
-        bloomEffectPayload.put("rawText", bloomText);
+        Map<String, Object> bloomEffectPayload = buildFallbackEffectPayload(effectTypes, bloomText, null);
         if (normalizedCardId.startsWith("HSD02-007")) {
             bloomEffectPayload.put("effects", List.of("SEARCH"));
             bloomEffectPayload.put("value", 1);
@@ -6840,7 +6837,7 @@ public class MatchEffectService {
                 ? 0
                 : runtimeContext.common().ownHandCount();
             if (ownHandCount <= 0) {
-                return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), bloomText, diceRoll);
+                return emptyBloomEffectPlan(bloomText, diceRoll);
             }
             bloomEffectPayload.put("effects", List.of("DISCARD_HAND", "DRAW"));
             bloomEffectPayload.put("value", 0);
@@ -6850,7 +6847,7 @@ public class MatchEffectService {
         }
         if (normalizedCardId.startsWith("HBP02-016")) {
             if (!"DEBUT".equals(normalizeLevelType(runtimeContext == null ? null : runtimeContext.sourceLevelType()))) {
-                return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), bloomText, diceRoll);
+                return emptyBloomEffectPlan(bloomText, diceRoll);
             }
             bloomEffectPayload.put("effects", List.of("SEARCH"));
             bloomEffectPayload.put("value", 1);
@@ -6873,7 +6870,7 @@ public class MatchEffectService {
                 ? 0
                 : runtimeContext.common().ownedStageCheerCount();
             if (!StringUtils.hasText(oshiCardName) || !"大空スバル".equals(oshiCardName.trim()) || ownedStageCheerCount <= 0) {
-                return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), bloomText, diceRoll);
+                return emptyBloomEffectPlan(bloomText, diceRoll);
             }
             bloomEffectPayload.put("effects", List.of("REMOVE_STAGE_CHEER", "SEARCH"));
             bloomEffectPayload.put("value", 1);
@@ -6887,13 +6884,7 @@ public class MatchEffectService {
         if (diceRoll != null) {
             bloomEffectPayload.put("diceRoll", diceRoll);
         }
-        return new BloomEffectPlan(
-            true,
-            effectTypes,
-            objectMapper.valueToTree(bloomEffectPayload),
-            bloomText,
-            diceRoll
-        );
+        return activeBloomEffectPlan(effectTypes, bloomEffectPayload, bloomText, diceRoll);
     }
 
     /**
@@ -6902,7 +6893,7 @@ public class MatchEffectService {
     BloomEffectPlan resolveCollabEffectPlan(String collabCardId) {
         String passiveText = loadPassiveEffectText(collabCardId);
         if (!StringUtils.hasText(passiveText)) {
-            return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
+            return emptyBloomEffectPlan(null, null);
         }
         JsonNode passiveNode = effectTextParser.parseEffectJson(passiveText);
         BloomEffectPlan structured = resolveStructuredCollabEffectPlan(passiveNode);
@@ -6912,24 +6903,12 @@ public class MatchEffectService {
 
         String collabText = loadCollabEffectText(passiveText);
         if (!StringUtils.hasText(collabText)) {
-            return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), null, null);
+            return emptyBloomEffectPlan(null, null);
         }
         List<String> effectTypes = inferBloomEffectTypes(collabText);
         Integer diceRoll = resolveBloomDiceRoll(collabText);
-        Map<String, Object> collabEffectPayload = new LinkedHashMap<>();
-        collabEffectPayload.put("type", "UNIMPLEMENTED");
-        collabEffectPayload.put("effects", effectTypes);
-        collabEffectPayload.put("rawText", collabText);
-        if (diceRoll != null) {
-            collabEffectPayload.put("diceRoll", diceRoll);
-        }
-        return new BloomEffectPlan(
-            true,
-            effectTypes,
-            objectMapper.valueToTree(collabEffectPayload),
-            collabText,
-            diceRoll
-        );
+        Map<String, Object> collabEffectPayload = buildFallbackEffectPayload(effectTypes, collabText, diceRoll);
+        return activeBloomEffectPlan(effectTypes, collabEffectPayload, collabText, diceRoll);
     }
 
     /**
@@ -7350,6 +7329,34 @@ public class MatchEffectService {
             payload.put("diceRoll", diceRoll);
         }
         return new BloomEffectPlan(true, effectTypes, objectMapper.valueToTree(payload), rawText, diceRoll);
+    }
+
+    private BloomEffectPlan emptyBloomEffectPlan(String rawText, Integer diceRoll) {
+        return new BloomEffectPlan(false, List.of(), objectMapper.createObjectNode(), rawText, diceRoll);
+    }
+
+    private BloomEffectPlan activeBloomEffectPlan(
+        List<String> effectTypes,
+        Map<String, Object> payload,
+        String rawText,
+        Integer diceRoll
+    ) {
+        return new BloomEffectPlan(true, effectTypes, objectMapper.valueToTree(payload), rawText, diceRoll);
+    }
+
+    private Map<String, Object> buildFallbackEffectPayload(
+        List<String> effectTypes,
+        String rawText,
+        Integer diceRoll
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "UNIMPLEMENTED");
+        payload.put("effects", effectTypes);
+        payload.put("rawText", rawText);
+        if (diceRoll != null) {
+            payload.put("diceRoll", diceRoll);
+        }
+        return payload;
     }
 
     /**
