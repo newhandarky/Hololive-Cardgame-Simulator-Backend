@@ -2164,9 +2164,9 @@ public class MatchActionService {
                 List.of()
             )
         );
-        AttackArtApplicationAdapterFactory.AttackApplicationRestPayloadStage restPayloadStage = requireAttackStage(
+        AttackApplicationRestPayloadStage restPayloadStage = requireAttackStage(
             applicationResult.stageResult(AttackArtApplicationService.STAGE_REST_AND_PAYLOAD),
-            AttackArtApplicationAdapterFactory.AttackApplicationRestPayloadStage.class,
+            AttackApplicationRestPayloadStage.class,
             "restAndPayload"
         );
         Map<String, Object> effectSummaryForChecks = restPayloadStage.result().effectSummaryForChecks();
