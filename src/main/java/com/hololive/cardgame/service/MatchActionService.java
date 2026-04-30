@@ -94,6 +94,7 @@ public class MatchActionService {
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
     private final TriggerEffectConfirmPayloadBuilder triggerEffectConfirmPayloadBuilder;
     private final SendCheerInteractionPayloadBuilder sendCheerInteractionPayloadBuilder;
+    private final PlayCardActionLogPayloadBuilder playCardActionLogPayloadBuilder;
     private final MatchEffectService matchEffectService;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
     private final MatchTriggeredCombatEffectService matchTriggeredCombatEffectService;
@@ -215,6 +216,7 @@ public class MatchActionService {
         this.interactionConfirmedPayloadBuilder = new InteractionConfirmedPayloadBuilder();
         this.triggerEffectConfirmPayloadBuilder = new TriggerEffectConfirmPayloadBuilder();
         this.sendCheerInteractionPayloadBuilder = new SendCheerInteractionPayloadBuilder();
+        this.playCardActionLogPayloadBuilder = new PlayCardActionLogPayloadBuilder();
         this.matchEffectService = matchEffectService;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
         this.matchTriggeredCombatEffectService = matchTriggeredCombatEffectService;
@@ -329,29 +331,16 @@ public class MatchActionService {
         PlayCardEffectResolution effectResolution = playCardEffectResolutionService.resolve(action, resolutionResult);
         playCardApplicationService.dispatchResolvedEvents(action, resolutionResult, effectResolution);
 
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("cardInstanceId", resolutionResult.cardInstanceId());
-        payload.put("cardId", resolutionResult.cardId());
-        payload.put("targetZone", resolutionResult.targetZone());
-        payload.put("enteredTurn", resolutionResult.enteredTurnNumber());
-        payload.put("faceDown", resolutionResult.faceDown());
-        payload.put("idempotencyKey", action.idempotencyKey());
-        payload.put("triggerSummary", effectResolution.triggerSummary());
-        if (!openingReset) {
-            payload.put("giftEffect", effectResolution.giftEffectSummary());
-            payload.put("triggerResolutionOrder", effectResolution.triggerResolutionOrder());
-            if (effectResolution.hasPendingInteraction()) {
-                payload.put("pendingInteractionDecisionId", effectResolution.pendingInteractionDecisionId());
-                payload.put("pendingInteractionDecisionType", effectResolution.pendingInteractionDecisionType());
-            }
-        }
+        Map<String, Object> payload = playCardActionLogPayloadBuilder.buildPayload(
+            action,
+            resolutionResult,
+            effectResolution
+        );
 
         appendAction(
             resolutionResult.match(),
             userId,
-            openingReset
-                ? ("CENTER".equals(resolutionResult.targetZone()) ? "OPENING_SET_CENTER" : "OPENING_SET_BACK")
-                : "PLAY_TO_STAGE",
+            playCardActionLogPayloadBuilder.resolveLegacyActionType(resolutionResult),
             toJson(payload),
             resolutionResult.turnNumber()
         );
