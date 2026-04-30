@@ -22,10 +22,7 @@ class AdvancePhasePayloadBuilderTest {
             MatchPhase.MAIN,
             MatchPhase.END,
             null,
-            List.of(),
-            List.of(),
-            null,
-            null
+            AdvancePhaseFollowup.empty()
         );
 
         assertThat(payload)
@@ -44,10 +41,12 @@ class AdvancePhasePayloadBuilderTest {
             MatchPhase.MAIN,
             MatchPhase.PERFORMANCE,
             MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition.forPerformanceStart(),
-            List.of(giftTrigger("PERFORMANCE_START_SELF", 701L)),
-            List.of(giftTrigger("PERFORMANCE_START_OPPONENT", 801L)),
-            new FollowupInteractionDecision(901L, "TRIGGER_EFFECT_CONFIRM"),
-            new FollowupInteractionDecision(902L, "TRIGGER_EFFECT_CONFIRM")
+            new AdvancePhaseFollowup(
+                List.of(giftTrigger("PERFORMANCE_START_SELF", 701L)),
+                List.of(giftTrigger("PERFORMANCE_START_OPPONENT", 801L)),
+                new FollowupInteractionDecision(901L, "TRIGGER_EFFECT_CONFIRM"),
+                new FollowupInteractionDecision(902L, "TRIGGER_EFFECT_CONFIRM")
+            )
         );
 
         assertThat(payload)
@@ -75,10 +74,7 @@ class AdvancePhasePayloadBuilderTest {
             MatchPhase.PERFORMANCE,
             MatchPhase.END,
             MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition.forPerformanceEnd(),
-            List.of(),
-            List.of(),
-            null,
-            null
+            AdvancePhaseFollowup.empty()
         );
 
         assertThat(payload)

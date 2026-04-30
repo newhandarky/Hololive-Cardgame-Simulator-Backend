@@ -1422,7 +1422,12 @@ public class MatchActionService {
             context.turnNumber,
             transition
         );
-        Map<String, Object> payload = buildAdvancePhasePayload(context.phase, nextPhase, followup, transition);
+        Map<String, Object> payload = advancePhasePayloadBuilder.buildAdvancePhasePayload(
+            context.phase,
+            nextPhase,
+            transition,
+            followup
+        );
         matchTurnLifecycleService.advancePhase(
             context.match,
             userId,
@@ -1511,24 +1516,6 @@ public class MatchActionService {
             sourceCardId,
             giftEffects,
             turnNumber
-        );
-    }
-
-    private Map<String, Object> buildAdvancePhasePayload(
-        MatchPhase currentPhase,
-        MatchPhase nextPhase,
-        AdvancePhaseFollowup followup,
-        MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition transition
-    ) {
-        AdvancePhaseFollowup safeFollowup = followup == null ? AdvancePhaseFollowup.empty() : followup;
-        return advancePhasePayloadBuilder.buildAdvancePhasePayload(
-            currentPhase,
-            nextPhase,
-            transition,
-            safeFollowup.ownGiftEffects(),
-            safeFollowup.opponentGiftEffects(),
-            safeFollowup.ownDecision(),
-            safeFollowup.opponentDecision()
         );
     }
 

@@ -25,6 +25,24 @@ class AdvancePhasePayloadBuilder {
         MatchPhase currentPhase,
         MatchPhase nextPhase,
         MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition transition,
+        AdvancePhaseFollowup followup
+    ) {
+        AdvancePhaseFollowup safeFollowup = followup == null ? AdvancePhaseFollowup.empty() : followup;
+        return buildAdvancePhasePayload(
+            currentPhase,
+            nextPhase,
+            transition,
+            safeFollowup.ownGiftEffects(),
+            safeFollowup.opponentGiftEffects(),
+            safeFollowup.ownDecision(),
+            safeFollowup.opponentDecision()
+        );
+    }
+
+    private Map<String, Object> buildAdvancePhasePayload(
+        MatchPhase currentPhase,
+        MatchPhase nextPhase,
+        MatchPhaseAdvanceGiftTransitionService.AdvancePhaseGiftTransition transition,
         List<Map<String, Object>> ownGiftEffects,
         List<Map<String, Object>> opponentGiftEffects,
         FollowupInteractionDecision ownDecision,
