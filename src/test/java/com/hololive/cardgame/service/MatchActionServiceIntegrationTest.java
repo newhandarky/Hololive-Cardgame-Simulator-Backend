@@ -4064,16 +4064,47 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
         matchActionService.bloom(matchId, hostId, request);
 
-        int handAfter = countZone(matchId, hostId, "HAND");
-        int archiveAfter = countZone(matchId, hostId, "ARCHIVE");
+        int handAfterBloom = countZone(matchId, hostId, "HAND");
+        int archiveAfterBloom = countZone(matchId, hostId, "ARCHIVE");
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        String zoneBeforeConfirm = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            archivedCardInstanceId
+        );
+
+        assertThat(pendingContextText).containsPattern("\"sourceActionType\"\\s*:\\s*\"BLOOM\"");
+        assertThat(pendingContextText).contains("RETURN_TO_HAND");
+        assertThat(handAfterBloom).isEqualTo(handBefore - 1);
+        assertThat(archiveAfterBloom).isEqualTo(archiveBefore);
+        assertThat(zoneBeforeConfirm).isEqualTo("ARCHIVE");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
+        int handAfterConfirm = countZone(matchId, hostId, "HAND");
+        int archiveAfterConfirm = countZone(matchId, hostId, "ARCHIVE");
         String returnedCardZone = jdbcTemplate.queryForObject(
             "SELECT zone FROM match_cards WHERE id = ?",
             String.class,
             archivedCardInstanceId
         );
 
-        assertThat(handAfter).isEqualTo(handBefore);
-        assertThat(archiveAfter).isEqualTo(archiveBefore - 1);
+        assertThat(handAfterConfirm).isEqualTo(handBefore);
+        assertThat(archiveAfterConfirm).isEqualTo(archiveBefore - 1);
         assertThat(returnedCardZone).isEqualTo("HAND");
 
         String payload = jdbcTemplate.queryForObject(
@@ -4179,6 +4210,33 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         request.setBloomCardInstanceId(bloomCardInstanceId);
         request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
         matchActionService.bloom(matchId, hostId, request);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).containsPattern("\"sourceActionType\"\\s*:\\s*\"BLOOM\"");
+        assertThat(pendingContextText).contains("RETURN_TO_HAND");
+
+        String zoneBeforeConfirm = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            archivedCardInstanceId
+        );
+        assertThat(zoneBeforeConfirm).isEqualTo("ARCHIVE");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
 
         String returnedCardZone = jdbcTemplate.queryForObject(
             "SELECT zone FROM match_cards WHERE id = ?",
@@ -4290,6 +4348,33 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         request.setBloomCardInstanceId(bloomCardInstanceId);
         request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
         matchActionService.bloom(matchId, hostId, request);
+
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).containsPattern("\"sourceActionType\"\\s*:\\s*\"BLOOM\"");
+        assertThat(pendingContextText).contains("RETURN_TO_DECK_TOP");
+
+        String zoneBeforeConfirm = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            archiveCardInstanceId
+        );
+        assertThat(zoneBeforeConfirm).isEqualTo("ARCHIVE");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
 
         Map<String, Object> moved = jdbcTemplate.queryForMap(
             "SELECT zone, is_face_down FROM match_cards WHERE id = ?",
