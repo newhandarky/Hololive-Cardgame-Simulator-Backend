@@ -2261,17 +2261,41 @@ public class MatchEffectService {
             movedCardIds.add(cardId);
         }
 
+        return buildReturnToHandSummary(
+            effectType,
+            returnCount,
+            candidates,
+            movedCardInstanceIds,
+            movedCardIds,
+            effectiveSelectedCardInstanceIds,
+            criteria,
+            excludeLimitedSupport,
+            resolveReturnToHandSourceZone(effectNode, rawText)
+        );
+    }
+
+    private Map<String, Object> buildReturnToHandSummary(
+        String effectType,
+        int returnCount,
+        List<Map<String, Object>> candidates,
+        List<Long> movedCardInstanceIds,
+        List<String> movedCardIds,
+        List<Long> selectedCardInstanceIds,
+        SearchCriteria criteria,
+        boolean excludeLimitedSupport,
+        String sourceZone
+    ) {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
         summary.put("returnRequested", returnCount);
         summary.put("candidateCount", candidates.size());
         summary.put("returnApplied", movedCardInstanceIds.size());
-        summary.put("selectedByClient", effectiveSelectedCardInstanceIds != null && !effectiveSelectedCardInstanceIds.isEmpty());
+        summary.put("selectedByClient", selectedCardInstanceIds != null && !selectedCardInstanceIds.isEmpty());
         summary.put("returnedCardInstanceIds", movedCardInstanceIds);
         summary.put("returnedCardIds", movedCardIds);
         Map<String, Object> criteriaSummary = buildCriteriaSummary(criteria);
         criteriaSummary.put("excludeLimitedSupport", excludeLimitedSupport);
-        criteriaSummary.put("sourceZone", resolveReturnToHandSourceZone(effectNode, rawText));
+        criteriaSummary.put("sourceZone", sourceZone);
         summary.put("criteria", criteriaSummary);
         return summary;
     }
@@ -2377,6 +2401,26 @@ public class MatchEffectService {
             movedCardIds.add(cardId);
         }
 
+        return buildReturnToDeckTopSummary(
+            effectType,
+            returnCount,
+            candidates,
+            movedCardInstanceIds,
+            movedCardIds,
+            selectedCardInstanceIds,
+            criteria
+        );
+    }
+
+    private Map<String, Object> buildReturnToDeckTopSummary(
+        String effectType,
+        int returnCount,
+        List<Map<String, Object>> candidates,
+        List<Long> movedCardInstanceIds,
+        List<String> movedCardIds,
+        List<Long> selectedCardInstanceIds,
+        SearchCriteria criteria
+    ) {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
         summary.put("returnRequested", returnCount);
