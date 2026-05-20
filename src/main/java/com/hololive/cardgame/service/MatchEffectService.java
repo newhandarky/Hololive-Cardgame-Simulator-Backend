@@ -41,8 +41,6 @@ public class MatchEffectService {
     private static final Pattern DRAW_COUNT_FALLBACK_PATTERN = Pattern.compile("(\\d+)\\s*枚引く");
     private static final Pattern HEAL_PATTERN = Pattern.compile("HP\\s*(\\d+)\\s*回復");
     private static final Pattern CHEER_COUNT_PATTERN = Pattern.compile("エール\\s*(\\d+)\\s*枚");
-    private static final Pattern SEARCH_RANGE_PATTERN = Pattern.compile("(\\d+)\\s*[~〜～]\\s*(\\d+)\\s*枚");
-    private static final Pattern SEARCH_COUNT_PATTERN = Pattern.compile("(\\d+)\\s*枚");
     private static final Pattern TAG_PATTERN = Pattern.compile(
         "#([\\p{L}\\p{N}_'\\-]+?)(?=(?:を|が|に|で|と|へ|や|も|、|。|\\s|$))"
     );
@@ -50,7 +48,6 @@ public class MatchEffectService {
     private static final Pattern DICE_AT_LEAST_PATTERN = Pattern.compile("(\\d+)\\s*以上の時");
     private static final Pattern DICE_AT_MOST_PATTERN = Pattern.compile("(\\d+)\\s*以下の時");
     private static final Pattern DICE_ROLL_COUNT_PATTERN = Pattern.compile("サイコロ\\D*(\\d+)\\s*回");
-    private static final Pattern SEARCH_LOOK_TOP_COUNT_PATTERN = Pattern.compile("デッキの上から\\s*(\\d+)\\s*枚を見る");
     static final Pattern ATTACHED_SUPPORT_HP_PATTERN = Pattern.compile(
         "この(?:マスコット|ツール|ファン)が付いているホロメンのHP\\s*([+＋−-]\\s*\\d+)"
     );
@@ -111,6 +108,7 @@ public class MatchEffectService {
     private final MatchGiftTriggerContextService giftTriggerContextService;
     private final PassiveGiftTriggerActionWriter passiveGiftTriggerActionWriter;
     private final GiftTurnUsageReader giftTurnUsageReader;
+    private final MatchCardSelectionRequestResolver cardSelectionRequestResolver;
     private final MatchCardSelectionSummaryBuilder cardSelectionSummaryBuilder;
 
     /**
@@ -149,6 +147,7 @@ public class MatchEffectService {
             effectTextParser
         );
         this.giftTurnUsageReader = new GiftTurnUsageReader(jdbcTemplate);
+        this.cardSelectionRequestResolver = new MatchCardSelectionRequestResolver(effectTextParser);
         this.cardSelectionSummaryBuilder = new MatchCardSelectionSummaryBuilder();
     }
 
@@ -1968,12 +1967,12 @@ public class MatchEffectService {
         List<Long> selectedCardInstanceIds
     ) {
         String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        String searchSourceZone = resolveSearchSourceZone(effectNode, rawText);
+        String searchSourceZone = cardSelectionRequestResolver.resolveSearchSourceZone(effectNode, rawText);
         boolean searchFromDeck = "DECK".equals(searchSourceZone);
-        int requestedCount = resolveSearchCount(effectNode);
+        int requestedCount = cardSelectionRequestResolver.resolveSearchCount(effectNode);
         int searchCount = Math.max(requestedCount, 1);
         SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
-        int lookTopCount = resolveSearchLookTopCount(effectNode, rawText);
+        int lookTopCount = cardSelectionRequestResolver.resolveSearchLookTopCount(effectNode, rawText);
         boolean archiveUnselectedTopWindow = toBoolean(
             readBoolean(
                 effectNode,
@@ -2157,7 +2156,7 @@ public class MatchEffectService {
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
-        int requestedCount = resolveActionCount(effectNode, "手札に戻", 1);
+        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "手札に戻", 1);
         int returnCount = Math.max(requestedCount, 1);
         SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         boolean excludeLimitedSupport = rawText.contains("LIMITED以外");
@@ -2216,7 +2215,7 @@ public class MatchEffectService {
             effectiveSelectedCardInstanceIds,
             criteria,
             excludeLimitedSupport,
-            resolveReturnToHandSourceZone(effectNode, rawText)
+            cardSelectionRequestResolver.resolveReturnToHandSourceZone(effectNode, rawText)
         );
     }
 
@@ -2228,7 +2227,7 @@ public class MatchEffectService {
         boolean excludeLimitedSupport
     ) {
         String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (usesGiftHolderStackSnapshotForReturnToHand(rawText, effectNode)) {
+        if (cardSelectionRequestResolver.usesGiftHolderStackSnapshotForReturnToHand(effectNode, rawText)) {
             return loadCandidatesByCardInstanceIds(
                 matchId,
                 userId,
@@ -2245,16 +2244,6 @@ public class MatchEffectService {
         );
     }
 
-    private String resolveReturnToHandSourceZone(JsonNode effectNode, String rawText) {
-        return usesGiftHolderStackSnapshotForReturnToHand(rawText, effectNode) ? "GIFT_HOLDER_STACK" : "ARCHIVE";
-    }
-
-    private boolean usesGiftHolderStackSnapshotForReturnToHand(String rawText, JsonNode effectNode) {
-        return StringUtils.hasText(rawText)
-            && rawText.contains("重なっているホロメン")
-            && !extractEffectNodeLongList(effectNode, "giftHolderStackCardInstanceIds").isEmpty();
-    }
-
     /**
      * 執行返回牌庫頂效果，並更新牌庫順序。
      */
@@ -2269,7 +2258,7 @@ public class MatchEffectService {
         if (!shouldApplyByDice(rawText, effectNode, effectType)) {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
-        int requestedCount = resolveActionCount(effectNode, "デッキの上に戻", 1);
+        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "デッキの上に戻", 1);
         int returnCount = Math.max(requestedCount, 1);
         SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
 
@@ -2392,7 +2381,7 @@ public class MatchEffectService {
             targetOwnerUserId = sourceOwnerUserId;
         }
 
-        int requestedCount = resolveActionCount(effectNode, "付け", 1);
+        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "付け", 1);
         int moveCount = Math.max(requestedCount, 1);
 
         List<String> movedCheerCardIds = new ArrayList<>();
@@ -2604,7 +2593,7 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
-        int requestedCount = resolveActionCount(effectNode, "ステージに出", 1);
+        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "ステージに出", 1);
         int summonCount = Math.max(requestedCount, 1);
         SearchCriteria resolved = searchCriteriaParser.resolveSearchCriteria(effectNode);
         SearchCriteria criteria = new SearchCriteria(
@@ -2836,7 +2825,7 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
-        int requestedCount = resolveActionCount(effectNode, "アーカイブ", 1);
+        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "アーカイブ", 1);
         int archiveCount = Math.max(requestedCount, 1);
         SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         List<Map<String, Object>> candidates = loadCandidatesFromZone(
@@ -3103,7 +3092,7 @@ public class MatchEffectService {
     ) {
         String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         String colorFilter = resolveCheerColorFilter(rawText);
-        int requestedCount = resolveActionCount(effectNode, "エールデッキの下に戻", 1);
+        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "エールデッキの下に戻", 1);
         int returnCount = Math.max(requestedCount, 1);
         boolean fromStageAttachedCheer = rawText.contains("ステージのエール");
 
@@ -3263,7 +3252,7 @@ public class MatchEffectService {
         String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         String discardClause = extractCostClause(rawText);
         SearchCriteria discardCriteria = resolveSearchCriteriaFromRawText(discardClause);
-        int requestedCount = resolveActionCount(effectNode, "手札", 1);
+        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "手札", 1);
         int discardCount = Math.max(requestedCount, 1);
 
         List<Map<String, Object>> handCards;
@@ -3529,7 +3518,7 @@ public class MatchEffectService {
             return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
         }
         String sourceZone = resolveMoveToHolopowerSourceZone(effectNode, rawText);
-        int requestedCount = resolveActionCount(effectNode, "ホロパワー", 1);
+        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "ホロパワー", 1);
         int moveCount = Math.max(requestedCount, 1);
 
         List<Long> movedCardInstanceIds = new ArrayList<>();
@@ -6660,9 +6649,9 @@ public class MatchEffectService {
      * 探測 SEARCH 的候選清單與可選張數。
      */
     private SelectionProbe probeSearchCandidates(Long matchId, Long userId, JsonNode effectNode) {
-        int requestedCount = Math.max(resolveSearchCount(effectNode), 1);
+        int requestedCount = Math.max(cardSelectionRequestResolver.resolveSearchCount(effectNode), 1);
         String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        int lookTopCount = resolveSearchLookTopCount(effectNode, rawText);
+        int lookTopCount = cardSelectionRequestResolver.resolveSearchLookTopCount(effectNode, rawText);
         SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         List<Map<String, Object>> rows = lookTopCount > 0
             ? filterCandidatesByCriteria(loadTopDeckWindow(matchId, userId, lookTopCount), criteria)
@@ -6681,7 +6670,7 @@ public class MatchEffectService {
         if (!shouldApplyByDice(rawText, effectNode, "RETURN_TO_HAND")) {
             return null;
         }
-        int requestedCount = Math.max(resolveActionCount(effectNode, "手札に戻", 1), 1);
+        int requestedCount = Math.max(cardSelectionRequestResolver.resolveActionCount(effectNode, "手札に戻", 1), 1);
         SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         boolean excludeLimitedSupport = rawText.contains("LIMITED以外");
         List<Map<String, Object>> rows = resolveReturnToHandCandidates(
@@ -6693,7 +6682,7 @@ public class MatchEffectService {
         );
         return new SelectionProbe(
             requestedCount,
-            mapDecisionCandidates(rows, resolveReturnToHandSourceZone(effectNode, rawText))
+            mapDecisionCandidates(rows, cardSelectionRequestResolver.resolveReturnToHandSourceZone(effectNode, rawText))
         );
     }
 
@@ -6705,7 +6694,7 @@ public class MatchEffectService {
         if (!shouldApplyByDice(rawText, effectNode, "RETURN_TO_DECK_TOP")) {
             return null;
         }
-        int requestedCount = Math.max(resolveActionCount(effectNode, "デッキの上に戻", 1), 1);
+        int requestedCount = Math.max(cardSelectionRequestResolver.resolveActionCount(effectNode, "デッキの上に戻", 1), 1);
         SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
         List<Map<String, Object>> rows = loadCandidatesFromZone(
             matchId,
@@ -7709,72 +7698,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 解析檢索可選數量，優先讀結構化欄位，否則回退文字規則推斷。
-     */
-    private int resolveSearchCount(JsonNode effectNode) {
-        int fromFields = effectTextParser.extractInt(effectNode, 0, "value", "cards", "amount");
-        if (fromFields > 0) {
-            return fromFields;
-        }
-        String text = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        Matcher range = SEARCH_RANGE_PATTERN.matcher(text);
-        if (range.find()) {
-            try {
-                return Integer.parseInt(range.group(2));
-            } catch (NumberFormatException ignored) {
-                // 解析失敗時回退到下一規則
-            }
-        }
-        int count = effectTextParser.extractByPattern(text, SEARCH_COUNT_PATTERN);
-        if (count > 0) {
-            return count;
-        }
-        return text.contains("手札に加える") ? 1 : 0;
-    }
-
-    /**
-     * 解析「看牌庫頂」的觀察張數，支援欄位值與原文正則推斷。
-     */
-    private int resolveSearchLookTopCount(JsonNode effectNode, String rawText) {
-        int fromFields = effectTextParser.extractInt(effectNode, 0, "lookTopCount", "lookCount", "peekCount");
-        if (fromFields > 0) {
-            return fromFields;
-        }
-        String text = effectTextParser.normalizeDigits(rawText);
-        Matcher matcher = SEARCH_LOOK_TOP_COUNT_PATTERN.matcher(text);
-        if (matcher.find()) {
-            try {
-                return Integer.parseInt(matcher.group(1));
-            } catch (NumberFormatException ignored) {
-                return 0;
-            }
-        }
-        return 0;
-    }
-
-    /**
-     * 解析 SEARCH 的來源區，預設為 DECK，可由 effectNode 或文案覆寫。
-     */
-    private String resolveSearchSourceZone(JsonNode effectNode, String rawText) {
-        String explicit = effectTextParser.normalizeEffectType(readText(effectNode, "searchSourceZone", "sourceZone", "searchFromZone"));
-        if ("DECK".equals(explicit) || "ARCHIVE".equals(explicit) || "HOLOPOWER".equals(explicit) || "HAND".equals(explicit)) {
-            return explicit;
-        }
-        String text = effectTextParser.normalizeDigits(rawText);
-        if (
-            text.contains("ホロパワー")
-                && (text.contains("見る") || text.contains("見"))
-                && text.contains("手札に加える")
-        ) {
-            return "HOLOPOWER";
-        }
-        if ((text.contains("アーカイブから") || text.contains("アーカイブにある")) && text.contains("手札に加える")) {
-            return "ARCHIVE";
-        }
-        return "DECK";
-    }
-
-    /**
      * 解析 MOVE_TO_HOLOPOWER 的來源區，預設 DECK。
      */
     private String resolveMoveToHolopowerSourceZone(JsonNode effectNode, String rawText) {
@@ -7790,33 +7713,6 @@ public class MatchEffectService {
             return "ARCHIVE";
         }
         return "DECK";
-    }
-
-    /**
-     * 解析通用動作張數（如回手/棄牌），不足時用關鍵字與預設值補齊。
-     */
-    private int resolveActionCount(JsonNode effectNode, String fallbackToken, int defaultValue) {
-        int fromFields = effectTextParser.extractInt(effectNode, 0, "value", "cards", "amount");
-        if (fromFields > 0) {
-            return fromFields;
-        }
-        String text = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        Matcher range = SEARCH_RANGE_PATTERN.matcher(text);
-        if (range.find()) {
-            try {
-                return Integer.parseInt(range.group(2));
-            } catch (NumberFormatException ignored) {
-                // 解析失敗時回退到下一規則
-            }
-        }
-        int count = effectTextParser.extractByPattern(text, SEARCH_COUNT_PATTERN);
-        if (count > 0) {
-            return count;
-        }
-        if (StringUtils.hasText(fallbackToken) && text.contains(fallbackToken)) {
-            return 1;
-        }
-        return defaultValue;
     }
 
     /**
