@@ -47,4 +47,13 @@ final class MatchCardSelectionSearchCandidateProvider implements MatchCardSelect
     public List<Map<String, Object>> filterCandidatesByCriteria(List<Map<String, Object>> rows, SearchCriteria criteria) {
         return searchService.filterCandidatesByCriteria(rows, criteria);
     }
+
+    @Override
+    public List<Map<String, Object>> selectSearchCards(
+        List<Map<String, Object>> candidates,
+        List<Long> selectedCardInstanceIds,
+        int searchCount
+    ) {
+        return searchService.selectSearchCards(candidates, selectedCardInstanceIds, searchCount);
+    }
 }

@@ -187,6 +187,12 @@ final class MatchCardSelectionProbeBuilder {
         );
 
         List<Map<String, Object>> filterCandidatesByCriteria(List<Map<String, Object>> rows, SearchCriteria criteria);
+
+        List<Map<String, Object>> selectSearchCards(
+            List<Map<String, Object>> candidates,
+            List<Long> selectedCardInstanceIds,
+            int searchCount
+        );
     }
 
     interface DiceConditionChecker {

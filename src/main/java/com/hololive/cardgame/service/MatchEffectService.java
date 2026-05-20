@@ -110,7 +110,7 @@ public class MatchEffectService {
     private final GiftTurnUsageReader giftTurnUsageReader;
     private final MatchCardSelectionRequestResolver cardSelectionRequestResolver;
     private final MatchCardSelectionProbeBuilder cardSelectionProbeBuilder;
-    private final MatchCardSelectionSummaryBuilder cardSelectionSummaryBuilder;
+    private final MatchCardSelectionExecutionService cardSelectionExecutionService;
 
     /**
      * 效果結算服務建構子。
@@ -149,14 +149,26 @@ public class MatchEffectService {
         );
         this.giftTurnUsageReader = new GiftTurnUsageReader(jdbcTemplate);
         this.cardSelectionRequestResolver = new MatchCardSelectionRequestResolver(effectTextParser);
+        MatchCardSelectionSearchCandidateProvider cardSelectionCandidateProvider =
+            new MatchCardSelectionSearchCandidateProvider(searchService);
         this.cardSelectionProbeBuilder = new MatchCardSelectionProbeBuilder(
             effectTextParser,
             searchCriteriaParser,
             cardSelectionRequestResolver,
-            new MatchCardSelectionSearchCandidateProvider(searchService),
+            cardSelectionCandidateProvider,
             this::shouldApplyByDice
         );
-        this.cardSelectionSummaryBuilder = new MatchCardSelectionSummaryBuilder();
+        MatchCardSelectionSummaryBuilder cardSelectionSummaryBuilder = new MatchCardSelectionSummaryBuilder();
+        this.cardSelectionExecutionService = new MatchCardSelectionExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            searchCriteriaParser,
+            cardSelectionRequestResolver,
+            cardSelectionProbeBuilder,
+            cardSelectionSummaryBuilder,
+            cardSelectionCandidateProvider,
+            this::shouldApplyByDice
+        );
     }
 
     /**
@@ -208,13 +220,13 @@ public class MatchEffectService {
                 switch (type) {
                     case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, type, effectNode));
                     case "SEARCH" -> executed.add(
-                        executeSearchEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
+                        cardSelectionExecutionService.executeSearchEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
                     );
                     case "RETURN_TO_HAND" -> executed.add(
-                        executeReturnToHandEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
+                        cardSelectionExecutionService.executeReturnToHandEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
                     );
                     case "RETURN_TO_DECK_TOP" -> executed.add(
-                        executeReturnToDeckTopEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
+                        cardSelectionExecutionService.executeReturnToDeckTopEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
                     );
                     case "ADD_CHEER" -> executed.add(
                         executeAddCheerEffect(
@@ -733,7 +745,7 @@ public class MatchEffectService {
         String targetType = inferBloomTargetType(effectType);
         return switch (effectType) {
             case "DRAW" -> executeDrawEffect(matchId, userId, effectType, giftNode);
-            case "SEARCH" -> executeSearchEffect(matchId, userId, effectType, giftNode, null);
+            case "SEARCH" -> cardSelectionExecutionService.executeSearchEffect(matchId, userId, effectType, giftNode, null);
             case "REPLACE_ARCHIVE_WITH_HAND" -> executeReplaceArchiveWithHandEffect(
                 matchId,
                 userId,
@@ -741,8 +753,8 @@ public class MatchEffectService {
                 giftNode,
                 holderCardInstanceId
             );
-            case "RETURN_TO_HAND" -> executeReturnToHandEffect(matchId, userId, effectType, giftNode, null);
-            case "RETURN_TO_DECK_TOP" -> executeReturnToDeckTopEffect(matchId, userId, effectType, giftNode, null);
+            case "RETURN_TO_HAND" -> cardSelectionExecutionService.executeReturnToHandEffect(matchId, userId, effectType, giftNode, null);
+            case "RETURN_TO_DECK_TOP" -> cardSelectionExecutionService.executeReturnToDeckTopEffect(matchId, userId, effectType, giftNode, null);
             case "ADD_CHEER" -> executeAddCheerEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
             case "DAMAGE" -> executeDamageEffect(
                 matchId,
@@ -1307,13 +1319,13 @@ public class MatchEffectService {
                 switch (effectType) {
                     case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, bloomEffectNode));
                     case "SEARCH" -> executed.add(
-                        executeSearchEffect(matchId, userId, effectType, bloomEffectNode, null)
+                        cardSelectionExecutionService.executeSearchEffect(matchId, userId, effectType, bloomEffectNode, null)
                     );
                     case "RETURN_TO_HAND" -> executed.add(
-                        executeReturnToHandEffect(matchId, userId, effectType, bloomEffectNode, null)
+                        cardSelectionExecutionService.executeReturnToHandEffect(matchId, userId, effectType, bloomEffectNode, null)
                     );
                     case "RETURN_TO_DECK_TOP" -> executed.add(
-                        executeReturnToDeckTopEffect(matchId, userId, effectType, bloomEffectNode, null)
+                        cardSelectionExecutionService.executeReturnToDeckTopEffect(matchId, userId, effectType, bloomEffectNode, null)
                     );
                     case "ADD_CHEER" -> executed.add(
                         executeAddCheerEffect(
@@ -1619,13 +1631,13 @@ public class MatchEffectService {
                 switch (effectType) {
                     case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, collabEffectNode));
                     case "SEARCH" -> executed.add(
-                        executeSearchEffect(matchId, userId, effectType, collabEffectNode, null)
+                        cardSelectionExecutionService.executeSearchEffect(matchId, userId, effectType, collabEffectNode, null)
                     );
                     case "RETURN_TO_HAND" -> executed.add(
-                        executeReturnToHandEffect(matchId, userId, effectType, collabEffectNode, null)
+                        cardSelectionExecutionService.executeReturnToHandEffect(matchId, userId, effectType, collabEffectNode, null)
                     );
                     case "RETURN_TO_DECK_TOP" -> executed.add(
-                        executeReturnToDeckTopEffect(matchId, userId, effectType, collabEffectNode, null)
+                        cardSelectionExecutionService.executeReturnToDeckTopEffect(matchId, userId, effectType, collabEffectNode, null)
                     );
                     case "ADD_CHEER" -> executed.add(
                         executeAddCheerEffect(
@@ -1972,346 +1984,6 @@ public class MatchEffectService {
         summary.put("drawApplied", drawnCardInstanceIds.size());
         summary.put("drawnCardInstanceIds", drawnCardInstanceIds);
         return summary;
-    }
-
-    /**
-     * 執行檢索效果：從牌庫/牌庫頂範圍挑選卡片加入手牌，並回傳重排需求。
-     */
-    private Map<String, Object> executeSearchEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode,
-        List<Long> selectedCardInstanceIds
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        String searchSourceZone = cardSelectionRequestResolver.resolveSearchSourceZone(effectNode, rawText);
-        boolean searchFromDeck = "DECK".equals(searchSourceZone);
-        int requestedCount = cardSelectionRequestResolver.resolveSearchCount(effectNode);
-        int searchCount = Math.max(requestedCount, 1);
-        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
-        int lookTopCount = cardSelectionRequestResolver.resolveSearchLookTopCount(effectNode, rawText);
-        boolean archiveUnselectedTopWindow = toBoolean(
-            readBoolean(
-                effectNode,
-                "archiveUnselectedTopWindow",
-                "archiveRemainingTopWindow",
-                "archiveRemainder"
-            )
-        );
-        boolean requiresDeckBottomReorder =
-            searchFromDeck
-                && lookTopCount > 0
-                && rawText.contains("好きな順でデッキの下に戻す");
-
-        List<Map<String, Object>> searchPool;
-        if (searchFromDeck && lookTopCount > 0) {
-            searchPool = loadTopDeckWindow(matchId, userId, lookTopCount);
-        } else {
-            searchPool = loadCandidatesFromZone(matchId, userId, searchSourceZone, criteria, false);
-        }
-        List<Map<String, Object>> candidates = lookTopCount > 0
-            ? filterCandidatesByCriteria(searchPool, criteria)
-            : searchPool;
-
-        List<Map<String, Object>> selected = selectSearchCards(candidates, selectedCardInstanceIds, searchCount);
-        List<Long> movedCardInstanceIds = new ArrayList<>();
-        List<String> movedCardIds = new ArrayList<>();
-        int nextHandOrder = nextZoneOrder(matchId, userId, "HAND");
-        for (Map<String, Object> row : selected) {
-            Long cardInstanceId = asLong(row.get("id"));
-            String cardId = asText(row.get("card_id"));
-            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
-                continue;
-            }
-            int updated = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'HAND',
-                    order_index = ?,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = ?
-                """,
-                nextHandOrder++,
-                cardInstanceId,
-                matchId,
-                userId,
-                searchSourceZone
-            );
-            if (updated != 1) {
-                continue;
-            }
-            movedCardInstanceIds.add(cardInstanceId);
-            movedCardIds.add(cardId);
-        }
-
-        Set<Long> selectedIds = new LinkedHashSet<>();
-        for (Map<String, Object> row : selected) {
-            Long id = asLong(row.get("id"));
-            if (id != null && id > 0) {
-                selectedIds.add(id);
-            }
-        }
-
-        List<Map<String, Object>> reorderCandidates = new ArrayList<>();
-        List<Long> archivedRemainderCardInstanceIds = new ArrayList<>();
-        List<String> archivedRemainderCardIds = new ArrayList<>();
-        if (archiveUnselectedTopWindow && searchFromDeck && lookTopCount > 0) {
-            int nextArchiveOrder = nextZoneOrder(matchId, userId, "ARCHIVE");
-            for (Map<String, Object> row : searchPool) {
-                Long id = asLong(row.get("id"));
-                if (id == null || selectedIds.contains(id)) {
-                    continue;
-                }
-                String cardId = asText(row.get("card_id"));
-                int updated = jdbcTemplate.update(
-                    """
-                    UPDATE match_cards
-                    SET zone = 'ARCHIVE',
-                        order_index = ?,
-                        is_face_down = FALSE,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                      AND match_id = ?
-                      AND owner_user_id = ?
-                      AND zone = 'DECK'
-                    """,
-                    nextArchiveOrder++,
-                    id,
-                    matchId,
-                    userId
-                );
-                if (updated != 1) {
-                    continue;
-                }
-                archivedRemainderCardInstanceIds.add(id);
-                archivedRemainderCardIds.add(cardId);
-            }
-        } else if (requiresDeckBottomReorder) {
-            for (Map<String, Object> row : searchPool) {
-                Long id = asLong(row.get("id"));
-                if (id == null || selectedIds.contains(id)) {
-                    continue;
-                }
-                reorderCandidates.add(cardSelectionSummaryBuilder.buildDeckBottomReorderCandidate(row, id));
-            }
-            if (reorderCandidates.size() == 1) {
-                Long onlyCardInstanceId = asLong(reorderCandidates.get(0).get("cardInstanceId"));
-                moveDeckCardToBottom(matchId, userId, onlyCardInstanceId);
-                reorderCandidates.clear();
-            }
-        }
-
-        return cardSelectionSummaryBuilder.buildSearchEffectSummary(
-            effectType,
-            searchCount,
-            candidates,
-            searchPool,
-            lookTopCount,
-            searchSourceZone,
-            archiveUnselectedTopWindow,
-            archivedRemainderCardInstanceIds,
-            archivedRemainderCardIds,
-            selectedCardInstanceIds,
-            movedCardInstanceIds,
-            movedCardIds,
-            reorderCandidates,
-            criteria
-        );
-    }
-
-    /**
-     * 將指定牌庫卡移到牌庫最底，用於檢索後的剩餘牌重排流程。
-     */
-    private void moveDeckCardToBottom(Long matchId, Long userId, Long cardInstanceId) {
-        if (matchId == null || userId == null || cardInstanceId == null || cardInstanceId <= 0) {
-            return;
-        }
-        Integer nextOrder = jdbcTemplate.queryForObject(
-            """
-            SELECT COALESCE(MAX(order_index), 0) + 1
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'DECK'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET order_index = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'DECK'
-            """,
-            nextOrder == null ? 1 : nextOrder,
-            cardInstanceId,
-            matchId,
-            userId
-        );
-    }
-
-    /**
-     * 執行回手效果：從場上或指定區域挑選卡片返回手牌。
-     */
-    private Map<String, Object> executeReturnToHandEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode,
-        List<Long> selectedCardInstanceIds
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (!shouldApplyByDice(rawText, effectNode, effectType)) {
-            return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
-        }
-        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "手札に戻", 1);
-        int returnCount = Math.max(requestedCount, 1);
-        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
-        boolean excludeLimitedSupport = rawText.contains("LIMITED以外");
-        List<Long> effectiveSelectedCardInstanceIds = selectedCardInstanceIds;
-        if (effectiveSelectedCardInstanceIds == null || effectiveSelectedCardInstanceIds.isEmpty()) {
-            effectiveSelectedCardInstanceIds = extractEffectNodeLongList(effectNode, "selectedCardInstanceIds");
-        }
-        List<Map<String, Object>> candidates = cardSelectionProbeBuilder.resolveReturnToHandCandidates(
-            matchId,
-            userId,
-            effectNode,
-            criteria,
-            excludeLimitedSupport
-        );
-        List<Map<String, Object>> selected = selectSearchCards(candidates, effectiveSelectedCardInstanceIds, returnCount);
-
-        List<Long> movedCardInstanceIds = new ArrayList<>();
-        List<String> movedCardIds = new ArrayList<>();
-        int nextHandOrder = nextZoneOrder(matchId, userId, "HAND");
-        for (Map<String, Object> row : selected) {
-            Long cardInstanceId = asLong(row.get("id"));
-            String cardId = asText(row.get("card_id"));
-            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
-                continue;
-            }
-            int updated = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'HAND',
-                    order_index = ?,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'ARCHIVE'
-                """,
-                nextHandOrder++,
-                cardInstanceId,
-                matchId,
-                userId
-            );
-            if (updated != 1) {
-                continue;
-            }
-            movedCardInstanceIds.add(cardInstanceId);
-            movedCardIds.add(cardId);
-        }
-
-        return cardSelectionSummaryBuilder.buildReturnToHandSummary(
-            effectType,
-            returnCount,
-            candidates,
-            movedCardInstanceIds,
-            movedCardIds,
-            effectiveSelectedCardInstanceIds,
-            criteria,
-            excludeLimitedSupport,
-            cardSelectionRequestResolver.resolveReturnToHandSourceZone(effectNode, rawText)
-        );
-    }
-
-    /**
-     * 執行返回牌庫頂效果，並更新牌庫順序。
-     */
-    private Map<String, Object> executeReturnToDeckTopEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode,
-        List<Long> selectedCardInstanceIds
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (!shouldApplyByDice(rawText, effectNode, effectType)) {
-            return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
-        }
-        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "デッキの上に戻", 1);
-        int returnCount = Math.max(requestedCount, 1);
-        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
-
-        List<Map<String, Object>> candidates = loadCandidatesFromZone(matchId, userId, "ARCHIVE", criteria, false);
-        List<Map<String, Object>> selected = selectSearchCards(candidates, selectedCardInstanceIds, returnCount);
-
-        List<Long> movedCardInstanceIds = new ArrayList<>();
-        List<String> movedCardIds = new ArrayList<>();
-        Integer topDeckOrder = jdbcTemplate.queryForObject(
-            """
-            SELECT COALESCE(MIN(order_index), 1) - 1
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'DECK'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        int nextTopOrder = topDeckOrder == null ? 0 : topDeckOrder;
-        for (Map<String, Object> row : selected) {
-            Long cardInstanceId = asLong(row.get("id"));
-            String cardId = asText(row.get("card_id"));
-            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
-                continue;
-            }
-            int updated = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'DECK',
-                    order_index = ?,
-                    is_face_down = TRUE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'ARCHIVE'
-                """,
-                nextTopOrder--,
-                cardInstanceId,
-                matchId,
-                userId
-            );
-            if (updated != 1) {
-                continue;
-            }
-            movedCardInstanceIds.add(cardInstanceId);
-            movedCardIds.add(cardId);
-        }
-
-        return cardSelectionSummaryBuilder.buildReturnToDeckTopSummary(
-            effectType,
-            returnCount,
-            candidates,
-            movedCardInstanceIds,
-            movedCardIds,
-            selectedCardInstanceIds,
-            criteria
-        );
     }
 
     /**
@@ -8058,28 +7730,10 @@ public class MatchEffectService {
     }
 
     /**
-     * 依玩家指定或預設策略挑選最終檢索卡片。
-     */
-    private List<Map<String, Object>> selectSearchCards(
-        List<Map<String, Object>> candidates,
-        List<Long> selectedCardInstanceIds,
-        int searchCount
-    ) {
-        return searchService.selectSearchCards(candidates, selectedCardInstanceIds, searchCount);
-    }
-
-    /**
      * 依欄位順序讀取第一個有效文字值。
      */
     private String readText(JsonNode node, String... fields) {
         return MatchEffectValueHelper.readText(node, fields);
-    }
-
-    /**
-     * 依欄位順序讀取布林值（支援 true/false 字串）。
-     */
-    private Boolean readBoolean(JsonNode node, String... fields) {
-        return MatchEffectValueHelper.readBoolean(node, fields);
     }
 
     /**

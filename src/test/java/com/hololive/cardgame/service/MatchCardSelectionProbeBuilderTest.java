@@ -193,5 +193,15 @@ class MatchCardSelectionProbeBuilderTest {
             calls.add("filterCandidatesByCriteria");
             return filteredRows;
         }
+
+        @Override
+        public List<Map<String, Object>> selectSearchCards(
+            List<Map<String, Object>> candidates,
+            List<Long> selectedCardInstanceIds,
+            int searchCount
+        ) {
+            calls.add("selectSearchCards");
+            return List.of();
+        }
     }
 }
