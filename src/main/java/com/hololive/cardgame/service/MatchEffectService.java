@@ -109,6 +109,7 @@ public class MatchEffectService {
     private final PassiveGiftTriggerActionWriter passiveGiftTriggerActionWriter;
     private final GiftTurnUsageReader giftTurnUsageReader;
     private final MatchCardSelectionRequestResolver cardSelectionRequestResolver;
+    private final MatchCardSelectionProbeBuilder cardSelectionProbeBuilder;
     private final MatchCardSelectionSummaryBuilder cardSelectionSummaryBuilder;
 
     /**
@@ -148,6 +149,13 @@ public class MatchEffectService {
         );
         this.giftTurnUsageReader = new GiftTurnUsageReader(jdbcTemplate);
         this.cardSelectionRequestResolver = new MatchCardSelectionRequestResolver(effectTextParser);
+        this.cardSelectionProbeBuilder = new MatchCardSelectionProbeBuilder(
+            effectTextParser,
+            searchCriteriaParser,
+            cardSelectionRequestResolver,
+            new MatchCardSelectionSearchCandidateProvider(searchService),
+            this::shouldApplyByDice
+        );
         this.cardSelectionSummaryBuilder = new MatchCardSelectionSummaryBuilder();
     }
 
@@ -369,7 +377,12 @@ public class MatchEffectService {
         JsonNode effectNode = effectTextParser.parseEffectJson(effectJson);
         List<String> effectTypes = resolveEffectTypes(effectType, effectNode);
         for (String type : effectTypes) {
-            SelectionProbe probe = probeSelectionCandidates(matchId, userId, type, effectNode);
+            MatchCardSelectionProbeBuilder.SelectionProbe probe = cardSelectionProbeBuilder.probeSelectionCandidates(
+                matchId,
+                userId,
+                type,
+                effectNode
+            );
             if (probe == null || probe.candidates().isEmpty()) {
                 continue;
             }
@@ -420,7 +433,12 @@ public class MatchEffectService {
         ObjectNode giftNode = objectMapper.createObjectNode();
         giftNode.put("rawText", giftText);
         giftTriggerContextService.appendStoredGiftExecutionContext(giftNode, storedTriggerContext);
-        SelectionProbe probe = probeSelectionCandidates(matchId, userId, effectType, giftNode);
+        MatchCardSelectionProbeBuilder.SelectionProbe probe = cardSelectionProbeBuilder.probeSelectionCandidates(
+            matchId,
+            userId,
+            effectType,
+            giftNode
+        );
         if (probe == null || probe.candidates().isEmpty()) {
             return null;
         }
@@ -2164,7 +2182,7 @@ public class MatchEffectService {
         if (effectiveSelectedCardInstanceIds == null || effectiveSelectedCardInstanceIds.isEmpty()) {
             effectiveSelectedCardInstanceIds = extractEffectNodeLongList(effectNode, "selectedCardInstanceIds");
         }
-        List<Map<String, Object>> candidates = resolveReturnToHandCandidates(
+        List<Map<String, Object>> candidates = cardSelectionProbeBuilder.resolveReturnToHandCandidates(
             matchId,
             userId,
             effectNode,
@@ -2216,31 +2234,6 @@ public class MatchEffectService {
             criteria,
             excludeLimitedSupport,
             cardSelectionRequestResolver.resolveReturnToHandSourceZone(effectNode, rawText)
-        );
-    }
-
-    private List<Map<String, Object>> resolveReturnToHandCandidates(
-        Long matchId,
-        Long userId,
-        JsonNode effectNode,
-        SearchCriteria criteria,
-        boolean excludeLimitedSupport
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (cardSelectionRequestResolver.usesGiftHolderStackSnapshotForReturnToHand(effectNode, rawText)) {
-            return loadCandidatesByCardInstanceIds(
-                matchId,
-                userId,
-                extractEffectNodeLongList(effectNode, "giftHolderStackCardInstanceIds"),
-                criteria
-            );
-        }
-        return loadCandidatesFromZone(
-            matchId,
-            userId,
-            "ARCHIVE",
-            criteria,
-            excludeLimitedSupport
         );
     }
 
@@ -6625,116 +6618,6 @@ public class MatchEffectService {
             case "OPPONENT", "ENEMY", "OTHER" -> opponentUserId;
             default -> null;
         };
-    }
-
-    /**
-     * 探測效果是否需要選牌互動，並回傳候選與數量上限。
-     */
-    private SelectionProbe probeSelectionCandidates(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode
-    ) {
-        String normalizedType = effectTextParser.normalizeEffectType(effectType);
-        return switch (normalizedType) {
-            case "SEARCH" -> probeSearchCandidates(matchId, userId, effectNode);
-            case "RETURN_TO_HAND" -> probeReturnToHandCandidates(matchId, userId, effectNode);
-            case "RETURN_TO_DECK_TOP" -> probeReturnToDeckTopCandidates(matchId, userId, effectNode);
-            default -> null;
-        };
-    }
-
-    /**
-     * 探測 SEARCH 的候選清單與可選張數。
-     */
-    private SelectionProbe probeSearchCandidates(Long matchId, Long userId, JsonNode effectNode) {
-        int requestedCount = Math.max(cardSelectionRequestResolver.resolveSearchCount(effectNode), 1);
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        int lookTopCount = cardSelectionRequestResolver.resolveSearchLookTopCount(effectNode, rawText);
-        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
-        List<Map<String, Object>> rows = lookTopCount > 0
-            ? filterCandidatesByCriteria(loadTopDeckWindow(matchId, userId, lookTopCount), criteria)
-            : loadSearchCandidates(matchId, userId, criteria);
-        return new SelectionProbe(
-            requestedCount,
-            mapDecisionCandidates(rows, "DECK")
-        );
-    }
-
-    /**
-     * 探測 RETURN_TO_HAND 的候選清單與可選張數。
-     */
-    private SelectionProbe probeReturnToHandCandidates(Long matchId, Long userId, JsonNode effectNode) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (!shouldApplyByDice(rawText, effectNode, "RETURN_TO_HAND")) {
-            return null;
-        }
-        int requestedCount = Math.max(cardSelectionRequestResolver.resolveActionCount(effectNode, "手札に戻", 1), 1);
-        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
-        boolean excludeLimitedSupport = rawText.contains("LIMITED以外");
-        List<Map<String, Object>> rows = resolveReturnToHandCandidates(
-            matchId,
-            userId,
-            effectNode,
-            criteria,
-            excludeLimitedSupport
-        );
-        return new SelectionProbe(
-            requestedCount,
-            mapDecisionCandidates(rows, cardSelectionRequestResolver.resolveReturnToHandSourceZone(effectNode, rawText))
-        );
-    }
-
-    /**
-     * 探測 RETURN_TO_DECK_TOP 的候選清單與可選張數。
-     */
-    private SelectionProbe probeReturnToDeckTopCandidates(Long matchId, Long userId, JsonNode effectNode) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (!shouldApplyByDice(rawText, effectNode, "RETURN_TO_DECK_TOP")) {
-            return null;
-        }
-        int requestedCount = Math.max(cardSelectionRequestResolver.resolveActionCount(effectNode, "デッキの上に戻", 1), 1);
-        SearchCriteria criteria = searchCriteriaParser.resolveSearchCriteria(effectNode);
-        List<Map<String, Object>> rows = loadCandidatesFromZone(
-            matchId,
-            userId,
-            "ARCHIVE",
-            criteria,
-            false
-        );
-        return new SelectionProbe(
-            requestedCount,
-            mapDecisionCandidates(rows, "ARCHIVE")
-        );
-    }
-
-    /**
-     * 將資料列轉成前端互動使用的 DecisionCandidate。
-     */
-    private List<DecisionCandidate> mapDecisionCandidates(List<Map<String, Object>> rows, String zone) {
-        if (rows == null || rows.isEmpty()) {
-            return List.of();
-        }
-        List<DecisionCandidate> candidates = new ArrayList<>();
-        for (Map<String, Object> row : rows) {
-            Long cardInstanceId = asLong(row.get("id"));
-            String cardId = asText(row.get("card_id"));
-            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
-                continue;
-            }
-            candidates.add(
-                new DecisionCandidate(
-                    cardInstanceId,
-                    cardId,
-                    asText(row.get("name")),
-                    normalize(asText(row.get("card_type"))),
-                    normalizeLevelType(asText(row.get("level_type"))),
-                    normalize(zone)
-                )
-            );
-        }
-        return candidates;
     }
 
     /**
@@ -11791,14 +11674,6 @@ public class MatchEffectService {
         String effectType,
         int minSelect,
         int maxSelect,
-        List<DecisionCandidate> candidates
-    ) {}
-
-    /**
-     * 內部探測結果：候選列表與需求數量。
-     */
-    private record SelectionProbe(
-        int requestedCount,
         List<DecisionCandidate> candidates
     ) {}
 
