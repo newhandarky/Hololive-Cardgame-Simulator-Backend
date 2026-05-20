@@ -85,82 +85,13 @@ final class MatchCardSelectionExecutionService {
             : searchPool;
 
         List<Map<String, Object>> selected = candidateProvider.selectSearchCards(candidates, selectedCardInstanceIds, searchCount);
-        List<Long> movedCardInstanceIds = new ArrayList<>();
-        List<String> movedCardIds = new ArrayList<>();
-        int nextHandOrder = nextZoneOrder(matchId, userId, "HAND");
-        for (Map<String, Object> row : selected) {
-            Long cardInstanceId = asLong(row.get("id"));
-            String cardId = asText(row.get("card_id"));
-            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
-                continue;
-            }
-            int updated = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'HAND',
-                    order_index = ?,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = ?
-                """,
-                nextHandOrder++,
-                cardInstanceId,
-                matchId,
-                userId,
-                searchSourceZone
-            );
-            if (updated != 1) {
-                continue;
-            }
-            movedCardInstanceIds.add(cardInstanceId);
-            movedCardIds.add(cardId);
-        }
-
-        Set<Long> selectedIds = new LinkedHashSet<>();
-        for (Map<String, Object> row : selected) {
-            Long id = asLong(row.get("id"));
-            if (id != null && id > 0) {
-                selectedIds.add(id);
-            }
-        }
+        MovedCards movedCards = moveSelectedCardsToHand(matchId, userId, selected, searchSourceZone);
+        Set<Long> selectedIds = collectCardInstanceIds(selected);
 
         List<Map<String, Object>> reorderCandidates = new ArrayList<>();
-        List<Long> archivedRemainderCardInstanceIds = new ArrayList<>();
-        List<String> archivedRemainderCardIds = new ArrayList<>();
+        MovedCards archivedRemainderCards = new MovedCards();
         if (archiveUnselectedTopWindow && searchFromDeck && lookTopCount > 0) {
-            int nextArchiveOrder = nextZoneOrder(matchId, userId, "ARCHIVE");
-            for (Map<String, Object> row : searchPool) {
-                Long id = asLong(row.get("id"));
-                if (id == null || selectedIds.contains(id)) {
-                    continue;
-                }
-                String cardId = asText(row.get("card_id"));
-                int updated = jdbcTemplate.update(
-                    """
-                    UPDATE match_cards
-                    SET zone = 'ARCHIVE',
-                        order_index = ?,
-                        is_face_down = FALSE,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                      AND match_id = ?
-                      AND owner_user_id = ?
-                      AND zone = 'DECK'
-                    """,
-                    nextArchiveOrder++,
-                    id,
-                    matchId,
-                    userId
-                );
-                if (updated != 1) {
-                    continue;
-                }
-                archivedRemainderCardInstanceIds.add(id);
-                archivedRemainderCardIds.add(cardId);
-            }
+            archivedRemainderCards = moveUnselectedTopWindowCardsToArchive(matchId, userId, searchPool, selectedIds);
         } else if (requiresDeckBottomReorder) {
             for (Map<String, Object> row : searchPool) {
                 Long id = asLong(row.get("id"));
@@ -184,11 +115,11 @@ final class MatchCardSelectionExecutionService {
             lookTopCount,
             searchSourceZone,
             archiveUnselectedTopWindow,
-            archivedRemainderCardInstanceIds,
-            archivedRemainderCardIds,
+            archivedRemainderCards.cardInstanceIds(),
+            archivedRemainderCards.cardIds(),
             selectedCardInstanceIds,
-            movedCardInstanceIds,
-            movedCardIds,
+            movedCards.cardInstanceIds(),
+            movedCards.cardIds(),
             reorderCandidates,
             criteria
         );
@@ -226,45 +157,14 @@ final class MatchCardSelectionExecutionService {
             returnCount
         );
 
-        List<Long> movedCardInstanceIds = new ArrayList<>();
-        List<String> movedCardIds = new ArrayList<>();
-        int nextHandOrder = nextZoneOrder(matchId, userId, "HAND");
-        for (Map<String, Object> row : selected) {
-            Long cardInstanceId = asLong(row.get("id"));
-            String cardId = asText(row.get("card_id"));
-            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
-                continue;
-            }
-            int updated = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'HAND',
-                    order_index = ?,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'ARCHIVE'
-                """,
-                nextHandOrder++,
-                cardInstanceId,
-                matchId,
-                userId
-            );
-            if (updated != 1) {
-                continue;
-            }
-            movedCardInstanceIds.add(cardInstanceId);
-            movedCardIds.add(cardId);
-        }
+        MovedCards movedCards = moveSelectedCardsToHand(matchId, userId, selected, "ARCHIVE");
 
         return summaryBuilder.buildReturnToHandSummary(
             effectType,
             returnCount,
             candidates,
-            movedCardInstanceIds,
-            movedCardIds,
+            movedCards.cardInstanceIds(),
+            movedCards.cardIds(),
             effectiveSelectedCardInstanceIds,
             criteria,
             excludeLimitedSupport,
@@ -290,8 +190,62 @@ final class MatchCardSelectionExecutionService {
         List<Map<String, Object>> candidates = candidateProvider.loadCandidatesFromZone(matchId, userId, "ARCHIVE", criteria, false);
         List<Map<String, Object>> selected = candidateProvider.selectSearchCards(candidates, selectedCardInstanceIds, returnCount);
 
-        List<Long> movedCardInstanceIds = new ArrayList<>();
-        List<String> movedCardIds = new ArrayList<>();
+        MovedCards movedCards = moveSelectedCardsToDeckTop(matchId, userId, selected);
+
+        return summaryBuilder.buildReturnToDeckTopSummary(
+            effectType,
+            returnCount,
+            candidates,
+            movedCards.cardInstanceIds(),
+            movedCards.cardIds(),
+            selectedCardInstanceIds,
+            criteria
+        );
+    }
+
+    private MovedCards moveSelectedCardsToHand(
+        Long matchId,
+        Long userId,
+        List<Map<String, Object>> selected,
+        String sourceZone
+    ) {
+        MovedCards movedCards = new MovedCards();
+        int nextHandOrder = nextZoneOrder(matchId, userId, "HAND");
+        for (Map<String, Object> row : selected) {
+            Long cardInstanceId = asLong(row.get("id"));
+            String cardId = asText(row.get("card_id"));
+            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
+                continue;
+            }
+            int updated = jdbcTemplate.update(
+                """
+                UPDATE match_cards
+                SET zone = 'HAND',
+                    order_index = ?,
+                    is_face_down = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = ?
+                """,
+                nextHandOrder++,
+                cardInstanceId,
+                matchId,
+                userId,
+                sourceZone
+            );
+            movedCards.record(cardInstanceId, cardId, updated == 1);
+        }
+        return movedCards;
+    }
+
+    private MovedCards moveSelectedCardsToDeckTop(
+        Long matchId,
+        Long userId,
+        List<Map<String, Object>> selected
+    ) {
+        MovedCards movedCards = new MovedCards();
         Integer topDeckOrder = jdbcTemplate.queryForObject(
             """
             SELECT COALESCE(MIN(order_index), 1) - 1
@@ -328,22 +282,56 @@ final class MatchCardSelectionExecutionService {
                 matchId,
                 userId
             );
-            if (updated != 1) {
+            movedCards.record(cardInstanceId, cardId, updated == 1);
+        }
+        return movedCards;
+    }
+
+    private MovedCards moveUnselectedTopWindowCardsToArchive(
+        Long matchId,
+        Long userId,
+        List<Map<String, Object>> searchPool,
+        Set<Long> selectedIds
+    ) {
+        MovedCards movedCards = new MovedCards();
+        int nextArchiveOrder = nextZoneOrder(matchId, userId, "ARCHIVE");
+        for (Map<String, Object> row : searchPool) {
+            Long cardInstanceId = asLong(row.get("id"));
+            String cardId = asText(row.get("card_id"));
+            if (cardInstanceId == null || selectedIds.contains(cardInstanceId)) {
                 continue;
             }
-            movedCardInstanceIds.add(cardInstanceId);
-            movedCardIds.add(cardId);
+            int updated = jdbcTemplate.update(
+                """
+                UPDATE match_cards
+                SET zone = 'ARCHIVE',
+                    order_index = ?,
+                    is_face_down = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND match_id = ?
+                  AND owner_user_id = ?
+                  AND zone = 'DECK'
+                """,
+                nextArchiveOrder++,
+                cardInstanceId,
+                matchId,
+                userId
+            );
+            movedCards.recordAllowMissingCardId(cardInstanceId, cardId, updated == 1);
         }
+        return movedCards;
+    }
 
-        return summaryBuilder.buildReturnToDeckTopSummary(
-            effectType,
-            returnCount,
-            candidates,
-            movedCardInstanceIds,
-            movedCardIds,
-            selectedCardInstanceIds,
-            criteria
-        );
+    private Set<Long> collectCardInstanceIds(List<Map<String, Object>> rows) {
+        Set<Long> ids = new LinkedHashSet<>();
+        for (Map<String, Object> row : rows) {
+            Long id = asLong(row.get("id"));
+            if (id != null && id > 0) {
+                ids.add(id);
+            }
+        }
+        return ids;
     }
 
     private void moveDeckCardToBottom(Long matchId, Long userId, Long cardInstanceId) {
@@ -402,5 +390,35 @@ final class MatchCardSelectionExecutionService {
         summary.put("applied", false);
         summary.put("reason", reason);
         return summary;
+    }
+
+    static final class MovedCards {
+
+        private final List<Long> cardInstanceIds = new ArrayList<>();
+        private final List<String> cardIds = new ArrayList<>();
+
+        void record(Long cardInstanceId, String cardId, boolean moved) {
+            if (!moved || cardInstanceId == null || !StringUtils.hasText(cardId)) {
+                return;
+            }
+            cardInstanceIds.add(cardInstanceId);
+            cardIds.add(cardId);
+        }
+
+        void recordAllowMissingCardId(Long cardInstanceId, String cardId, boolean moved) {
+            if (!moved || cardInstanceId == null) {
+                return;
+            }
+            cardInstanceIds.add(cardInstanceId);
+            cardIds.add(cardId);
+        }
+
+        List<Long> cardInstanceIds() {
+            return cardInstanceIds;
+        }
+
+        List<String> cardIds() {
+            return cardIds;
+        }
     }
 }
