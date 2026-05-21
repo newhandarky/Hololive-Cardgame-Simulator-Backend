@@ -4529,6 +4529,44 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         request.setTargetHolomemCardInstanceId(triggerHolomemCardInstanceId);
         matchActionService.bloom(matchId, hostId, request);
 
+        String pendingContextText = jdbcTemplate.query(
+            """
+            SELECT context_json::text
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND status = 'PENDING'
+              AND decision_type = 'TRIGGER_EFFECT_CONFIRM'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("context_json") : "",
+            matchId,
+            hostId
+        );
+        assertThat(pendingContextText).containsPattern("\"sourceActionType\"\\s*:\\s*\"BLOOM\"");
+        assertThat(pendingContextText).contains("BLOOM_FROM_ARCHIVE");
+
+        Map<String, Object> targetBeforeConfirm = jdbcTemplate.queryForMap(
+            """
+            SELECT match_card_id, card_id, current_level
+            FROM match_holomems
+            WHERE id = ?
+            """,
+            targetHolomemId
+        );
+        String archiveBloomCardZoneBeforeConfirm = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_cards WHERE id = ?",
+            String.class,
+            archiveBloomCardInstanceId
+        );
+        assertThat(((Number) targetBeforeConfirm.get("match_card_id")).longValue()).isEqualTo(targetHolomemCardInstanceId);
+        assertThat(targetBeforeConfirm.get("card_id")).isEqualTo(targetDebutCardId);
+        assertThat(targetBeforeConfirm.get("current_level")).isEqualTo("DEBUT");
+        assertThat(archiveBloomCardZoneBeforeConfirm).isEqualTo("ARCHIVE");
+
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
+
         Map<String, Object> targetAfter = jdbcTemplate.queryForMap(
             """
             SELECT match_card_id, card_id, current_level
