@@ -1285,9 +1285,6 @@ public class MatchEffectService {
         }
 
         List<String> effectTypes = bloomPlan.effectTypes();
-        List<Map<String, Object>> executed = new ArrayList<>();
-        List<String> unsupported = new ArrayList<>();
-        List<Map<String, Object>> skippedEffects = new ArrayList<>();
         Integer diceRoll = bloomPlan.diceRoll();
         ObjectNode bloomEffectNode = mutableEffectNode(bloomPlan.effectNode());
         if (matchId != null) {
@@ -1300,7 +1297,6 @@ public class MatchEffectService {
             bloomEffectNode.put("sourceHolomemCardInstanceId", selfHolomemCardInstanceId);
         }
         String normalizedBloomCardId = normalize(bloomCardId);
-        int archivedStackCostCount = -1;
         Integer oddRollCount = null;
         if (normalizedBloomCardId.startsWith("HBP04-059")) {
             DiceResolution resolution = resolveDiceResolution(bloomEffectNode);
@@ -1312,6 +1308,57 @@ public class MatchEffectService {
             bloomEffectNode.put("oddRollCount", oddRollCount);
             diceRoll = resolution.chosenRoll();
         }
+
+        BloomDispatchResult dispatchResult = executeBloomEffectTypes(
+            matchId,
+            userId,
+            selfHolomemCardInstanceId,
+            normalizedBloomCardId,
+            effectTypes,
+            bloomEffectNode
+        );
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("hasBloomEffect", true);
+        summary.put("requestedEffects", effectTypes);
+        summary.put("executedEffects", dispatchResult.executed());
+        summary.put("unsupportedEffects", dispatchResult.unsupported());
+        summary.put("skippedEffects", dispatchResult.skippedEffects());
+        summary.put(
+            "partiallyResolved",
+            !dispatchResult.skippedEffects().isEmpty() || !dispatchResult.unsupported().isEmpty()
+        );
+        summary.put("rawText", bloomPlan.rawText());
+        if ((diceRoll == null || diceRoll <= 0) && bloomEffectNode.has("diceRoll")) {
+            int fromNode = bloomEffectNode.path("diceRoll").asInt(0);
+            if (fromNode >= 1 && fromNode <= 6) {
+                diceRoll = fromNode;
+            }
+        }
+        if (diceRoll != null) {
+            summary.put("diceRoll", diceRoll);
+        }
+        if (bloomEffectNode.has("diceRolls")) {
+            summary.put("diceRolls", objectMapper.convertValue(bloomEffectNode.get("diceRolls"), new TypeReference<List<Integer>>() {}));
+        }
+        if (oddRollCount != null) {
+            summary.put("oddRollCount", oddRollCount);
+        }
+        return summary;
+    }
+
+    private BloomDispatchResult executeBloomEffectTypes(
+        Long matchId,
+        Long userId,
+        Long selfHolomemCardInstanceId,
+        String normalizedBloomCardId,
+        List<String> effectTypes,
+        ObjectNode bloomEffectNode
+    ) {
+        List<Map<String, Object>> executed = new ArrayList<>();
+        List<String> unsupported = new ArrayList<>();
+        List<Map<String, Object>> skippedEffects = new ArrayList<>();
+        int archivedStackCostCount = -1;
 
         for (String effectType : effectTypes) {
             String targetType = inferBloomTargetType(effectType);
@@ -1531,30 +1578,7 @@ public class MatchEffectService {
             }
         }
 
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("hasBloomEffect", true);
-        summary.put("requestedEffects", effectTypes);
-        summary.put("executedEffects", executed);
-        summary.put("unsupportedEffects", unsupported);
-        summary.put("skippedEffects", skippedEffects);
-        summary.put("partiallyResolved", !skippedEffects.isEmpty() || !unsupported.isEmpty());
-        summary.put("rawText", bloomPlan.rawText());
-        if ((diceRoll == null || diceRoll <= 0) && bloomEffectNode.has("diceRoll")) {
-            int fromNode = bloomEffectNode.path("diceRoll").asInt(0);
-            if (fromNode >= 1 && fromNode <= 6) {
-                diceRoll = fromNode;
-            }
-        }
-        if (diceRoll != null) {
-            summary.put("diceRoll", diceRoll);
-        }
-        if (bloomEffectNode.has("diceRolls")) {
-            summary.put("diceRolls", objectMapper.convertValue(bloomEffectNode.get("diceRolls"), new TypeReference<List<Integer>>() {}));
-        }
-        if (oddRollCount != null) {
-            summary.put("oddRollCount", oddRollCount);
-        }
-        return summary;
+        return new BloomDispatchResult(executed, unsupported, skippedEffects);
     }
 
     /**
@@ -11340,6 +11364,15 @@ public class MatchEffectService {
         JsonNode effectNode,
         String rawText,
         Integer diceRoll
+    ) {}
+
+    /**
+     * Bloom 效果分派結果（執行摘要、未支援與略過清單）。
+     */
+    private record BloomDispatchResult(
+        List<Map<String, Object>> executed,
+        List<String> unsupported,
+        List<Map<String, Object>> skippedEffects
     ) {}
 
     /**
