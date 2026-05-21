@@ -14,13 +14,16 @@ import java.util.Map;
 class MatchCollabEffectDispatcher {
 
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
+    private final MatchLookEffectExecutionService lookEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
         MatchCardSelectionExecutionService cardSelectionExecutionService,
+        MatchLookEffectExecutionService lookEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
+        this.lookEffectExecutionService = lookEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -177,13 +180,13 @@ class MatchCollabEffectDispatcher {
                         effectService.executeAllowExtraBloomEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "LOOK_TOP_DECK" -> executed.add(
-                        effectService.executeLookTopDeckEffect(matchId, userId, effectType, collabEffectNode)
+                        lookEffectExecutionService.executeLookTopDeckEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "LOOK_OPPONENT_HAND" -> executed.add(
-                        effectService.executeLookOpponentHandEffect(matchId, userId, effectType, collabEffectNode)
+                        lookEffectExecutionService.executeLookOpponentHandEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "LOOK_HOLOPOWER" -> executed.add(
-                        effectService.executeLookHolopowerEffect(matchId, userId, effectType, collabEffectNode)
+                        lookEffectExecutionService.executeLookHolopowerEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "MOVE_ZONE" -> executed.add(
                         effectService.executeMoveZoneEffect(

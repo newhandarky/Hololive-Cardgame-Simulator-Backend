@@ -14,13 +14,16 @@ import java.util.Map;
 class MatchBloomEffectDispatcher {
 
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
+    private final MatchLookEffectExecutionService lookEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
         MatchCardSelectionExecutionService cardSelectionExecutionService,
+        MatchLookEffectExecutionService lookEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
+        this.lookEffectExecutionService = lookEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -184,13 +187,13 @@ class MatchBloomEffectDispatcher {
                         effectService.executeAllowExtraBloomEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "LOOK_TOP_DECK" -> executed.add(
-                        effectService.executeLookTopDeckEffect(matchId, userId, effectType, bloomEffectNode)
+                        lookEffectExecutionService.executeLookTopDeckEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "LOOK_OPPONENT_HAND" -> executed.add(
-                        effectService.executeLookOpponentHandEffect(matchId, userId, effectType, bloomEffectNode)
+                        lookEffectExecutionService.executeLookOpponentHandEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "LOOK_HOLOPOWER" -> executed.add(
-                        effectService.executeLookHolopowerEffect(matchId, userId, effectType, bloomEffectNode)
+                        lookEffectExecutionService.executeLookHolopowerEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "ARCHIVE_STACK_CARD" -> {
                         Map<String, Object> archiveSummary = effectService.executeArchiveStackCardEffect(
