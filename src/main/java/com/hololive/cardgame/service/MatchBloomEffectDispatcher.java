@@ -15,15 +15,18 @@ class MatchBloomEffectDispatcher {
 
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
     private final MatchLookEffectExecutionService lookEffectExecutionService;
+    private final MatchDrawEffectExecutionService drawEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
         MatchCardSelectionExecutionService cardSelectionExecutionService,
         MatchLookEffectExecutionService lookEffectExecutionService,
+        MatchDrawEffectExecutionService drawEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
         this.lookEffectExecutionService = lookEffectExecutionService;
+        this.drawEffectExecutionService = drawEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -44,7 +47,9 @@ class MatchBloomEffectDispatcher {
             String targetType = effectService.inferBloomTargetType(effectType);
             try {
                 switch (effectType) {
-                    case "DRAW" -> executed.add(effectService.executeDrawEffect(matchId, userId, effectType, bloomEffectNode));
+                    case "DRAW" -> executed.add(
+                        drawEffectExecutionService.executeDrawEffect(matchId, userId, effectType, bloomEffectNode)
+                    );
                     case "SEARCH" -> executed.add(
                         cardSelectionExecutionService.executeSearchEffect(matchId, userId, effectType, bloomEffectNode, null)
                     );

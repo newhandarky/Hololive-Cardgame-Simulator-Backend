@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hololive.cardgame.game.action.ActionResult;
-import com.hololive.cardgame.game.action.AtomicAction;
 import com.hololive.cardgame.game.action.EffectContext;
 import com.hololive.cardgame.game.action.EffectResolver;
 import com.hololive.cardgame.game.action.GameActionExecutor;
@@ -37,8 +36,6 @@ public class MatchEffectService {
 
     private static final Pattern SPECIAL_DAMAGE_PATTERN = Pattern.compile("特殊ダメージ\\s*(\\d+)");
     private static final Pattern DAMAGE_PATTERN = Pattern.compile("ダメージ\\s*(\\d+)");
-    private static final Pattern DRAW_COUNT_PATTERN = Pattern.compile("デッキを\\s*(\\d+)\\s*枚引く");
-    private static final Pattern DRAW_COUNT_FALLBACK_PATTERN = Pattern.compile("(\\d+)\\s*枚引く");
     private static final Pattern HEAL_PATTERN = Pattern.compile("HP\\s*(\\d+)\\s*回復");
     private static final Pattern CHEER_COUNT_PATTERN = Pattern.compile("エール\\s*(\\d+)\\s*枚");
     private static final Pattern TAG_PATTERN = Pattern.compile(
@@ -98,7 +95,6 @@ public class MatchEffectService {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final DiceService diceService;
-    private final EffectResolver effectResolver;
     private final GameActionExecutor gameActionExecutor;
     private final EffectTextParser effectTextParser;
     private final GiftTriggerMatcher giftTriggerMatcher;
@@ -112,6 +108,7 @@ public class MatchEffectService {
     private final MatchCardSelectionProbeBuilder cardSelectionProbeBuilder;
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
     private final MatchLookEffectExecutionService lookEffectExecutionService;
+    private final MatchDrawEffectExecutionService drawEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -128,7 +125,6 @@ public class MatchEffectService {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.diceService = diceService;
-        this.effectResolver = effectResolver;
         this.gameActionExecutor = gameActionExecutor;
         this.effectTextParser = new EffectTextParser(objectMapper);
         this.giftTriggerMatcher = new GiftTriggerMatcher();
@@ -173,14 +169,24 @@ public class MatchEffectService {
             this::shouldApplyByDice
         );
         this.lookEffectExecutionService = new MatchLookEffectExecutionService(jdbcTemplate, effectTextParser);
+        this.drawEffectExecutionService = new MatchDrawEffectExecutionService(
+            jdbcTemplate,
+            objectMapper,
+            effectResolver,
+            gameActionExecutor,
+            effectTextParser,
+            this::shouldApplyByDice
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
+            drawEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
+            drawEffectExecutionService,
             this
         );
     }
@@ -232,7 +238,7 @@ public class MatchEffectService {
         for (String type : effectTypes) {
             try {
                 switch (type) {
-                    case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, type, effectNode));
+                    case "DRAW" -> executed.add(drawEffectExecutionService.executeDrawEffect(matchId, userId, type, effectNode));
                     case "SEARCH" -> executed.add(
                         cardSelectionExecutionService.executeSearchEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
                     );
@@ -635,7 +641,7 @@ public class MatchEffectService {
             ObjectNode drawNode = objectMapper.createObjectNode();
             drawNode.put("rawText", "自分のデッキを" + drawCount + "枚引く");
             drawNode.put("value", drawCount);
-            Map<String, Object> drawSummary = executeDrawEffect(matchId, userId, "DRAW", drawNode);
+            Map<String, Object> drawSummary = drawEffectExecutionService.executeDrawEffect(matchId, userId, "DRAW", drawNode);
             executed.add(drawSummary);
             return new GiftExecutionSummary(
                 List.of("REVEAL_TO_ARCHIVE", "DRAW"),
@@ -758,7 +764,7 @@ public class MatchEffectService {
     ) {
         String targetType = inferBloomTargetType(effectType);
         return switch (effectType) {
-            case "DRAW" -> executeDrawEffect(matchId, userId, effectType, giftNode);
+            case "DRAW" -> drawEffectExecutionService.executeDrawEffect(matchId, userId, effectType, giftNode);
             case "SEARCH" -> cardSelectionExecutionService.executeSearchEffect(matchId, userId, effectType, giftNode, null);
             case "REPLACE_ARCHIVE_WITH_HAND" -> executeReplaceArchiveWithHandEffect(
                 matchId,
@@ -1487,109 +1493,6 @@ public class MatchEffectService {
             return fallbackSelfCardInstanceId;
         }
         return null;
-    }
-
-    /**
-     * 執行抽牌效果，優先走 Action Pipeline，失敗時回退到既有 SQL 流程。
-     */
-    Map<String, Object> executeDrawEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (!shouldApplyByDice(rawText, effectNode, effectType)) {
-            return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
-        }
-        int requestedCount = resolveDrawCount(effectNode);
-        int drawCount = Math.max(requestedCount, 1);
-
-        List<Long> drawnCardInstanceIds = new ArrayList<>();
-        // P1-3: 以 EffectResolver + GameActionExecutor 執行 DRAW，舊 SQL 作為安全 fallback。
-        try {
-            ObjectNode pipelineNode = objectMapper.createObjectNode();
-            pipelineNode.put("drawCount", drawCount);
-            pipelineNode.put("fromZone", "DECK");
-            pipelineNode.put("toZone", "HAND");
-            EffectContext context = new EffectContext(
-                matchId,
-                userId,
-                resolveCurrentTurnNumber(matchId),
-                "SUPPORT_EFFECT",
-                null,
-                null
-            );
-            List<AtomicAction> actions = effectResolver.resolve(context, effectType, pipelineNode);
-            if (!actions.isEmpty()) {
-                List<ActionResult> results = gameActionExecutor.execute(context, actions);
-                if (!results.isEmpty() && results.get(0).success()) {
-                    Object movedCards = results.get(0).details().get("cardInstanceIds");
-                    if (movedCards instanceof List<?> list) {
-                        for (Object id : list) {
-                            if (id instanceof Number n) {
-                                drawnCardInstanceIds.add(n.longValue());
-                            } else if (id instanceof String s) {
-                                try {
-                                    drawnCardInstanceIds.add(Long.parseLong(s));
-                                } catch (NumberFormatException ignored) {
-                                    // ignore invalid id payload
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (RuntimeException ignored) {
-            // fallback below
-        }
-        if (drawnCardInstanceIds.isEmpty()) {
-            int nextHandOrder = nextZoneOrder(matchId, userId, "HAND");
-            for (int i = 0; i < drawCount; i++) {
-                Long deckCardInstanceId = jdbcTemplate.query(
-                    """
-                    SELECT id
-                    FROM match_cards
-                    WHERE match_id = ?
-                      AND owner_user_id = ?
-                      AND zone = 'DECK'
-                    ORDER BY order_index NULLS LAST, id
-                    LIMIT 1
-                    """,
-                    rs -> rs.next() ? rs.getLong("id") : null,
-                    matchId,
-                    userId
-                );
-                if (deckCardInstanceId == null) {
-                    break;
-                }
-                jdbcTemplate.update(
-                    """
-                    UPDATE match_cards
-                    SET zone = 'HAND',
-                        order_index = ?,
-                        is_face_down = FALSE,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                      AND match_id = ?
-                      AND owner_user_id = ?
-                      AND zone = 'DECK'
-                    """,
-                    nextHandOrder++,
-                    deckCardInstanceId,
-                    matchId,
-                    userId
-                );
-                drawnCardInstanceIds.add(deckCardInstanceId);
-            }
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("drawRequested", drawCount);
-        summary.put("drawApplied", drawnCardInstanceIds.size());
-        summary.put("drawnCardInstanceIds", drawnCardInstanceIds);
-        return summary;
     }
 
     /**
@@ -7470,26 +7373,6 @@ public class MatchEffectService {
             holomemId,
             matchId
         );
-    }
-
-    /**
-     * 解析抽牌數量，支援欄位讀值與文案推斷。
-     */
-    private int resolveDrawCount(JsonNode effectNode) {
-        int fromFields = effectTextParser.extractInt(effectNode, 0, "value", "cards", "amount");
-        if (fromFields > 0) {
-            return fromFields;
-        }
-        String text = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        int exact = effectTextParser.extractByPattern(text, DRAW_COUNT_PATTERN);
-        if (exact > 0) {
-            return exact;
-        }
-        int fallback = effectTextParser.extractByPattern(text, DRAW_COUNT_FALLBACK_PATTERN);
-        if (fallback > 0) {
-            return fallback;
-        }
-        return text.contains("引く") ? 1 : 0;
     }
 
     /**

@@ -15,15 +15,18 @@ class MatchCollabEffectDispatcher {
 
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
     private final MatchLookEffectExecutionService lookEffectExecutionService;
+    private final MatchDrawEffectExecutionService drawEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
         MatchCardSelectionExecutionService cardSelectionExecutionService,
         MatchLookEffectExecutionService lookEffectExecutionService,
+        MatchDrawEffectExecutionService drawEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
         this.lookEffectExecutionService = lookEffectExecutionService;
+        this.drawEffectExecutionService = drawEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -69,7 +72,9 @@ class MatchCollabEffectDispatcher {
             }
             try {
                 switch (effectType) {
-                    case "DRAW" -> executed.add(effectService.executeDrawEffect(matchId, userId, effectType, collabEffectNode));
+                    case "DRAW" -> executed.add(
+                        drawEffectExecutionService.executeDrawEffect(matchId, userId, effectType, collabEffectNode)
+                    );
                     case "SEARCH" -> executed.add(
                         cardSelectionExecutionService.executeSearchEffect(matchId, userId, effectType, collabEffectNode, null)
                     );
