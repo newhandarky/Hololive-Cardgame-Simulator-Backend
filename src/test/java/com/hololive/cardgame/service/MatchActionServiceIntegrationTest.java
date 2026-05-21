@@ -8702,6 +8702,75 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
     }
 
     @Test
+    void playSupportShouldApplyRestEffectToSelectedOpponentHolomem() {
+        StartedMatchContext context = createStartedMatch("support-rest-host", "support-rest-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        String guestCenterCardId = createMemberCardDefinition(
+            "TSUP_REST_TARGET_" + System.nanoTime(),
+            "支援休息目標",
+            "DEBUT",
+            120,
+            "GREEN"
+        );
+        Long guestCenterCardInstanceId = createStageHolomemWithSingleCard(
+            matchId,
+            guestId,
+            guestCenterCardId,
+            "CENTER",
+            "DEBUT",
+            0
+        );
+
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TSUP_REST_" + System.nanoTime(),
+            false,
+            "REST",
+            "{\"type\":\"REST\",\"rawText\":\"相手のホロメン1人をお休みにする。\"}",
+            "ENEMY"
+        );
+
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        request.setTargetHolomemCardInstanceId(guestCenterCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        Boolean targetRested = jdbcTemplate.query(
+            """
+            SELECT is_rested
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
+            rs -> rs.next() ? rs.getBoolean("is_rested") : null,
+            matchId,
+            guestId,
+            guestCenterCardInstanceId
+        );
+        String latestPlaySupportPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND action_type = 'PLAY_SUPPORT'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : null,
+            matchId
+        );
+
+        assertThat(targetRested).isTrue();
+        assertThat(latestPlaySupportPayload).contains("REST");
+        assertThat(latestPlaySupportPayload).contains("rested");
+    }
+
+    @Test
     void playSupportDamageShouldRequireTriggerConfirmBeforeApplyingDownEventExtraLifeLoss() {
         StartedMatchContext context = createStartedMatch("support-down-event-host", "support-down-event-guest");
         Long matchId = context.matchId();

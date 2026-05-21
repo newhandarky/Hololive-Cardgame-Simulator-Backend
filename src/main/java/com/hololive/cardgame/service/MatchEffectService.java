@@ -110,6 +110,7 @@ public class MatchEffectService {
     private final MatchLookEffectExecutionService lookEffectExecutionService;
     private final MatchDrawEffectExecutionService drawEffectExecutionService;
     private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
+    private final MatchRestEffectExecutionService restEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -184,11 +185,20 @@ public class MatchEffectService {
             cardSelectionRequestResolver,
             this::shouldApplyByDice
         );
+        this.restEffectExecutionService = new MatchRestEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            this::shouldApplyByDice,
+            this::resolveEffectTargetHolomemId,
+            this::resolveOpponentUserId,
+            this::resolveHolomemCardInstanceId
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
             drawEffectExecutionService,
             holopowerMoveEffectExecutionService,
+            restEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -196,6 +206,7 @@ public class MatchEffectService {
             lookEffectExecutionService,
             drawEffectExecutionService,
             holopowerMoveEffectExecutionService,
+            restEffectExecutionService,
             this
         );
     }
@@ -333,7 +344,14 @@ public class MatchEffectService {
                         executeDiscardHandEffect(matchId, userId, type, effectNode)
                     );
                     case "REST" -> executed.add(
-                        executeRestEffect(matchId, userId, type, effectNode, targetType, targetHolomemCardInstanceId)
+                        restEffectExecutionService.executeRestEffect(
+                            matchId,
+                            userId,
+                            type,
+                            effectNode,
+                            targetType,
+                            targetHolomemCardInstanceId
+                        )
                     );
                     case "SWAP_CENTER_BACK" -> executed.add(
                         executeSwapCenterBackEffect(matchId, userId, type, effectNode)
@@ -799,7 +817,14 @@ public class MatchEffectService {
             case "BLOOM_FROM_ARCHIVE" -> executeBloomFromArchiveEffect(matchId, userId, effectType, giftNode);
             case "RETURN_CHEER_TO_DECK_BOTTOM" -> executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, giftNode);
             case "DISCARD_HAND" -> executeDiscardHandEffect(matchId, userId, effectType, giftNode);
-            case "REST" -> executeRestEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
+            case "REST" -> restEffectExecutionService.executeRestEffect(
+                matchId,
+                userId,
+                effectType,
+                giftNode,
+                targetType,
+                holderCardInstanceId
+            );
             case "SWAP_CENTER_BACK" -> executeSwapCenterBackEffect(matchId, userId, effectType, giftNode);
             case "MOVE_TO_HOLOPOWER" -> holopowerMoveEffectExecutionService.executeMoveToHolopowerEffect(matchId, userId, effectType, giftNode);
             case "DOWN_NO_LIFE" -> executeDownNoLifeEffect(matchId, userId, effectType, giftNode);
@@ -2514,77 +2539,6 @@ public class MatchEffectService {
         }
         summary.put("discardedCardInstanceIds", discardedCardInstanceIds);
         summary.put("discardedCardIds", discardedCardIds);
-        return summary;
-    }
-
-    /**
-     * 執行休息效果（將目標 Holomem 設為 rested）。
-     */
-    Map<String, Object> executeRestEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode,
-        String targetType,
-        Long targetHolomemCardInstanceId
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (!shouldApplyByDice(rawText, effectNode, effectType)) {
-            return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
-        }
-        Long targetHolomemId = resolveEffectTargetHolomemId(
-            matchId,
-            userId,
-            targetType,
-            targetHolomemCardInstanceId,
-            true
-        );
-        if (targetHolomemId == null && rawText.contains("バックホロメン")) {
-            Long ownerUserId = isOpponentTargetType(normalize(targetType))
-                ? resolveOpponentUserId(matchId, userId)
-                : userId;
-            if (ownerUserId != null) {
-                targetHolomemId = jdbcTemplate.query(
-                    """
-                    SELECT id
-                    FROM match_holomems
-                    WHERE match_id = ?
-                      AND owner_user_id = ?
-                      AND zone = 'BACK'
-                    ORDER BY id
-                    LIMIT 1
-                    """,
-                    rs -> rs.next() ? rs.getLong("id") : null,
-                    matchId,
-                    ownerUserId
-                );
-            }
-        }
-        if (targetHolomemId == null) {
-            return executeNoOpEffect(effectType, effectNode, "找不到可設為休息的 Holomem");
-        }
-
-        int updated = jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET is_rested = TRUE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-            """,
-            targetHolomemId,
-            matchId
-        );
-        if (updated != 1) {
-            return executeNoOpEffect(effectType, effectNode, "設定休息狀態失敗");
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("applied", true);
-        summary.put("targetHolomemId", targetHolomemId);
-        summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
-        summary.put("rested", true);
         return summary;
     }
 

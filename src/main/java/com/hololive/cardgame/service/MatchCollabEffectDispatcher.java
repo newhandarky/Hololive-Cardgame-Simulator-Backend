@@ -17,6 +17,7 @@ class MatchCollabEffectDispatcher {
     private final MatchLookEffectExecutionService lookEffectExecutionService;
     private final MatchDrawEffectExecutionService drawEffectExecutionService;
     private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
+    private final MatchRestEffectExecutionService restEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -24,12 +25,14 @@ class MatchCollabEffectDispatcher {
         MatchLookEffectExecutionService lookEffectExecutionService,
         MatchDrawEffectExecutionService drawEffectExecutionService,
         MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService,
+        MatchRestEffectExecutionService restEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
         this.lookEffectExecutionService = lookEffectExecutionService;
         this.drawEffectExecutionService = drawEffectExecutionService;
         this.holopowerMoveEffectExecutionService = holopowerMoveEffectExecutionService;
+        this.restEffectExecutionService = restEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -143,7 +146,7 @@ class MatchCollabEffectDispatcher {
                         effectService.executeDiscardHandEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "REST" -> executed.add(
-                        effectService.executeRestEffect(
+                        restEffectExecutionService.executeRestEffect(
                             matchId,
                             userId,
                             effectType,
