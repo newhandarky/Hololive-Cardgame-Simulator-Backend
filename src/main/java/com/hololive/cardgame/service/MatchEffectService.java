@@ -112,6 +112,7 @@ public class MatchEffectService {
     private final MatchCardSelectionProbeBuilder cardSelectionProbeBuilder;
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
+    private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
     /**
      * 效果結算服務建構子。
@@ -171,6 +172,7 @@ public class MatchEffectService {
             this::shouldApplyByDice
         );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(cardSelectionExecutionService, this);
+        this.collabEffectDispatcher = new MatchCollabEffectDispatcher(cardSelectionExecutionService, this);
     }
 
     /**
@@ -1390,215 +1392,17 @@ public class MatchEffectService {
             collabEffectNode.put("sourceHolomemCardInstanceId", selfHolomemCardInstanceId);
         }
         String normalizedCollabCardId = normalize(collabCardId);
-        int returnedCheerCount = -1;
-        int removedCheerCount = -1;
-
-        for (String effectType : effectTypes) {
-            String targetType = inferBloomTargetType(effectType);
-            String effectiveTargetType = targetType;
-            if ("MOVE_ZONE".equals(effectType)) {
-                effectiveTargetType = resolveCollabMoveTargetType(collabEffectNode, targetType);
-            }
-            if (
-                "HSD13-015".equals(normalizedCollabCardId)
-                    && "ADD_CHEER".equals(effectType)
-                    && returnedCheerCount == 0
-            ) {
-                Map<String, Object> skipped = executeNoOpEffect(effectType, collabEffectNode, "條件未成立：未退回場上エール");
-                executed.add(skipped);
-                skippedEffects.add(skipped);
-                continue;
-            }
-            if (
-                normalizedCollabCardId.startsWith("HBP06-078")
-                    && "SEARCH".equals(effectType)
-                    && removedCheerCount == 0
-            ) {
-                Map<String, Object> skipped = executeNoOpEffect(effectType, collabEffectNode, "條件未成立：未支付此卡附屬エール成本");
-                executed.add(skipped);
-                skippedEffects.add(skipped);
-                continue;
-            }
-            try {
-                switch (effectType) {
-                    case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, collabEffectNode));
-                    case "SEARCH" -> executed.add(
-                        cardSelectionExecutionService.executeSearchEffect(matchId, userId, effectType, collabEffectNode, null)
-                    );
-                    case "RETURN_TO_HAND" -> executed.add(
-                        cardSelectionExecutionService.executeReturnToHandEffect(matchId, userId, effectType, collabEffectNode, null)
-                    );
-                    case "RETURN_TO_DECK_TOP" -> executed.add(
-                        cardSelectionExecutionService.executeReturnToDeckTopEffect(matchId, userId, effectType, collabEffectNode, null)
-                    );
-                    case "ADD_CHEER" -> executed.add(
-                        executeAddCheerEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            collabEffectNode,
-                            targetType,
-                            resolveCollabAddCheerTargetCardInstanceId(collabEffectNode, selfHolomemCardInstanceId)
-                        )
-                    );
-                    case "DAMAGE" -> executed.add(
-                        executeDamageEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            collabEffectNode,
-                            targetType,
-                            null
-                        )
-                    );
-                    case "REATTACH" -> executed.add(
-                        executeReattachEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            collabEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "REMOVE_CHEER" -> executed.add(
-                        executeRemoveCheerEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            collabEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "SUMMON_TO_STAGE" -> executed.add(
-                        executeSummonToStageEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "REVEAL_TO_ARCHIVE" -> executed.add(
-                        executeRevealToArchiveEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "BLOOM_FROM_ARCHIVE" -> executed.add(
-                        executeBloomFromArchiveEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
-                        executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "DISCARD_HAND" -> executed.add(
-                        executeDiscardHandEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "REST" -> executed.add(
-                        executeRestEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            collabEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "SWAP_CENTER_BACK" -> executed.add(
-                        executeSwapCenterBackEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "MOVE_TO_HOLOPOWER" -> executed.add(
-                        executeMoveToHolopowerEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "DOWN_NO_LIFE" -> executed.add(
-                        executeDownNoLifeEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "DOWN_EXTRA_LIFE" -> executed.add(
-                        executeDownExtraLifeEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
-                        executeBatonTouchCostModifierEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            collabEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "ACTION_LOCK" -> executed.add(
-                        executeActionLockEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            collabEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "ALLOW_EXTRA_BLOOM" -> executed.add(
-                        executeAllowExtraBloomEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "LOOK_TOP_DECK" -> executed.add(
-                        executeLookTopDeckEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "LOOK_OPPONENT_HAND" -> executed.add(
-                        executeLookOpponentHandEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "LOOK_HOLOPOWER" -> executed.add(
-                        executeLookHolopowerEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "MOVE_ZONE" -> executed.add(
-                        executeMoveZoneEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            collabEffectNode,
-                            effectiveTargetType,
-                            resolveCollabMoveTargetCardInstanceId(collabEffectNode, selfHolomemCardInstanceId)
-                        )
-                    );
-                    case "SWAP_WITH_COLLAB" -> executed.add(
-                        executeSwapWithCollabEffect(matchId, userId, effectType, collabEffectNode, selfHolomemCardInstanceId)
-                    );
-                    case "HEAL" -> executed.add(
-                        executeHealEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            collabEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "BUFF", "DEBUFF" -> executed.add(
-                        executeBuffDebuffEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            collabEffectNode,
-                            targetType
-                        )
-                    );
-                    case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
-                        executeMatchResultEffect(matchId, userId, effectType, collabEffectNode)
-                    );
-                    case "UNIMPLEMENTED" -> executed.add(
-                        executeNoOpEffect(effectType, collabEffectNode, "尚未支援的 COLLAB 效果")
-                    );
-                    default -> {
-                        unsupported.add(effectType);
-                        Map<String, Object> skipped = buildSkippedEffect(effectType, "UNSUPPORTED_EFFECT");
-                        executed.add(skipped);
-                        skippedEffects.add(skipped);
-                    }
-                }
-            } catch (RuntimeException ex) {
-                Map<String, Object> skipped = buildSkippedEffect(effectType, ex.getMessage());
-                executed.add(skipped);
-                skippedEffects.add(skipped);
-            }
-            if ("RETURN_CHEER_TO_DECK_BOTTOM".equals(effectType)) {
-                Map<String, Object> latest = executed.isEmpty() ? null : executed.get(executed.size() - 1);
-                returnedCheerCount = latest == null ? 0 : asInt(latest.get("returnApplied"));
-            }
-            if ("REMOVE_CHEER".equals(effectType)) {
-                Map<String, Object> latest = executed.isEmpty() ? null : executed.get(executed.size() - 1);
-                removedCheerCount = latest == null ? 0 : asInt(latest.get("removeApplied"));
-            }
-        }
+        MatchCollabEffectDispatcher.CollabDispatchResult dispatchResult = collabEffectDispatcher.execute(
+            matchId,
+            userId,
+            selfHolomemCardInstanceId,
+            normalizedCollabCardId,
+            effectTypes,
+            collabEffectNode
+        );
+        executed.addAll(dispatchResult.executed());
+        unsupported.addAll(dispatchResult.unsupported());
+        skippedEffects.addAll(dispatchResult.skippedEffects());
 
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("hasCollabEffect", true);
@@ -1623,7 +1427,7 @@ public class MatchEffectService {
     /**
      * Collab ADD_CHEER 目標解析：優先讀效果覆寫目標，否則回退到觸發卡本身。
      */
-    private Long resolveCollabAddCheerTargetCardInstanceId(JsonNode collabEffectNode, Long fallbackCardInstanceId) {
+    Long resolveCollabAddCheerTargetCardInstanceId(JsonNode collabEffectNode, Long fallbackCardInstanceId) {
         Long override = readLong(
             collabEffectNode,
             "targetHolomemCardInstanceId",
@@ -1643,7 +1447,7 @@ public class MatchEffectService {
     /**
      * Collab MOVE_ZONE 目標側解析：可由 effectNode 覆寫，文案含「このホロメン」時預設 SELF。
      */
-    private String resolveCollabMoveTargetType(JsonNode collabEffectNode, String fallbackTargetType) {
+    String resolveCollabMoveTargetType(JsonNode collabEffectNode, String fallbackTargetType) {
         String override = effectTextParser.normalizeEffectType(readText(collabEffectNode, "moveTargetType", "move_target_type"));
         if (StringUtils.hasText(override)) {
             return override;
@@ -1658,7 +1462,7 @@ public class MatchEffectService {
     /**
      * Collab MOVE_ZONE 目標卡解析：可由 effectNode 覆寫，文案含「このホロメン」時預設為觸發卡本身。
      */
-    private Long resolveCollabMoveTargetCardInstanceId(JsonNode collabEffectNode, Long fallbackSelfCardInstanceId) {
+    Long resolveCollabMoveTargetCardInstanceId(JsonNode collabEffectNode, Long fallbackSelfCardInstanceId) {
         Long override = readLong(
             collabEffectNode,
             "moveTargetHolomemCardInstanceId",
