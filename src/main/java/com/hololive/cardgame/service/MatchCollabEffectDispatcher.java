@@ -16,17 +16,20 @@ class MatchCollabEffectDispatcher {
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
     private final MatchLookEffectExecutionService lookEffectExecutionService;
     private final MatchDrawEffectExecutionService drawEffectExecutionService;
+    private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
         MatchCardSelectionExecutionService cardSelectionExecutionService,
         MatchLookEffectExecutionService lookEffectExecutionService,
         MatchDrawEffectExecutionService drawEffectExecutionService,
+        MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
         this.lookEffectExecutionService = lookEffectExecutionService;
         this.drawEffectExecutionService = drawEffectExecutionService;
+        this.holopowerMoveEffectExecutionService = holopowerMoveEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -153,7 +156,7 @@ class MatchCollabEffectDispatcher {
                         effectService.executeSwapCenterBackEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "MOVE_TO_HOLOPOWER" -> executed.add(
-                        effectService.executeMoveToHolopowerEffect(matchId, userId, effectType, collabEffectNode)
+                        holopowerMoveEffectExecutionService.executeMoveToHolopowerEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "DOWN_NO_LIFE" -> executed.add(
                         effectService.executeDownNoLifeEffect(matchId, userId, effectType, collabEffectNode)

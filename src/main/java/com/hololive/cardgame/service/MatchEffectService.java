@@ -109,6 +109,7 @@ public class MatchEffectService {
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
     private final MatchLookEffectExecutionService lookEffectExecutionService;
     private final MatchDrawEffectExecutionService drawEffectExecutionService;
+    private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -177,16 +178,24 @@ public class MatchEffectService {
             effectTextParser,
             this::shouldApplyByDice
         );
+        this.holopowerMoveEffectExecutionService = new MatchHolopowerMoveEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            cardSelectionRequestResolver,
+            this::shouldApplyByDice
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
             drawEffectExecutionService,
+            holopowerMoveEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
             drawEffectExecutionService,
+            holopowerMoveEffectExecutionService,
             this
         );
     }
@@ -330,7 +339,7 @@ public class MatchEffectService {
                         executeSwapCenterBackEffect(matchId, userId, type, effectNode)
                     );
                     case "MOVE_TO_HOLOPOWER" -> executed.add(
-                        executeMoveToHolopowerEffect(matchId, userId, type, effectNode)
+                        holopowerMoveEffectExecutionService.executeMoveToHolopowerEffect(matchId, userId, type, effectNode)
                     );
                     case "DOWN_NO_LIFE" -> executed.add(
                         executeDownNoLifeEffect(matchId, userId, type, effectNode)
@@ -792,7 +801,7 @@ public class MatchEffectService {
             case "DISCARD_HAND" -> executeDiscardHandEffect(matchId, userId, effectType, giftNode);
             case "REST" -> executeRestEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
             case "SWAP_CENTER_BACK" -> executeSwapCenterBackEffect(matchId, userId, effectType, giftNode);
-            case "MOVE_TO_HOLOPOWER" -> executeMoveToHolopowerEffect(matchId, userId, effectType, giftNode);
+            case "MOVE_TO_HOLOPOWER" -> holopowerMoveEffectExecutionService.executeMoveToHolopowerEffect(matchId, userId, effectType, giftNode);
             case "DOWN_NO_LIFE" -> executeDownNoLifeEffect(matchId, userId, effectType, giftNode);
             case "DOWN_EXTRA_LIFE" -> executeDownExtraLifeEffect(matchId, userId, effectType, giftNode);
             case "BATON_TOUCH_COST_MODIFIER" -> executeBatonTouchCostModifierEffect(
@@ -2675,76 +2684,6 @@ public class MatchEffectService {
         summary.put("fromBackHolomemId", backHolomemId);
         summary.put("centerHolomemCardInstanceId", resolveHolomemCardInstanceId(backHolomemId));
         summary.put("backHolomemCardInstanceId", resolveHolomemCardInstanceId(centerHolomemId));
-        return summary;
-    }
-
-    /**
-     * 執行移入 Holopower 的效果（通常來自 Deck/Archive 等）。
-     */
-    Map<String, Object> executeMoveToHolopowerEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (!shouldApplyByDice(rawText, effectNode, effectType)) {
-            return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
-        }
-        String sourceZone = resolveMoveToHolopowerSourceZone(effectNode, rawText);
-        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "ホロパワー", 1);
-        int moveCount = Math.max(requestedCount, 1);
-
-        List<Long> movedCardInstanceIds = new ArrayList<>();
-        for (int i = 0; i < moveCount; i++) {
-            Long deckCardInstanceId = jdbcTemplate.query(
-                """
-                SELECT id
-                FROM match_cards
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = ?
-                ORDER BY order_index NULLS LAST, id
-                LIMIT 1
-                """,
-                rs -> rs.next() ? rs.getLong("id") : null,
-                matchId,
-                userId,
-                sourceZone
-            );
-            if (deckCardInstanceId == null) {
-                break;
-            }
-            int nextOrder = nextZoneOrder(matchId, userId, "HOLOPOWER");
-            int moved = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'HOLOPOWER',
-                    order_index = ?,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = ?
-                """,
-                nextOrder,
-                deckCardInstanceId,
-                matchId,
-                userId,
-                sourceZone
-            );
-            if (moved == 1) {
-                movedCardInstanceIds.add(deckCardInstanceId);
-            }
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("sourceZone", sourceZone);
-        summary.put("moveRequested", moveCount);
-        summary.put("moveApplied", movedCardInstanceIds.size());
-        summary.put("movedCardInstanceIds", movedCardInstanceIds);
         return summary;
     }
 
@@ -5824,6 +5763,7 @@ public class MatchEffectService {
             adjustedEffects = List.of("LOOK_HOLOPOWER", "SEARCH", "MOVE_TO_HOLOPOWER");
             adjustedNode.set("effects", objectMapper.valueToTree(adjustedEffects));
             adjustedNode.put("searchSourceZone", "HOLOPOWER");
+            adjustedNode.put("holopowerSourceZone", "DECK");
             adjustedNode.put("value", 1);
             return new BloomEffectPlan(true, adjustedEffects, adjustedNode, basePlan.rawText(), basePlan.diceRoll());
         }
@@ -6604,24 +6544,6 @@ public class MatchEffectService {
             effectTypes.add(effectTextParser.normalizeEffectType(effectNode.path("type").asText()));
         }
         return new ArrayList<>(effectTypes);
-    }
-
-    /**
-     * 解析 MOVE_TO_HOLOPOWER 的來源區，預設 DECK。
-     */
-    private String resolveMoveToHolopowerSourceZone(JsonNode effectNode, String rawText) {
-        String explicit = effectTextParser.normalizeEffectType(readText(effectNode, "holopowerSourceZone", "moveSourceZone", "sourceZone"));
-        if ("DECK".equals(explicit) || "ARCHIVE".equals(explicit) || "HAND".equals(explicit)) {
-            return explicit;
-        }
-        String text = effectTextParser.normalizeDigits(rawText);
-        if (text.contains("手札") && text.contains("ホロパワーにする")) {
-            return "HAND";
-        }
-        if (text.contains("アーカイブ") && text.contains("ホロパワーにする")) {
-            return "ARCHIVE";
-        }
-        return "DECK";
     }
 
     /**
