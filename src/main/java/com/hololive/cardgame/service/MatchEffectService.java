@@ -111,6 +111,7 @@ public class MatchEffectService {
     private final MatchCardSelectionRequestResolver cardSelectionRequestResolver;
     private final MatchCardSelectionProbeBuilder cardSelectionProbeBuilder;
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
+    private final MatchBloomEffectDispatcher bloomEffectDispatcher;
 
     /**
      * 效果結算服務建構子。
@@ -169,6 +170,7 @@ public class MatchEffectService {
             cardSelectionCandidateProvider,
             this::shouldApplyByDice
         );
+        this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(cardSelectionExecutionService, this);
     }
 
     /**
@@ -1309,7 +1311,7 @@ public class MatchEffectService {
             diceRoll = resolution.chosenRoll();
         }
 
-        BloomDispatchResult dispatchResult = executeBloomEffectTypes(
+        MatchBloomEffectDispatcher.BloomDispatchResult dispatchResult = bloomEffectDispatcher.execute(
             matchId,
             userId,
             selfHolomemCardInstanceId,
@@ -1345,240 +1347,6 @@ public class MatchEffectService {
             summary.put("oddRollCount", oddRollCount);
         }
         return summary;
-    }
-
-    private BloomDispatchResult executeBloomEffectTypes(
-        Long matchId,
-        Long userId,
-        Long selfHolomemCardInstanceId,
-        String normalizedBloomCardId,
-        List<String> effectTypes,
-        ObjectNode bloomEffectNode
-    ) {
-        List<Map<String, Object>> executed = new ArrayList<>();
-        List<String> unsupported = new ArrayList<>();
-        List<Map<String, Object>> skippedEffects = new ArrayList<>();
-        int archivedStackCostCount = -1;
-
-        for (String effectType : effectTypes) {
-            String targetType = inferBloomTargetType(effectType);
-            try {
-                switch (effectType) {
-                    case "DRAW" -> executed.add(executeDrawEffect(matchId, userId, effectType, bloomEffectNode));
-                    case "SEARCH" -> executed.add(
-                        cardSelectionExecutionService.executeSearchEffect(matchId, userId, effectType, bloomEffectNode, null)
-                    );
-                    case "RETURN_TO_HAND" -> executed.add(
-                        cardSelectionExecutionService.executeReturnToHandEffect(matchId, userId, effectType, bloomEffectNode, null)
-                    );
-                    case "RETURN_TO_DECK_TOP" -> executed.add(
-                        cardSelectionExecutionService.executeReturnToDeckTopEffect(matchId, userId, effectType, bloomEffectNode, null)
-                    );
-                    case "ADD_CHEER" -> executed.add(
-                        executeAddCheerEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            bloomEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "DAMAGE" -> {
-                        if (
-                            normalizedBloomCardId.startsWith("HSD13-011")
-                                && archivedStackCostCount <= 0
-                        ) {
-                            Map<String, Object> skipped = executeNoOpEffect(
-                                effectType,
-                                bloomEffectNode,
-                                "條件未成立：未支付重疊 Debut 成本"
-                            );
-                            executed.add(skipped);
-                            skippedEffects.add(skipped);
-                            continue;
-                        }
-                        Long requestedTargetCardInstanceId = null;
-                        if (normalizedBloomCardId.startsWith("HSD13-011")) {
-                            requestedTargetCardInstanceId = resolveOpponentCollabCardInstanceId(matchId, userId);
-                            if (requestedTargetCardInstanceId == null || requestedTargetCardInstanceId <= 0) {
-                                Map<String, Object> skipped = executeNoOpEffect(
-                                    effectType,
-                                    bloomEffectNode,
-                                    "條件未成立：對手沒有 COLLAB 目標"
-                                );
-                                executed.add(skipped);
-                                skippedEffects.add(skipped);
-                                continue;
-                            }
-                        }
-                        executed.add(
-                            executeDamageEffect(
-                                matchId,
-                                userId,
-                                effectType,
-                                bloomEffectNode,
-                                targetType,
-                                requestedTargetCardInstanceId
-                            )
-                        );
-                    }
-                    case "REATTACH" -> executed.add(
-                        executeReattachEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            bloomEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "REMOVE_CHEER" -> executed.add(
-                        executeRemoveCheerEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            bloomEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "REMOVE_STAGE_CHEER" -> executed.add(
-                        executeRemoveStageCheerEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "SUMMON_TO_STAGE" -> executed.add(
-                        executeSummonToStageEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "REVEAL_TO_ARCHIVE" -> executed.add(
-                        executeRevealToArchiveEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "BLOOM_FROM_ARCHIVE" -> executed.add(
-                        executeBloomFromArchiveEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
-                        executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "DISCARD_HAND" -> executed.add(
-                        executeDiscardHandEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "REST" -> executed.add(
-                        executeRestEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            bloomEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "SWAP_CENTER_BACK" -> executed.add(
-                        executeSwapCenterBackEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "MOVE_TO_HOLOPOWER" -> executed.add(
-                        executeMoveToHolopowerEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "DOWN_NO_LIFE" -> executed.add(
-                        executeDownNoLifeEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "DOWN_EXTRA_LIFE" -> executed.add(
-                        executeDownExtraLifeEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
-                        executeBatonTouchCostModifierEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            bloomEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "ACTION_LOCK" -> executed.add(
-                        executeActionLockEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            bloomEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "ALLOW_EXTRA_BLOOM" -> executed.add(
-                        executeAllowExtraBloomEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "LOOK_TOP_DECK" -> executed.add(
-                        executeLookTopDeckEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "LOOK_OPPONENT_HAND" -> executed.add(
-                        executeLookOpponentHandEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "LOOK_HOLOPOWER" -> executed.add(
-                        executeLookHolopowerEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "ARCHIVE_STACK_CARD" -> {
-                        Map<String, Object> archiveSummary = executeArchiveStackCardEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            bloomEffectNode,
-                            selfHolomemCardInstanceId
-                        );
-                        executed.add(archiveSummary);
-                        archivedStackCostCount = asInt(archiveSummary.get("archiveApplied"));
-                    }
-                    case "MOVE_ZONE" -> executed.add(
-                        executeMoveZoneEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            bloomEffectNode,
-                            targetType,
-                            null
-                        )
-                    );
-                    case "SWAP_WITH_COLLAB" -> executed.add(
-                        executeSwapWithCollabEffect(matchId, userId, effectType, bloomEffectNode, selfHolomemCardInstanceId)
-                    );
-                    case "HEAL" -> executed.add(
-                        executeHealEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            bloomEffectNode,
-                            targetType,
-                            selfHolomemCardInstanceId
-                        )
-                    );
-                    case "BUFF", "DEBUFF" -> executed.add(
-                        executeBuffDebuffEffect(
-                            matchId,
-                            userId,
-                            effectType,
-                            bloomEffectNode,
-                            targetType
-                        )
-                    );
-                    case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
-                        executeMatchResultEffect(matchId, userId, effectType, bloomEffectNode)
-                    );
-                    case "UNIMPLEMENTED" -> executed.add(
-                        executeNoOpEffect(effectType, bloomEffectNode, "尚未支援的 BLOOM 效果")
-                    );
-                    default -> {
-                        unsupported.add(effectType);
-                        Map<String, Object> skipped = buildSkippedEffect(effectType, "UNSUPPORTED_EFFECT");
-                        executed.add(skipped);
-                        skippedEffects.add(skipped);
-                    }
-                }
-            } catch (RuntimeException ex) {
-                Map<String, Object> skipped = buildSkippedEffect(effectType, ex.getMessage());
-                executed.add(skipped);
-                skippedEffects.add(skipped);
-            }
-        }
-
-        return new BloomDispatchResult(executed, unsupported, skippedEffects);
     }
 
     /**
@@ -1910,7 +1678,7 @@ public class MatchEffectService {
     /**
      * 執行抽牌效果，優先走 Action Pipeline，失敗時回退到既有 SQL 流程。
      */
-    private Map<String, Object> executeDrawEffect(
+    Map<String, Object> executeDrawEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -2013,7 +1781,7 @@ public class MatchEffectService {
     /**
      * 執行重新附加效果（將符合條件卡移到目標 Holomem 下方）。
      */
-    private Map<String, Object> executeReattachEffect(
+    Map<String, Object> executeReattachEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -2276,7 +2044,7 @@ public class MatchEffectService {
     /**
      * 執行上場效果：從手牌/檔案區等來源召喚 Holomem 到場地可用區位。
      */
-    private Map<String, Object> executeSummonToStageEffect(
+    Map<String, Object> executeSummonToStageEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -2508,7 +2276,7 @@ public class MatchEffectService {
     /**
      * 執行展示後歸檔效果（Reveal -> Archive）。
      */
-    private Map<String, Object> executeRevealToArchiveEffect(
+    Map<String, Object> executeRevealToArchiveEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -2573,7 +2341,7 @@ public class MatchEffectService {
     /**
      * 執行從 Archive Bloom 的特殊效果，並保留疊卡繼承資料。
      */
-    private Map<String, Object> executeBloomFromArchiveEffect(
+    Map<String, Object> executeBloomFromArchiveEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -2773,7 +2541,7 @@ public class MatchEffectService {
     /**
      * 將目標 Holomem 身上的 cheer 返回牌庫底。
      */
-    private Map<String, Object> executeReturnCheerToDeckBottomEffect(
+    Map<String, Object> executeReturnCheerToDeckBottomEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -2932,7 +2700,7 @@ public class MatchEffectService {
     /**
      * 執行棄手牌效果，支援指定卡與自動挑選。
      */
-    private Map<String, Object> executeDiscardHandEffect(
+    Map<String, Object> executeDiscardHandEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -3026,7 +2794,7 @@ public class MatchEffectService {
     /**
      * 執行休息效果（將目標 Holomem 設為 rested）。
      */
-    private Map<String, Object> executeRestEffect(
+    Map<String, Object> executeRestEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -3097,7 +2865,7 @@ public class MatchEffectService {
     /**
      * 執行 CENTER/BACK 交換效果。
      */
-    private Map<String, Object> executeSwapCenterBackEffect(
+    Map<String, Object> executeSwapCenterBackEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -3196,7 +2964,7 @@ public class MatchEffectService {
     /**
      * 執行移入 Holopower 的效果（通常來自 Deck/Archive 等）。
      */
-    private Map<String, Object> executeMoveToHolopowerEffect(
+    Map<String, Object> executeMoveToHolopowerEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -3266,7 +3034,7 @@ public class MatchEffectService {
     /**
      * 執行擊倒但不扣生命的效果分支。
      */
-    private Map<String, Object> executeDownNoLifeEffect(
+    Map<String, Object> executeDownNoLifeEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -3394,7 +3162,7 @@ public class MatchEffectService {
     /**
      * 執行擊倒並額外扣生命的效果分支。
      */
-    private Map<String, Object> executeDownExtraLifeEffect(
+    Map<String, Object> executeDownExtraLifeEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -3477,7 +3245,7 @@ public class MatchEffectService {
     /**
      * 套用バトンタッチ費用修正，寫入當回合效果表供後續行為讀取。
      */
-    private Map<String, Object> executeBatonTouchCostModifierEffect(
+    Map<String, Object> executeBatonTouchCostModifierEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -3860,7 +3628,7 @@ public class MatchEffectService {
     /**
      * 寫入 ACTION_LOCK 封鎖效果（禁止指定動作/區位/目標）。
      */
-    private Map<String, Object> executeActionLockEffect(
+    Map<String, Object> executeActionLockEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -3962,7 +3730,7 @@ public class MatchEffectService {
     /**
      * 執行查看牌庫頂效果，產生 pending decision 所需資料。
      */
-    private Map<String, Object> executeLookTopDeckEffect(
+    Map<String, Object> executeLookTopDeckEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -4029,7 +3797,7 @@ public class MatchEffectService {
     /**
      * 執行查看對手手牌效果（只回傳可公開資訊）。
      */
-    private Map<String, Object> executeLookOpponentHandEffect(
+    Map<String, Object> executeLookOpponentHandEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -4053,7 +3821,7 @@ public class MatchEffectService {
     /**
      * 執行查看 Holopower 區效果。
      */
-    private Map<String, Object> executeLookHolopowerEffect(
+    Map<String, Object> executeLookHolopowerEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -4117,7 +3885,7 @@ public class MatchEffectService {
     /**
      * 執行與 Collab 位互換位置效果。
      */
-    private Map<String, Object> executeSwapWithCollabEffect(
+    Map<String, Object> executeSwapWithCollabEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -4253,7 +4021,7 @@ public class MatchEffectService {
     /**
      * 執行附加 cheer 效果，包含目標解析與來源區挑選。
      */
-    private Map<String, Object> executeAddCheerEffect(
+    Map<String, Object> executeAddCheerEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -4764,7 +4532,7 @@ public class MatchEffectService {
     /**
      * 將目標 Holomem 疊卡中的指定等級卡片歸檔（常用於 Bloom 前置成本）。
      */
-    private Map<String, Object> executeArchiveStackCardEffect(
+    Map<String, Object> executeArchiveStackCardEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -5478,7 +5246,7 @@ public class MatchEffectService {
     /**
      * 執行回復效果，將目標傷害值下修至不低於 0。
      */
-    private Map<String, Object> executeHealEffect(
+    Map<String, Object> executeHealEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -5574,7 +5342,7 @@ public class MatchEffectService {
     /**
      * 執行移除 cheer 效果，將 cheer 從 Holomem 轉移至指定區域。
      */
-    private Map<String, Object> executeRemoveCheerEffect(
+    Map<String, Object> executeRemoveCheerEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -5654,7 +5422,7 @@ public class MatchEffectService {
     /**
      * 執行移除場上 Cheer 效果，從自己場上任一 Holomem 的附屬 Cheer 中移除指定數量。
      */
-    private Map<String, Object> executeRemoveStageCheerEffect(
+    Map<String, Object> executeRemoveStageCheerEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -5722,7 +5490,7 @@ public class MatchEffectService {
     /**
      * 執行區域移動效果（CENTER/BACK/COLLAB 等），含休息狀態調整。
      */
-    private Map<String, Object> executeMoveZoneEffect(
+    Map<String, Object> executeMoveZoneEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -5974,7 +5742,7 @@ public class MatchEffectService {
     /**
      * 套用 BUFF/DEBUFF 效果，寫入回合效果並回傳修正摘要。
      */
-    private Map<String, Object> executeBuffDebuffEffect(
+    Map<String, Object> executeBuffDebuffEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -6165,7 +5933,7 @@ public class MatchEffectService {
     /**
      * 建立不執行效果（No-Op）的標準摘要。
      */
-    private Map<String, Object> executeNoOpEffect(String effectType, JsonNode effectNode, String reason) {
+    Map<String, Object> executeNoOpEffect(String effectType, JsonNode effectNode, String reason) {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectType);
         summary.put("applied", false);
@@ -6177,7 +5945,7 @@ public class MatchEffectService {
     /**
      * 建立被跳過效果的摘要（用於 unsupported/exception fallback）。
      */
-    private Map<String, Object> buildSkippedEffect(String effectType, String reason) {
+    Map<String, Object> buildSkippedEffect(String effectType, String reason) {
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("effectType", effectTextParser.normalizeEffectType(effectType));
         summary.put("applied", false);
@@ -6189,7 +5957,7 @@ public class MatchEffectService {
     /**
      * 直接結算勝負效果（WIN/LOSE/MATCH_RESULT）。
      */
-    private Map<String, Object> executeMatchResultEffect(
+    Map<String, Object> executeMatchResultEffect(
         Long matchId,
         Long userId,
         String effectType,
@@ -7202,7 +6970,7 @@ public class MatchEffectService {
     /**
      * 依效果類型推斷 Bloom 目標側（SELF/ENEMY）。
      */
-    private String inferBloomTargetType(String effectType) {
+    String inferBloomTargetType(String effectType) {
         return switch (effectType) {
             case "DAMAGE", "DEBUFF", "MOVE_ZONE", "REST", "DOWN_NO_LIFE", "DOWN_EXTRA_LIFE" -> "ENEMY";
             default -> "SELF";
@@ -10937,7 +10705,7 @@ public class MatchEffectService {
     /**
      * 取得對手 COLLAB 區位的 Holomem 卡片實例 id。
      */
-    private Long resolveOpponentCollabCardInstanceId(Long matchId, Long userId) {
+    Long resolveOpponentCollabCardInstanceId(Long matchId, Long userId) {
         Long opponentUserId = resolveOpponentUserId(matchId, userId);
         if (opponentUserId == null || opponentUserId <= 0) {
             return null;
@@ -11279,7 +11047,7 @@ public class MatchEffectService {
     /**
      * 安全轉 int，失敗時回 0。
      */
-    private int asInt(Object value) {
+    int asInt(Object value) {
         return MatchEffectValueHelper.asInt(value);
     }
 
@@ -11364,15 +11132,6 @@ public class MatchEffectService {
         JsonNode effectNode,
         String rawText,
         Integer diceRoll
-    ) {}
-
-    /**
-     * Bloom 效果分派結果（執行摘要、未支援與略過清單）。
-     */
-    private record BloomDispatchResult(
-        List<Map<String, Object>> executed,
-        List<String> unsupported,
-        List<Map<String, Object>> skippedEffects
     ) {}
 
     /**
