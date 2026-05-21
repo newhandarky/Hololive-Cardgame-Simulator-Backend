@@ -5873,13 +5873,35 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         Long hostId = context.hostId();
 
         String centerAzkiCardId = createMemberCardDefinition("TCOLLAB_AZKI_CENTER", "AZKi", "DEBUT", 120, "WHITE");
-        Long centerCardInstanceId = createStageHolomemWithSingleCard(
+        Long centerCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            centerAzkiCardId,
             matchId,
             hostId,
+            centerCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
             centerAzkiCardId,
-            "CENTER",
-            "DEBUT",
-            0
+            matchId,
+            hostId,
+            centerCardInstanceId
         );
         String collabCardId = createMemberCardDefinition(
             "HSD01-015",
@@ -5948,13 +5970,35 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         Long hostId = context.hostId();
 
         String centerSoraCardId = createMemberCardDefinition("TCOLLAB_SORA_CENTER", "ときのそら", "DEBUT", 120, "WHITE");
-        Long centerCardInstanceId = createStageHolomemWithSingleCard(
+        Long centerCardInstanceId = loadFirstCenterCardInstanceId(matchId, hostId);
+        jdbcTemplate.update(
+            """
+            UPDATE match_cards
+            SET card_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND id = ?
+            """,
+            centerSoraCardId,
             matchId,
             hostId,
+            centerCardInstanceId
+        );
+        jdbcTemplate.update(
+            """
+            UPDATE match_holomems
+            SET card_id = ?,
+                current_level = 'DEBUT',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND match_card_id = ?
+            """,
             centerSoraCardId,
-            "CENTER",
-            "DEBUT",
-            0
+            matchId,
+            hostId,
+            centerCardInstanceId
         );
         String collabCardId = createMemberCardDefinition(
             "HSD01-015",
@@ -7297,6 +7341,17 @@ class MatchActionServiceIntegrationTest extends MatchIntegrationTestSupport {
         StartedMatchContext context = createStartedMatch("collab-hsd13015-empty-host", "collab-hsd13015-empty-guest");
         Long matchId = context.matchId();
         Long hostId = context.hostId();
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomem_cheers hc
+            USING match_holomems h
+            WHERE hc.match_holomem_id = h.id
+              AND h.match_id = ?
+              AND h.owner_user_id = ?
+            """,
+            matchId,
+            hostId
+        );
 
         String collabCardId = createMemberCardDefinition(
             "HSD13-015",
