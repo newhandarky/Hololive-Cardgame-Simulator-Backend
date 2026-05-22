@@ -20,6 +20,7 @@ class MatchCollabEffectDispatcher {
     private final MatchRestEffectExecutionService restEffectExecutionService;
     private final MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService;
     private final MatchCollabSwapEffectExecutionService collabSwapEffectExecutionService;
+    private final MatchActionLockEffectExecutionService actionLockEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -30,6 +31,7 @@ class MatchCollabEffectDispatcher {
         MatchRestEffectExecutionService restEffectExecutionService,
         MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService,
         MatchCollabSwapEffectExecutionService collabSwapEffectExecutionService,
+        MatchActionLockEffectExecutionService actionLockEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -39,6 +41,7 @@ class MatchCollabEffectDispatcher {
         this.restEffectExecutionService = restEffectExecutionService;
         this.swapCenterBackEffectExecutionService = swapCenterBackEffectExecutionService;
         this.collabSwapEffectExecutionService = collabSwapEffectExecutionService;
+        this.actionLockEffectExecutionService = actionLockEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -184,7 +187,7 @@ class MatchCollabEffectDispatcher {
                         )
                     );
                     case "ACTION_LOCK" -> executed.add(
-                        effectService.executeActionLockEffect(
+                        actionLockEffectExecutionService.executeActionLockEffect(
                             matchId,
                             userId,
                             effectType,
