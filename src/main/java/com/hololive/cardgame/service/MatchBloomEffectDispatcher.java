@@ -21,6 +21,7 @@ class MatchBloomEffectDispatcher {
     private final MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService;
     private final MatchCollabSwapEffectExecutionService collabSwapEffectExecutionService;
     private final MatchActionLockEffectExecutionService actionLockEffectExecutionService;
+    private final MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -32,6 +33,7 @@ class MatchBloomEffectDispatcher {
         MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService,
         MatchCollabSwapEffectExecutionService collabSwapEffectExecutionService,
         MatchActionLockEffectExecutionService actionLockEffectExecutionService,
+        MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -42,6 +44,7 @@ class MatchBloomEffectDispatcher {
         this.swapCenterBackEffectExecutionService = swapCenterBackEffectExecutionService;
         this.collabSwapEffectExecutionService = collabSwapEffectExecutionService;
         this.actionLockEffectExecutionService = actionLockEffectExecutionService;
+        this.extraBloomAllowanceEffectExecutionService = extraBloomAllowanceEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -204,7 +207,12 @@ class MatchBloomEffectDispatcher {
                         )
                     );
                     case "ALLOW_EXTRA_BLOOM" -> executed.add(
-                        effectService.executeAllowExtraBloomEffect(matchId, userId, effectType, bloomEffectNode)
+                        extraBloomAllowanceEffectExecutionService.executeAllowExtraBloomEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode
+                        )
                     );
                     case "LOOK_TOP_DECK" -> executed.add(
                         lookEffectExecutionService.executeLookTopDeckEffect(matchId, userId, effectType, bloomEffectNode)

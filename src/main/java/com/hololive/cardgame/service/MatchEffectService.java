@@ -114,6 +114,7 @@ public class MatchEffectService {
     private final MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService;
     private final MatchCollabSwapEffectExecutionService collabSwapEffectExecutionService;
     private final MatchActionLockEffectExecutionService actionLockEffectExecutionService;
+    private final MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -219,6 +220,15 @@ public class MatchEffectService {
             this::resolveEffectTargetHolomemId,
             this::resolveHolomemCardInstanceId
         );
+        this.extraBloomAllowanceEffectExecutionService = new MatchExtraBloomAllowanceEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            giftTriggerMatcher,
+            this::resolveCurrentTurnNumber,
+            this::resolveRequiredOshiName,
+            this::hasOpponentStageHolomemWithLevel,
+            this::containsAnyName
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -228,6 +238,7 @@ public class MatchEffectService {
             swapCenterBackEffectExecutionService,
             collabSwapEffectExecutionService,
             actionLockEffectExecutionService,
+            extraBloomAllowanceEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -239,6 +250,7 @@ public class MatchEffectService {
             swapCenterBackEffectExecutionService,
             collabSwapEffectExecutionService,
             actionLockEffectExecutionService,
+            extraBloomAllowanceEffectExecutionService,
             this
         );
     }
@@ -411,7 +423,7 @@ public class MatchEffectService {
                         )
                     );
                     case "ALLOW_EXTRA_BLOOM" -> executed.add(
-                        executeAllowExtraBloomEffect(matchId, userId, type, effectNode)
+                        extraBloomAllowanceEffectExecutionService.executeAllowExtraBloomEffect(matchId, userId, type, effectNode)
                     );
                     case "LOOK_TOP_DECK" -> executed.add(
                         lookEffectExecutionService.executeLookTopDeckEffect(matchId, userId, type, effectNode)
@@ -890,7 +902,7 @@ public class MatchEffectService {
                 targetType,
                 holderCardInstanceId
             );
-            case "ALLOW_EXTRA_BLOOM" -> executeAllowExtraBloomEffect(
+            case "ALLOW_EXTRA_BLOOM" -> extraBloomAllowanceEffectExecutionService.executeAllowExtraBloomEffect(
                 matchId,
                 userId,
                 effectType,
@@ -2906,19 +2918,16 @@ public class MatchEffectService {
         String effectType,
         JsonNode effectNode
     ) {
-        return executeAllowExtraBloomEffect(matchId, userId, effectType, effectNode, null, null);
+        return extraBloomAllowanceEffectExecutionService.executeAllowExtraBloomEffect(
+            matchId,
+            userId,
+            effectType,
+            effectNode
+        );
     }
 
     /**
      * 設定本回合額外 Bloom 許可效果。
-     *
-     * <p>這個 effectType 被多張官方卡共用，但它們的條件並不一樣：
-     *
-     * <p>- `HBP05-040`：Life <= 3，且目標是本回合已 Bloom 的特定 CENTER 成員
-     * <p>- `HSD10-004`：自己的推し是〈輪堂千速〉、相手ステージ有 1st，且目標就是「這張剛 Bloom 的自己」
-     *
-     * <p>因此這裡不再把規則寫死成單一卡特例，而是先讀文案，再用保守條件把 allowance 寫到
-     * `match_turn_effects`。只要 target 最終沒有被唯一辨識出來，就回傳 skipped，避免誤放寬 Bloom 規則。
      */
     Map<String, Object> executeAllowExtraBloomEffect(
         Long matchId,
@@ -2928,215 +2937,14 @@ public class MatchEffectService {
         Long preferredTargetHolomemId,
         Long holderCardInstanceId
     ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (!StringUtils.hasText(rawText)) {
-            return executeNoOpEffect(effectType, effectNode, "沒有可判讀的額外 Bloom 文案");
-        }
-
-        int currentLife = jdbcTemplate.query(
-            """
-            SELECT current_life
-            FROM match_players
-            WHERE match_id = ?
-              AND user_id = ?
-            """,
-            rs -> rs.next() ? rs.getInt("current_life") : 0,
+        return extraBloomAllowanceEffectExecutionService.executeAllowExtraBloomEffect(
             matchId,
-            userId
+            userId,
+            effectType,
+            effectNode,
+            preferredTargetHolomemId,
+            holderCardInstanceId
         );
-        Integer maxAllowedLife = resolveExtraBloomLifeThreshold(rawText);
-        if (maxAllowedLife != null && currentLife > maxAllowedLife) {
-            return executeNoOpEffect(effectType, effectNode, "條件不成立：目前 Life 大於 " + maxAllowedLife);
-        }
-
-        String requiredOshiName = resolveRequiredOshiName(rawText);
-        if (StringUtils.hasText(requiredOshiName)) {
-            String currentOshiName = resolvePlayerOshiCardName(matchId, userId);
-            if (!requiredOshiName.equals(currentOshiName)) {
-                return executeNoOpEffect(effectType, effectNode, "條件不成立：推しホロメン不符合要求");
-            }
-        }
-        if (rawText.contains("相手のステージに1stホロメンがいる") && !hasOpponentStageHolomemWithLevel(matchId, userId, "FIRST")) {
-            return executeNoOpEffect(effectType, effectNode, "條件不成立：相手ステージ沒有 1st Holomem");
-        }
-
-        List<String> allowedNames = new ArrayList<>();
-        if (rawText.contains("このターンにBloomした")) {
-            for (String token : giftTriggerMatcher.extractNameTokens(rawText)) {
-                if (!allowedNames.contains(token)) {
-                    allowedNames.add(token);
-                }
-            }
-        }
-        if (rawText.contains("〈さくらみこ〉")) {
-            allowedNames.add("さくらみこ");
-        }
-        if (rawText.contains("〈星街すいせい〉")) {
-            allowedNames.add("星街すいせい");
-        }
-
-        int currentTurn = resolveCurrentTurnNumber(matchId);
-
-        Map<String, Object> target;
-        if (preferredTargetHolomemId != null && rawText.contains("このホロメン")) {
-            target = jdbcTemplate.query(
-                """
-                SELECT h.id AS holomem_id,
-                       h.match_card_id,
-                       h.card_id,
-                       c.name,
-                       h.zone,
-                       h.last_bloom_turn
-                FROM match_holomems h
-                JOIN cards c ON c.card_id = h.card_id
-                WHERE h.match_id = ?
-                  AND h.owner_user_id = ?
-                  AND h.id = ?
-                LIMIT 1
-                """,
-                rs -> {
-                    if (!rs.next()) {
-                        return null;
-                    }
-                    if (asInt(rs.getObject("last_bloom_turn")) != currentTurn) {
-                        return null;
-                    }
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("holomem_id", rs.getLong("holomem_id"));
-                    row.put("match_card_id", rs.getLong("match_card_id"));
-                    row.put("card_id", rs.getString("card_id"));
-                    row.put("name", rs.getString("name"));
-                    row.put("zone", rs.getString("zone"));
-                    return row;
-                },
-                matchId,
-                userId,
-                preferredTargetHolomemId
-            );
-        } else {
-            String requiredZone = rawText.contains("センターホロメン") ? "CENTER" : null;
-            target = jdbcTemplate.query(
-            """
-            SELECT h.id AS holomem_id,
-                   h.match_card_id,
-                   h.card_id,
-                   c.name,
-                   h.zone
-            FROM match_holomems h
-            JOIN cards c ON c.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.zone IN ('CENTER', 'COLLAB', 'BACK')
-              AND h.last_bloom_turn = ?
-            ORDER BY h.id
-            """,
-            rs -> {
-                while (rs.next()) {
-                    String name = rs.getString("name");
-                    String zone = rs.getString("zone");
-                    if (StringUtils.hasText(requiredZone) && !requiredZone.equals(effectTextParser.normalizeEffectType(zone))) {
-                        continue;
-                    }
-                    if (!allowedNames.isEmpty() && !containsAnyName(name, allowedNames)) {
-                        continue;
-                    }
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("holomem_id", rs.getLong("holomem_id"));
-                    row.put("match_card_id", rs.getLong("match_card_id"));
-                    row.put("card_id", rs.getString("card_id"));
-                    row.put("name", name);
-                    row.put("zone", zone);
-                    return row;
-                }
-                return null;
-            },
-            matchId,
-            userId,
-            currentTurn
-            );
-        }
-        if (target == null) {
-            return executeNoOpEffect(effectType, effectNode, "沒有符合條件且本回合已 Bloom 的目標");
-        }
-
-        Long targetHolomemId = asLong(target.get("holomem_id"));
-        Integer existingAllowanceCount = jdbcTemplate.query(
-            """
-            SELECT COUNT(*)
-            FROM match_turn_effects
-            WHERE match_id = ?
-              AND affected_user_id = ?
-              AND stat_type = 'ALLOW_EXTRA_BLOOM'
-              AND expires_turn >= ?
-              AND (payload ->> 'targetHolomemId') = ?
-            """,
-            rs -> rs.next() ? rs.getInt(1) : 0,
-            matchId,
-            userId,
-            currentTurn,
-            targetHolomemId.toString()
-        );
-        if (existingAllowanceCount != null && existingAllowanceCount > 0) {
-            return executeNoOpEffect(effectType, effectNode, "本回合已存在同目標的額外 Bloom 許可");
-        }
-        int inserted = jdbcTemplate.update(
-            """
-            INSERT INTO match_turn_effects (
-                match_id,
-                source_user_id,
-                affected_user_id,
-                effect_type,
-                stat_type,
-                modifier_value,
-                expires_turn,
-                payload
-            ) VALUES (?, ?, ?, ?, 'ALLOW_EXTRA_BLOOM', 1, ?, CAST(? AS jsonb))
-            """,
-            matchId,
-            userId,
-            userId,
-            "BUFF",
-            currentTurn,
-            effectTextParser.toJsonString(
-                Map.of(
-                    "targetHolomemId", targetHolomemId,
-                    "targetHolomemCardInstanceId", asLong(target.get("match_card_id")),
-                    "targetCardId", asText(target.get("card_id")),
-                    "targetName", asText(target.get("name")),
-                    "holderCardInstanceId", holderCardInstanceId,
-                    "rawText", rawText
-                )
-            )
-        );
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("applied", inserted == 1);
-        summary.put("targetHolomemId", targetHolomemId);
-        summary.put("targetHolomemCardInstanceId", asLong(target.get("match_card_id")));
-        summary.put("targetCardId", asText(target.get("card_id")));
-        summary.put("targetName", asText(target.get("name")));
-        summary.put("targetZone", asText(target.get("zone")));
-        summary.put("expiresTurn", currentTurn);
-        return summary;
-    }
-
-    /**
-     * 從文案抽出「Life 必須不高於多少」的門檻。
-     *
-     * <p>目前只處理額外 Bloom 相關卡文中已出現且可穩定辨識的寫法，避免把其它數字條件誤吃進來。
-     */
-    private Integer resolveExtraBloomLifeThreshold(String rawText) {
-        if (!StringUtils.hasText(rawText)) {
-            return null;
-        }
-        if (rawText.contains("ライフが3以下")) {
-            return 3;
-        }
-        if (rawText.contains("ライフが4以下")) {
-            return 4;
-        }
-        return null;
     }
 
     /**
@@ -3148,25 +2956,6 @@ public class MatchEffectService {
         }
         Matcher matcher = Pattern.compile("推しホロメンが〈([^〉]+)〉").matcher(rawText);
         return matcher.find() ? matcher.group(1).trim() : null;
-    }
-
-    /**
-     * 讀取玩家目前的推し名稱。
-     */
-    private String resolvePlayerOshiCardName(Long matchId, Long userId) {
-        return jdbcTemplate.query(
-            """
-            SELECT c.name
-            FROM match_players mp
-            JOIN cards c ON c.card_id = mp.oshi_card_id
-            WHERE mp.match_id = ?
-              AND mp.user_id = ?
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getString("name") : null,
-            matchId,
-            userId
-        );
     }
 
     /**
