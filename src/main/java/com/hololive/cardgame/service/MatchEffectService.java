@@ -87,7 +87,6 @@ public class MatchEffectService {
     private static final Pattern PASSIVE_GIFT_REFERENCED_ART_NAME_PATTERN = Pattern.compile(
         "アーツ[「『]([^」』]+)[」』]"
     );
-    private static final Pattern BATON_TOUCH_COST_MODIFIER_PATTERN = Pattern.compile("バトンタッチに必要な無色\\s*[+＋]\\s*(\\d+)");
     private static final Pattern DOWN_EXTRA_LIFE_PATTERN = Pattern.compile("ライフを\\s*(\\d+)\\s*つ?減ら");
     private static final Pattern DOWN_EXTRA_LIFE_MINUS_PATTERN = Pattern.compile("ライフ\\s*[ー\\-−]\\s*(\\d+)");
     private static final Pattern PASSIVE_GIFT_SPECIAL_DAMAGE_BONUS_PATTERN = Pattern.compile("特殊ダメージ\\s*[+＋]\\s*(\\d+)");
@@ -115,6 +114,7 @@ public class MatchEffectService {
     private final MatchCollabSwapEffectExecutionService collabSwapEffectExecutionService;
     private final MatchActionLockEffectExecutionService actionLockEffectExecutionService;
     private final MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService;
+    private final MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -229,6 +229,15 @@ public class MatchEffectService {
             this::hasOpponentStageHolomemWithLevel,
             this::containsAnyName
         );
+        this.batonTouchCostModifierEffectExecutionService = new MatchBatonTouchCostModifierEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            this::resolveEffectTargetHolomemId,
+            this::resolveOpponentUserId,
+            this::resolveCurrentTurnNumber,
+            this::resolveHolomemOwner,
+            this::resolveHolomemCardInstanceId
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -239,6 +248,7 @@ public class MatchEffectService {
             collabSwapEffectExecutionService,
             actionLockEffectExecutionService,
             extraBloomAllowanceEffectExecutionService,
+            batonTouchCostModifierEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -251,6 +261,7 @@ public class MatchEffectService {
             collabSwapEffectExecutionService,
             actionLockEffectExecutionService,
             extraBloomAllowanceEffectExecutionService,
+            batonTouchCostModifierEffectExecutionService,
             this
         );
     }
@@ -410,7 +421,14 @@ public class MatchEffectService {
                         executeDownExtraLifeEffect(matchId, userId, type, effectNode)
                     );
                     case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
-                        executeBatonTouchCostModifierEffect(matchId, userId, type, effectNode, targetType, targetHolomemCardInstanceId)
+                        batonTouchCostModifierEffectExecutionService.executeBatonTouchCostModifierEffect(
+                            matchId,
+                            userId,
+                            type,
+                            effectNode,
+                            targetType,
+                            targetHolomemCardInstanceId
+                        )
                     );
                     case "ACTION_LOCK" -> executed.add(
                         actionLockEffectExecutionService.executeActionLockEffect(
@@ -886,7 +904,7 @@ public class MatchEffectService {
             case "MOVE_TO_HOLOPOWER" -> holopowerMoveEffectExecutionService.executeMoveToHolopowerEffect(matchId, userId, effectType, giftNode);
             case "DOWN_NO_LIFE" -> executeDownNoLifeEffect(matchId, userId, effectType, giftNode);
             case "DOWN_EXTRA_LIFE" -> executeDownExtraLifeEffect(matchId, userId, effectType, giftNode);
-            case "BATON_TOUCH_COST_MODIFIER" -> executeBatonTouchCostModifierEffect(
+            case "BATON_TOUCH_COST_MODIFIER" -> batonTouchCostModifierEffectExecutionService.executeBatonTouchCostModifierEffect(
                 matchId,
                 userId,
                 effectType,
@@ -2834,79 +2852,14 @@ public class MatchEffectService {
         String targetType,
         Long targetHolomemCardInstanceId
     ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        int modifier = effectTextParser.extractByPattern(rawText, BATON_TOUCH_COST_MODIFIER_PATTERN);
-        if (modifier <= 0) {
-            modifier = effectTextParser.extractInt(effectNode, 0, "modifier", "value", "amount");
-        }
-        if (modifier <= 0) {
-            return executeNoOpEffect(effectType, effectNode, "找不到有效的バトンタッチ無色修正值");
-        }
-
-        Long targetHolomemId = resolveEffectTargetHolomemId(
+        return batonTouchCostModifierEffectExecutionService.executeBatonTouchCostModifierEffect(
             matchId,
             userId,
+            effectType,
+            effectNode,
             targetType,
-            targetHolomemCardInstanceId,
-            true
+            targetHolomemCardInstanceId
         );
-        if (targetHolomemId == null) {
-            Long ownerUserId = isOpponentTargetType(normalize(targetType))
-                ? resolveOpponentUserId(matchId, userId)
-                : userId;
-            if (ownerUserId != null) {
-                targetHolomemId = jdbcTemplate.query(
-                    """
-                    SELECT id
-                    FROM match_holomems
-                    WHERE match_id = ?
-                      AND owner_user_id = ?
-                      AND zone = 'CENTER'
-                    ORDER BY id
-                    LIMIT 1
-                    """,
-                    rs -> rs.next() ? rs.getLong("id") : null,
-                    matchId,
-                    ownerUserId
-                );
-            }
-        }
-        if (targetHolomemId == null) {
-            return executeNoOpEffect(effectType, effectNode, "找不到可套用バトンタッチ修正的 CENTER 目標");
-        }
-
-        int currentTurn = resolveCurrentTurnNumber(matchId);
-        int expiresTurn = currentTurn + 1;
-        int inserted = jdbcTemplate.update(
-            """
-            INSERT INTO match_turn_effects (
-                match_id,
-                source_user_id,
-                affected_user_id,
-                effect_type,
-                stat_type,
-                modifier_value,
-                expires_turn,
-                payload
-            ) VALUES (?, ?, ?, ?, 'BATON_TOUCH_COLORLESS_MODIFIER', ?, ?, CAST(? AS jsonb))
-            """,
-            matchId,
-            userId,
-            resolveHolomemOwner(matchId, targetHolomemId),
-            "DEBUFF",
-            modifier,
-            expiresTurn,
-            effectTextParser.toJsonString(Map.of("targetHolomemId", targetHolomemId, "rawText", rawText))
-        );
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("applied", inserted == 1);
-        summary.put("targetHolomemId", targetHolomemId);
-        summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
-        summary.put("modifierValue", modifier);
-        summary.put("expiresTurn", expiresTurn);
-        return summary;
     }
 
     /**

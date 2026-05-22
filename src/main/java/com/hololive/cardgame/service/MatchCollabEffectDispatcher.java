@@ -22,6 +22,7 @@ class MatchCollabEffectDispatcher {
     private final MatchCollabSwapEffectExecutionService collabSwapEffectExecutionService;
     private final MatchActionLockEffectExecutionService actionLockEffectExecutionService;
     private final MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService;
+    private final MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -34,6 +35,7 @@ class MatchCollabEffectDispatcher {
         MatchCollabSwapEffectExecutionService collabSwapEffectExecutionService,
         MatchActionLockEffectExecutionService actionLockEffectExecutionService,
         MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService,
+        MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -45,6 +47,7 @@ class MatchCollabEffectDispatcher {
         this.collabSwapEffectExecutionService = collabSwapEffectExecutionService;
         this.actionLockEffectExecutionService = actionLockEffectExecutionService;
         this.extraBloomAllowanceEffectExecutionService = extraBloomAllowanceEffectExecutionService;
+        this.batonTouchCostModifierEffectExecutionService = batonTouchCostModifierEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -180,7 +183,7 @@ class MatchCollabEffectDispatcher {
                         effectService.executeDownExtraLifeEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
-                        effectService.executeBatonTouchCostModifierEffect(
+                        batonTouchCostModifierEffectExecutionService.executeBatonTouchCostModifierEffect(
                             matchId,
                             userId,
                             effectType,
