@@ -24,6 +24,7 @@ class MatchBloomEffectDispatcher {
     private final MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService;
     private final MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService;
     private final MatchResultEffectExecutionService matchResultEffectExecutionService;
+    private final MatchDiscardHandEffectExecutionService discardHandEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -38,6 +39,7 @@ class MatchBloomEffectDispatcher {
         MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService,
         MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService,
         MatchResultEffectExecutionService matchResultEffectExecutionService,
+        MatchDiscardHandEffectExecutionService discardHandEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -51,6 +53,7 @@ class MatchBloomEffectDispatcher {
         this.extraBloomAllowanceEffectExecutionService = extraBloomAllowanceEffectExecutionService;
         this.batonTouchCostModifierEffectExecutionService = batonTouchCostModifierEffectExecutionService;
         this.matchResultEffectExecutionService = matchResultEffectExecutionService;
+        this.discardHandEffectExecutionService = discardHandEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -168,7 +171,7 @@ class MatchBloomEffectDispatcher {
                         effectService.executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "DISCARD_HAND" -> executed.add(
-                        effectService.executeDiscardHandEffect(matchId, userId, effectType, bloomEffectNode)
+                        discardHandEffectExecutionService.executeDiscardHandEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "REST" -> executed.add(
                         restEffectExecutionService.executeRestEffect(

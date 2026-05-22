@@ -24,6 +24,7 @@ class MatchCollabEffectDispatcher {
     private final MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService;
     private final MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService;
     private final MatchResultEffectExecutionService matchResultEffectExecutionService;
+    private final MatchDiscardHandEffectExecutionService discardHandEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -38,6 +39,7 @@ class MatchCollabEffectDispatcher {
         MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService,
         MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService,
         MatchResultEffectExecutionService matchResultEffectExecutionService,
+        MatchDiscardHandEffectExecutionService discardHandEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -51,6 +53,7 @@ class MatchCollabEffectDispatcher {
         this.extraBloomAllowanceEffectExecutionService = extraBloomAllowanceEffectExecutionService;
         this.batonTouchCostModifierEffectExecutionService = batonTouchCostModifierEffectExecutionService;
         this.matchResultEffectExecutionService = matchResultEffectExecutionService;
+        this.discardHandEffectExecutionService = discardHandEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -161,7 +164,7 @@ class MatchCollabEffectDispatcher {
                         effectService.executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "DISCARD_HAND" -> executed.add(
-                        effectService.executeDiscardHandEffect(matchId, userId, effectType, collabEffectNode)
+                        discardHandEffectExecutionService.executeDiscardHandEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "REST" -> executed.add(
                         restEffectExecutionService.executeRestEffect(

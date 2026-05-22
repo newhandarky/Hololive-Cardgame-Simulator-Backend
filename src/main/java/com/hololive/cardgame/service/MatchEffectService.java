@@ -116,6 +116,7 @@ public class MatchEffectService {
     private final MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService;
     private final MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService;
     private final MatchResultEffectExecutionService matchResultEffectExecutionService;
+    private final MatchDiscardHandEffectExecutionService discardHandEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -243,6 +244,14 @@ public class MatchEffectService {
             effectTextParser,
             this::resolveOpponentUserId
         );
+        this.discardHandEffectExecutionService = new MatchDiscardHandEffectExecutionService(
+            jdbcTemplate,
+            objectMapper,
+            effectTextParser,
+            searchCriteriaParser,
+            cardSelectionRequestResolver,
+            searchService
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -255,6 +264,7 @@ public class MatchEffectService {
             extraBloomAllowanceEffectExecutionService,
             batonTouchCostModifierEffectExecutionService,
             matchResultEffectExecutionService,
+            discardHandEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -269,6 +279,7 @@ public class MatchEffectService {
             extraBloomAllowanceEffectExecutionService,
             batonTouchCostModifierEffectExecutionService,
             matchResultEffectExecutionService,
+            discardHandEffectExecutionService,
             this
         );
     }
@@ -403,7 +414,7 @@ public class MatchEffectService {
                         executeReturnCheerToDeckBottomEffect(matchId, userId, type, effectNode)
                     );
                     case "DISCARD_HAND" -> executed.add(
-                        executeDiscardHandEffect(matchId, userId, type, effectNode)
+                        discardHandEffectExecutionService.executeDiscardHandEffect(matchId, userId, type, effectNode)
                     );
                     case "REST" -> executed.add(
                         restEffectExecutionService.executeRestEffect(
@@ -898,7 +909,7 @@ public class MatchEffectService {
             case "REVEAL_TO_ARCHIVE" -> executeRevealToArchiveEffect(matchId, userId, effectType, giftNode);
             case "BLOOM_FROM_ARCHIVE" -> executeBloomFromArchiveEffect(matchId, userId, effectType, giftNode);
             case "RETURN_CHEER_TO_DECK_BOTTOM" -> executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, giftNode);
-            case "DISCARD_HAND" -> executeDiscardHandEffect(matchId, userId, effectType, giftNode);
+            case "DISCARD_HAND" -> discardHandEffectExecutionService.executeDiscardHandEffect(matchId, userId, effectType, giftNode);
             case "REST" -> restEffectExecutionService.executeRestEffect(
                 matchId,
                 userId,
@@ -2540,100 +2551,6 @@ public class MatchEffectService {
         summary.put("colorFilter", colorFilter);
         summary.put("returnedCardInstanceIds", movedCardInstanceIds);
         summary.put("returnedCardIds", movedCardIds);
-        return summary;
-    }
-
-    /**
-     * 執行棄手牌效果，支援指定卡與自動挑選。
-     */
-    Map<String, Object> executeDiscardHandEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        String discardClause = extractCostClause(rawText);
-        SearchCriteria discardCriteria = resolveSearchCriteriaFromRawText(discardClause);
-        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "手札", 1);
-        int discardCount = Math.max(requestedCount, 1);
-
-        List<Map<String, Object>> handCards;
-        if (discardCriteria.isEmpty()) {
-            handCards = jdbcTemplate.query(
-                """
-                SELECT id, card_id
-                FROM match_cards
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'HAND'
-                ORDER BY order_index NULLS LAST, id
-                LIMIT ?
-                """,
-                (rs, rowNum) -> {
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("id", rs.getLong("id"));
-                    row.put("card_id", rs.getString("card_id"));
-                    return row;
-                },
-                matchId,
-                userId,
-                discardCount
-            );
-        } else {
-            // 某些官方文案把「要丟哪一張手牌」寫在冒號前的成本段，例如：
-            // `自分の手札の#FLOW GLOWを持つホロメン1枚をアーカイブできる：...`
-            //
-            // 若這裡仍沿用「拿手牌前 N 張」的舊邏輯，就會把不符合條件的手牌誤當成本。
-            // 因此只在成本段能解析出條件時，切換成同一套 SearchCriteria 過濾流程。
-            handCards = new ArrayList<>(loadCandidatesFromZone(matchId, userId, "HAND", discardCriteria, false));
-            if (handCards.size() > discardCount) {
-                handCards = new ArrayList<>(handCards.subList(0, discardCount));
-            }
-        }
-
-        List<Long> discardedCardInstanceIds = new ArrayList<>();
-        List<String> discardedCardIds = new ArrayList<>();
-        int nextArchiveOrder = nextZoneOrder(matchId, userId, "ARCHIVE");
-        for (Map<String, Object> row : handCards) {
-            Long cardInstanceId = asLong(row.get("id"));
-            String cardId = asText(row.get("card_id"));
-            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
-                continue;
-            }
-            int moved = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'ARCHIVE',
-                    order_index = ?,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'HAND'
-                """,
-                nextArchiveOrder++,
-                cardInstanceId,
-                matchId,
-                userId
-            );
-            if (moved != 1) {
-                continue;
-            }
-            discardedCardInstanceIds.add(cardInstanceId);
-            discardedCardIds.add(cardId);
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("discardRequested", discardCount);
-        summary.put("discardApplied", discardedCardInstanceIds.size());
-        if (!discardCriteria.isEmpty()) {
-            summary.put("discardCriteria", buildCriteriaSummary(discardCriteria));
-        }
-        summary.put("discardedCardInstanceIds", discardedCardInstanceIds);
-        summary.put("discardedCardIds", discardedCardIds);
         return summary;
     }
 
