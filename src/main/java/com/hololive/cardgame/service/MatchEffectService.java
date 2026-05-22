@@ -112,6 +112,7 @@ public class MatchEffectService {
     private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
     private final MatchRestEffectExecutionService restEffectExecutionService;
     private final MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService;
+    private final MatchCollabSwapEffectExecutionService collabSwapEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -203,6 +204,12 @@ public class MatchEffectService {
             this::isActionLockActive,
             this::resolveHolomemCardInstanceId
         );
+        this.collabSwapEffectExecutionService = new MatchCollabSwapEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            this::resolveTargetHolomemId,
+            this::resolveHolomemCardInstanceId
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -210,6 +217,7 @@ public class MatchEffectService {
             holopowerMoveEffectExecutionService,
             restEffectExecutionService,
             swapCenterBackEffectExecutionService,
+            collabSwapEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -219,6 +227,7 @@ public class MatchEffectService {
             holopowerMoveEffectExecutionService,
             restEffectExecutionService,
             swapCenterBackEffectExecutionService,
+            collabSwapEffectExecutionService,
             this
         );
     }
@@ -396,7 +405,13 @@ public class MatchEffectService {
                         lookEffectExecutionService.executeLookHolopowerEffect(matchId, userId, type, effectNode)
                     );
                     case "SWAP_WITH_COLLAB" -> executed.add(
-                        executeSwapWithCollabEffect(matchId, userId, type, effectNode, targetHolomemCardInstanceId)
+                        collabSwapEffectExecutionService.executeSwapWithCollabEffect(
+                            matchId,
+                            userId,
+                            type,
+                            effectNode,
+                            targetHolomemCardInstanceId
+                        )
                     );
                     case "BUFF", "DEBUFF" -> executed.add(
                         executeBuffDebuffEffect(
@@ -868,7 +883,13 @@ public class MatchEffectService {
                 giftNode,
                 holderCardInstanceId
             );
-            case "SWAP_WITH_COLLAB" -> executeSwapWithCollabEffect(matchId, userId, effectType, giftNode, holderCardInstanceId);
+            case "SWAP_WITH_COLLAB" -> collabSwapEffectExecutionService.executeSwapWithCollabEffect(
+                matchId,
+                userId,
+                effectType,
+                giftNode,
+                holderCardInstanceId
+            );
             case "HEAL" -> executeHealEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
             case "BUFF", "DEBUFF" -> executeBuffDebuffEffect(matchId, userId, effectType, giftNode, targetType);
             case "MATCH_RESULT", "WIN", "LOSE" -> executeMatchResultEffect(matchId, userId, effectType, giftNode);
@@ -3247,142 +3268,6 @@ public class MatchEffectService {
         summary.put("targetHolomemCardInstanceId", targetHolomemId == null ? null : resolveHolomemCardInstanceId(targetHolomemId));
         summary.put("affectedUserId", affectedUserId);
         summary.put("expiresTurn", expiresTurn);
-        return summary;
-    }
-
-    /**
-     * 執行與 Collab 位互換位置效果。
-     */
-    Map<String, Object> executeSwapWithCollabEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode,
-        Long selfHolomemCardInstanceId
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        Long sourceHolomemId = resolveTargetHolomemId(matchId, userId, selfHolomemCardInstanceId);
-        if (sourceHolomemId == null) {
-            sourceHolomemId = jdbcTemplate.query(
-                """
-                SELECT id
-                FROM match_holomems
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'BACK'
-                ORDER BY id
-                LIMIT 1
-                """,
-                rs -> rs.next() ? rs.getLong("id") : null,
-                matchId,
-                userId
-            );
-        }
-        if (sourceHolomemId == null) {
-            return executeNoOpEffect(effectType, effectNode, "找不到可交換的來源 Holomem");
-        }
-
-        Map<String, Object> source = jdbcTemplate.query(
-            """
-            SELECT h.id, h.zone, COALESCE(m.hp, 0) - COALESCE(h.damage_taken, 0) AS remain_hp
-            FROM match_holomems h
-            JOIN member_cards m ON m.card_id = h.card_id
-            WHERE h.id = ?
-              AND h.match_id = ?
-              AND h.owner_user_id = ?
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", rs.getLong("id"));
-                row.put("zone", rs.getString("zone"));
-                row.put("remain_hp", rs.getInt("remain_hp"));
-                return row;
-            },
-            sourceHolomemId,
-            matchId,
-            userId
-        );
-        if (source == null) {
-            return executeNoOpEffect(effectType, effectNode, "來源 Holomem 不存在");
-        }
-        String sourceZone = normalize(source.get("zone"));
-        if (rawText.contains("バックポジション限定") && !"BACK".equals(sourceZone)) {
-            return executeNoOpEffect(effectType, effectNode, "來源 Holomem 不在 BACK，無法交換");
-        }
-
-        boolean requireLowHpCollab = rawText.contains("残りHP70以下");
-        Map<String, Object> collabTarget = jdbcTemplate.query(
-            """
-            SELECT h.id, h.match_card_id, COALESCE(m.hp, 0) - COALESCE(h.damage_taken, 0) AS remain_hp
-            FROM match_holomems h
-            JOIN member_cards m ON m.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.zone = 'COLLAB'
-              AND (? = FALSE OR (COALESCE(m.hp, 0) - COALESCE(h.damage_taken, 0)) <= 70)
-            ORDER BY h.id
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", rs.getLong("id"));
-                row.put("match_card_id", rs.getLong("match_card_id"));
-                row.put("remain_hp", rs.getInt("remain_hp"));
-                return row;
-            },
-            matchId,
-            userId,
-            requireLowHpCollab
-        );
-        if (collabTarget == null) {
-            return executeNoOpEffect(effectType, effectNode, "沒有符合條件的 COLLAB 目標可交換");
-        }
-        Long collabHolomemId = asLong(collabTarget.get("id"));
-        if (collabHolomemId == null) {
-            return executeNoOpEffect(effectType, effectNode, "COLLAB 目標資料不足");
-        }
-
-        jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET zone = 'COLLAB',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-            """,
-            sourceHolomemId,
-            matchId,
-            userId
-        );
-        jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET zone = 'BACK',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-            """,
-            collabHolomemId,
-            matchId,
-            userId
-        );
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("swapped", true);
-        summary.put("sourceHolomemId", sourceHolomemId);
-        summary.put("targetHolomemId", collabHolomemId);
-        summary.put("sourceHolomemCardInstanceId", resolveHolomemCardInstanceId(sourceHolomemId));
-        summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(collabHolomemId));
-        summary.put("requireLowHpCollab", requireLowHpCollab);
         return summary;
     }
 

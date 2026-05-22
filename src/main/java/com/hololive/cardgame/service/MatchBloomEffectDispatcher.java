@@ -19,6 +19,7 @@ class MatchBloomEffectDispatcher {
     private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
     private final MatchRestEffectExecutionService restEffectExecutionService;
     private final MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService;
+    private final MatchCollabSwapEffectExecutionService collabSwapEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -28,6 +29,7 @@ class MatchBloomEffectDispatcher {
         MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService,
         MatchRestEffectExecutionService restEffectExecutionService,
         MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService,
+        MatchCollabSwapEffectExecutionService collabSwapEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -36,6 +38,7 @@ class MatchBloomEffectDispatcher {
         this.holopowerMoveEffectExecutionService = holopowerMoveEffectExecutionService;
         this.restEffectExecutionService = restEffectExecutionService;
         this.swapCenterBackEffectExecutionService = swapCenterBackEffectExecutionService;
+        this.collabSwapEffectExecutionService = collabSwapEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -231,7 +234,13 @@ class MatchBloomEffectDispatcher {
                         )
                     );
                     case "SWAP_WITH_COLLAB" -> executed.add(
-                        effectService.executeSwapWithCollabEffect(matchId, userId, effectType, bloomEffectNode, selfHolomemCardInstanceId)
+                        collabSwapEffectExecutionService.executeSwapWithCollabEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode,
+                            selfHolomemCardInstanceId
+                        )
                     );
                     case "HEAL" -> executed.add(
                         effectService.executeHealEffect(
