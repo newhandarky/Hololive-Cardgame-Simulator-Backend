@@ -23,6 +23,7 @@ class MatchBloomEffectDispatcher {
     private final MatchActionLockEffectExecutionService actionLockEffectExecutionService;
     private final MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService;
     private final MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService;
+    private final MatchResultEffectExecutionService matchResultEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -36,6 +37,7 @@ class MatchBloomEffectDispatcher {
         MatchActionLockEffectExecutionService actionLockEffectExecutionService,
         MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService,
         MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService,
+        MatchResultEffectExecutionService matchResultEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -48,6 +50,7 @@ class MatchBloomEffectDispatcher {
         this.actionLockEffectExecutionService = actionLockEffectExecutionService;
         this.extraBloomAllowanceEffectExecutionService = extraBloomAllowanceEffectExecutionService;
         this.batonTouchCostModifierEffectExecutionService = batonTouchCostModifierEffectExecutionService;
+        this.matchResultEffectExecutionService = matchResultEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -276,7 +279,7 @@ class MatchBloomEffectDispatcher {
                         )
                     );
                     case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
-                        effectService.executeMatchResultEffect(matchId, userId, effectType, bloomEffectNode)
+                        matchResultEffectExecutionService.executeMatchResultEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "UNIMPLEMENTED" -> executed.add(
                         effectService.executeNoOpEffect(effectType, bloomEffectNode, "尚未支援的 BLOOM 效果")

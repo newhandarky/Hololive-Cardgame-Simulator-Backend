@@ -115,6 +115,7 @@ public class MatchEffectService {
     private final MatchActionLockEffectExecutionService actionLockEffectExecutionService;
     private final MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService;
     private final MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService;
+    private final MatchResultEffectExecutionService matchResultEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -238,6 +239,10 @@ public class MatchEffectService {
             this::resolveHolomemOwner,
             this::resolveHolomemCardInstanceId
         );
+        this.matchResultEffectExecutionService = new MatchResultEffectExecutionService(
+            effectTextParser,
+            this::resolveOpponentUserId
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -249,6 +254,7 @@ public class MatchEffectService {
             actionLockEffectExecutionService,
             extraBloomAllowanceEffectExecutionService,
             batonTouchCostModifierEffectExecutionService,
+            matchResultEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -262,6 +268,7 @@ public class MatchEffectService {
             actionLockEffectExecutionService,
             extraBloomAllowanceEffectExecutionService,
             batonTouchCostModifierEffectExecutionService,
+            matchResultEffectExecutionService,
             this
         );
     }
@@ -471,7 +478,7 @@ public class MatchEffectService {
                         )
                     );
                     case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
-                        executeMatchResultEffect(matchId, userId, type, effectNode)
+                        matchResultEffectExecutionService.executeMatchResultEffect(matchId, userId, type, effectNode)
                     );
                     case "UNIMPLEMENTED" -> executed.add(
                         executeNoOpEffect(type, effectNode, "尚未落地，先保留 action 並不中斷流程")
@@ -947,7 +954,7 @@ public class MatchEffectService {
             );
             case "HEAL" -> executeHealEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
             case "BUFF", "DEBUFF" -> executeBuffDebuffEffect(matchId, userId, effectType, giftNode, targetType);
-            case "MATCH_RESULT", "WIN", "LOSE" -> executeMatchResultEffect(matchId, userId, effectType, giftNode);
+            case "MATCH_RESULT", "WIN", "LOSE" -> matchResultEffectExecutionService.executeMatchResultEffect(matchId, userId, effectType, giftNode);
             case "UNIMPLEMENTED" -> executeNoOpEffect(effectType, giftNode, "尚未支援的 GIFT 效果");
             default -> throw new UnsupportedOperationException("UNSUPPORTED_GIFT_EFFECT");
         };
@@ -4870,136 +4877,6 @@ public class MatchEffectService {
         summary.put("skipped", true);
         summary.put("reason", StringUtils.hasText(reason) ? reason : "EFFECT_SKIPPED");
         return summary;
-    }
-
-    /**
-     * 直接結算勝負效果（WIN/LOSE/MATCH_RESULT）。
-     */
-    Map<String, Object> executeMatchResultEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode
-    ) {
-        Long opponentUserId = resolveOpponentUserId(matchId, userId);
-        MatchResultDecision decision = resolveMatchResultDecision(effectType, effectNode, userId, opponentUserId);
-        if (decision == null) {
-            return executeNoOpEffect(effectType, effectNode, "MATCH_RESULT 無法解析出勝負結果");
-        }
-
-        Map<String, Object> matchResult = new LinkedHashMap<>();
-        matchResult.put("draw", decision.draw());
-        matchResult.put("winnerUserId", decision.winnerUserId());
-        matchResult.put("loserUserId", decision.loserUserId());
-        matchResult.put("reason", decision.reason());
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectTextParser.normalizeEffectType(effectType));
-        summary.put("applied", true);
-        summary.put("matchResult", matchResult);
-        return summary;
-    }
-
-    /**
-     * 解析勝負效果對應的勝者/敗者與 reason code。
-     */
-    private MatchResultDecision resolveMatchResultDecision(
-        String effectType,
-        JsonNode effectNode,
-        Long actorUserId,
-        Long opponentUserId
-    ) {
-        String explicitResult = effectTextParser.normalizeEffectType(readText(effectNode, "result", "outcome", "matchResult"));
-        String normalizedEffectType = effectTextParser.normalizeEffectType(effectType);
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
-
-        String resolvedReason = readText(effectNode, "reason");
-        if (!StringUtils.hasText(resolvedReason)) {
-            resolvedReason = "CARD_EFFECT_MATCH_RESULT";
-        }
-
-        String winnerToken = effectTextParser.normalizeEffectType(readText(effectNode, "winner", "winnerSide", "winnerUser"));
-        String loserToken = effectTextParser.normalizeEffectType(readText(effectNode, "loser", "loserSide", "loserUser"));
-
-        if ("WIN".equals(normalizedEffectType) || "LOSE".equals(normalizedEffectType) || "DRAW".equals(normalizedEffectType)) {
-            explicitResult = normalizedEffectType;
-        }
-
-        if ("DRAW".equals(explicitResult)) {
-            return new MatchResultDecision(true, null, null, "CARD_EFFECT_DRAW");
-        }
-        if ("WIN".equals(explicitResult)) {
-            if (opponentUserId == null) {
-                return null;
-            }
-            return new MatchResultDecision(false, actorUserId, opponentUserId, "CARD_EFFECT_WIN");
-        }
-        if ("LOSE".equals(explicitResult)) {
-            if (opponentUserId == null) {
-                return null;
-            }
-            return new MatchResultDecision(false, opponentUserId, actorUserId, "CARD_EFFECT_LOSE");
-        }
-
-        if (isBothToken(winnerToken) || isBothToken(loserToken)) {
-            return new MatchResultDecision(true, null, null, "CARD_EFFECT_DRAW");
-        }
-
-        Long winnerUserId = resolveSideUserId(winnerToken, actorUserId, opponentUserId);
-        Long loserUserId = resolveSideUserId(loserToken, actorUserId, opponentUserId);
-        if (winnerUserId != null && loserUserId == null) {
-            loserUserId = winnerUserId.equals(actorUserId) ? opponentUserId : actorUserId;
-        } else if (winnerUserId == null && loserUserId != null) {
-            winnerUserId = loserUserId.equals(actorUserId) ? opponentUserId : actorUserId;
-        }
-        if (winnerUserId != null && loserUserId != null && !winnerUserId.equals(loserUserId)) {
-            return new MatchResultDecision(false, winnerUserId, loserUserId, resolvedReason);
-        }
-
-        if (StringUtils.hasText(rawText)) {
-            if (rawText.contains("引き分け")) {
-                return new MatchResultDecision(true, null, null, "CARD_EFFECT_DRAW");
-            }
-            if (rawText.contains("あなた") && rawText.contains("勝利")) {
-                if (opponentUserId == null) {
-                    return null;
-                }
-                return new MatchResultDecision(false, actorUserId, opponentUserId, "CARD_EFFECT_WIN");
-            }
-            if (rawText.contains("相手") && rawText.contains("敗北")) {
-                if (opponentUserId == null) {
-                    return null;
-                }
-                return new MatchResultDecision(false, actorUserId, opponentUserId, "CARD_EFFECT_WIN");
-            }
-            if (rawText.contains("あなた") && rawText.contains("敗北")) {
-                if (opponentUserId == null) {
-                    return null;
-                }
-                return new MatchResultDecision(false, opponentUserId, actorUserId, "CARD_EFFECT_LOSE");
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 判斷 winner/loser token 是否代表雙方（平手）。
-     */
-    private boolean isBothToken(String token) {
-        String normalized = effectTextParser.normalizeEffectType(token);
-        return "BOTH".equals(normalized) || "ALL".equals(normalized);
-    }
-
-    /**
-     * 將 side token（SELF/OPPONENT 等）解析成實際 userId。
-     */
-    private Long resolveSideUserId(String sideToken, Long actorUserId, Long opponentUserId) {
-        String normalized = effectTextParser.normalizeEffectType(sideToken);
-        return switch (normalized) {
-            case "SELF", "YOU", "ME", "ACTOR", "CURRENT" -> actorUserId;
-            case "OPPONENT", "ENEMY", "OTHER" -> opponentUserId;
-            default -> null;
-        };
     }
 
     /**
@@ -10013,16 +9890,6 @@ public class MatchEffectService {
         JsonNode effectNode,
         String rawText,
         Integer diceRoll
-    ) {}
-
-    /**
-     * 勝負效果決策模型（勝負方、reason 與敘述）。
-     */
-    private record MatchResultDecision(
-        boolean draw,
-        Long winnerUserId,
-        Long loserUserId,
-        String reason
     ) {}
 
     /**

@@ -23,6 +23,7 @@ class MatchCollabEffectDispatcher {
     private final MatchActionLockEffectExecutionService actionLockEffectExecutionService;
     private final MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService;
     private final MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService;
+    private final MatchResultEffectExecutionService matchResultEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -36,6 +37,7 @@ class MatchCollabEffectDispatcher {
         MatchActionLockEffectExecutionService actionLockEffectExecutionService,
         MatchExtraBloomAllowanceEffectExecutionService extraBloomAllowanceEffectExecutionService,
         MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService,
+        MatchResultEffectExecutionService matchResultEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -48,6 +50,7 @@ class MatchCollabEffectDispatcher {
         this.actionLockEffectExecutionService = actionLockEffectExecutionService;
         this.extraBloomAllowanceEffectExecutionService = extraBloomAllowanceEffectExecutionService;
         this.batonTouchCostModifierEffectExecutionService = batonTouchCostModifierEffectExecutionService;
+        this.matchResultEffectExecutionService = matchResultEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -258,7 +261,7 @@ class MatchCollabEffectDispatcher {
                         )
                     );
                     case "MATCH_RESULT", "WIN", "LOSE" -> executed.add(
-                        effectService.executeMatchResultEffect(matchId, userId, effectType, collabEffectNode)
+                        matchResultEffectExecutionService.executeMatchResultEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "UNIMPLEMENTED" -> executed.add(
                         effectService.executeNoOpEffect(effectType, collabEffectNode, "尚未支援的 COLLAB 效果")
