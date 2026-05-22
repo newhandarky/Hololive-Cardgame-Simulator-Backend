@@ -18,6 +18,7 @@ class MatchCollabEffectDispatcher {
     private final MatchDrawEffectExecutionService drawEffectExecutionService;
     private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
     private final MatchRestEffectExecutionService restEffectExecutionService;
+    private final MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -26,6 +27,7 @@ class MatchCollabEffectDispatcher {
         MatchDrawEffectExecutionService drawEffectExecutionService,
         MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService,
         MatchRestEffectExecutionService restEffectExecutionService,
+        MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -33,6 +35,7 @@ class MatchCollabEffectDispatcher {
         this.drawEffectExecutionService = drawEffectExecutionService;
         this.holopowerMoveEffectExecutionService = holopowerMoveEffectExecutionService;
         this.restEffectExecutionService = restEffectExecutionService;
+        this.swapCenterBackEffectExecutionService = swapCenterBackEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -156,7 +159,7 @@ class MatchCollabEffectDispatcher {
                         )
                     );
                     case "SWAP_CENTER_BACK" -> executed.add(
-                        effectService.executeSwapCenterBackEffect(matchId, userId, effectType, collabEffectNode)
+                        swapCenterBackEffectExecutionService.executeSwapCenterBackEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "MOVE_TO_HOLOPOWER" -> executed.add(
                         holopowerMoveEffectExecutionService.executeMoveToHolopowerEffect(matchId, userId, effectType, collabEffectNode)

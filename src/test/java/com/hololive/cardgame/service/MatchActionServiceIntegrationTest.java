@@ -8771,6 +8771,88 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
     }
 
     @Test
+    void playSupportShouldApplySwapCenterBackEffectToOwnStage() {
+        StartedMatchContext context = createStartedMatch("support-swap-host", "support-swap-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+
+        jdbcTemplate.update(
+            """
+            DELETE FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone IN ('CENTER', 'BACK')
+            """,
+            matchId,
+            hostId
+        );
+
+        String centerCardId = createMemberCardDefinition(
+            "TSUP_SWAP_CENTER_" + System.nanoTime(),
+            "支援交換中心",
+            "DEBUT",
+            120,
+            "RED"
+        );
+        String backCardId = createMemberCardDefinition(
+            "TSUP_SWAP_BACK_" + System.nanoTime(),
+            "支援交換後台",
+            "DEBUT",
+            120,
+            "BLUE"
+        );
+        Long centerCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, centerCardId, "CENTER", "DEBUT", 0);
+        Long backCardInstanceId = createStageHolomemWithSingleCard(matchId, hostId, backCardId, "BACK", "DEBUT", 0);
+
+        Long supportCardInstanceId = insertSupportCardIntoHand(
+            matchId,
+            hostId,
+            "TSUP_SWAP_" + System.nanoTime(),
+            false,
+            "SWAP_CENTER_BACK",
+            "{\"type\":\"SWAP_CENTER_BACK\",\"rawText\":\"自分のセンターホロメンとバックホロメンを交代する。\"}",
+            "SELF"
+        );
+
+        PlaySupportActionRequest request = new PlaySupportActionRequest();
+        request.setCardInstanceId(supportCardInstanceId);
+        matchActionService.playSupport(matchId, hostId, request);
+
+        String centerCardZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_holomems WHERE match_id = ? AND owner_user_id = ? AND match_card_id = ?",
+            String.class,
+            matchId,
+            hostId,
+            centerCardInstanceId
+        );
+        String backCardZone = jdbcTemplate.queryForObject(
+            "SELECT zone FROM match_holomems WHERE match_id = ? AND owner_user_id = ? AND match_card_id = ?",
+            String.class,
+            matchId,
+            hostId,
+            backCardInstanceId
+        );
+        String latestPlaySupportPayload = jdbcTemplate.query(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND action_type = 'PLAY_SUPPORT'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            rs -> rs.next() ? rs.getString("payload") : null,
+            matchId
+        );
+
+        assertThat(centerCardZone).isEqualTo("BACK");
+        assertThat(backCardZone).isEqualTo("CENTER");
+        assertThat(latestPlaySupportPayload).contains("SWAP_CENTER_BACK");
+        assertThat(latestPlaySupportPayload).contains("fromCenterHolomemId");
+        assertThat(latestPlaySupportPayload).contains("fromBackHolomemId");
+    }
+
+    @Test
     void playSupportDamageShouldRequireTriggerConfirmBeforeApplyingDownEventExtraLifeLoss() {
         StartedMatchContext context = createStartedMatch("support-down-event-host", "support-down-event-guest");
         Long matchId = context.matchId();

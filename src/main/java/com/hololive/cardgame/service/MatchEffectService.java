@@ -111,6 +111,7 @@ public class MatchEffectService {
     private final MatchDrawEffectExecutionService drawEffectExecutionService;
     private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
     private final MatchRestEffectExecutionService restEffectExecutionService;
+    private final MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -193,12 +194,22 @@ public class MatchEffectService {
             this::resolveOpponentUserId,
             this::resolveHolomemCardInstanceId
         );
+        this.swapCenterBackEffectExecutionService = new MatchSwapCenterBackEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            this::shouldApplyByDice,
+            this::resolveOpponentUserId,
+            this::resolveCurrentTurnNumber,
+            this::isActionLockActive,
+            this::resolveHolomemCardInstanceId
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
             drawEffectExecutionService,
             holopowerMoveEffectExecutionService,
             restEffectExecutionService,
+            swapCenterBackEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -207,6 +218,7 @@ public class MatchEffectService {
             drawEffectExecutionService,
             holopowerMoveEffectExecutionService,
             restEffectExecutionService,
+            swapCenterBackEffectExecutionService,
             this
         );
     }
@@ -354,7 +366,7 @@ public class MatchEffectService {
                         )
                     );
                     case "SWAP_CENTER_BACK" -> executed.add(
-                        executeSwapCenterBackEffect(matchId, userId, type, effectNode)
+                        swapCenterBackEffectExecutionService.executeSwapCenterBackEffect(matchId, userId, type, effectNode)
                     );
                     case "MOVE_TO_HOLOPOWER" -> executed.add(
                         holopowerMoveEffectExecutionService.executeMoveToHolopowerEffect(matchId, userId, type, effectNode)
@@ -825,7 +837,7 @@ public class MatchEffectService {
                 targetType,
                 holderCardInstanceId
             );
-            case "SWAP_CENTER_BACK" -> executeSwapCenterBackEffect(matchId, userId, effectType, giftNode);
+            case "SWAP_CENTER_BACK" -> swapCenterBackEffectExecutionService.executeSwapCenterBackEffect(matchId, userId, effectType, giftNode);
             case "MOVE_TO_HOLOPOWER" -> holopowerMoveEffectExecutionService.executeMoveToHolopowerEffect(matchId, userId, effectType, giftNode);
             case "DOWN_NO_LIFE" -> executeDownNoLifeEffect(matchId, userId, effectType, giftNode);
             case "DOWN_EXTRA_LIFE" -> executeDownExtraLifeEffect(matchId, userId, effectType, giftNode);
@@ -2539,105 +2551,6 @@ public class MatchEffectService {
         }
         summary.put("discardedCardInstanceIds", discardedCardInstanceIds);
         summary.put("discardedCardIds", discardedCardIds);
-        return summary;
-    }
-
-    /**
-     * 執行 CENTER/BACK 交換效果。
-     */
-    Map<String, Object> executeSwapCenterBackEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (!shouldApplyByDice(rawText, effectNode, effectType)) {
-            return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
-        }
-        boolean targetOpponent = rawText.contains("相手の");
-        boolean requireBackNotRested = rawText.contains("お休みしていない");
-        Long ownerUserId = targetOpponent ? resolveOpponentUserId(matchId, userId) : userId;
-        if (ownerUserId == null) {
-            return executeNoOpEffect(effectType, effectNode, "找不到交換目標玩家");
-        }
-
-        Long centerHolomemId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CENTER'
-            ORDER BY id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            ownerUserId
-        );
-        if (centerHolomemId == null) {
-            return executeNoOpEffect(effectType, effectNode, "沒有可交換的 CENTER");
-        }
-        int currentTurn = resolveCurrentTurnNumber(matchId);
-        if (isActionLockActive(matchId, ownerUserId, currentTurn, "SWAP", "CENTER", centerHolomemId)) {
-            return executeNoOpEffect(effectType, effectNode, "目前效果限制：不可交代");
-        }
-
-        Long backHolomemId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'BACK'
-              AND (? = FALSE OR is_rested = FALSE)
-            ORDER BY id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            ownerUserId,
-            requireBackNotRested
-        );
-        if (backHolomemId == null) {
-            return executeNoOpEffect(effectType, effectNode, "沒有可交換的 BACK");
-        }
-        if (isActionLockActive(matchId, ownerUserId, currentTurn, "SWAP", "BACK", backHolomemId)) {
-            return executeNoOpEffect(effectType, effectNode, "目前效果限制：不可交代");
-        }
-
-        jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET zone = 'BACK',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-            """,
-            centerHolomemId,
-            matchId
-        );
-        jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET zone = 'CENTER',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-            """,
-            backHolomemId,
-            matchId
-        );
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("applied", true);
-        summary.put("targetOwnerUserId", ownerUserId);
-        summary.put("fromCenterHolomemId", centerHolomemId);
-        summary.put("fromBackHolomemId", backHolomemId);
-        summary.put("centerHolomemCardInstanceId", resolveHolomemCardInstanceId(backHolomemId));
-        summary.put("backHolomemCardInstanceId", resolveHolomemCardInstanceId(centerHolomemId));
         return summary;
     }
 

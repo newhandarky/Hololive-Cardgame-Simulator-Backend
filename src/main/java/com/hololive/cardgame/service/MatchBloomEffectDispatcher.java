@@ -18,6 +18,7 @@ class MatchBloomEffectDispatcher {
     private final MatchDrawEffectExecutionService drawEffectExecutionService;
     private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
     private final MatchRestEffectExecutionService restEffectExecutionService;
+    private final MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -26,6 +27,7 @@ class MatchBloomEffectDispatcher {
         MatchDrawEffectExecutionService drawEffectExecutionService,
         MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService,
         MatchRestEffectExecutionService restEffectExecutionService,
+        MatchSwapCenterBackEffectExecutionService swapCenterBackEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -33,6 +35,7 @@ class MatchBloomEffectDispatcher {
         this.drawEffectExecutionService = drawEffectExecutionService;
         this.holopowerMoveEffectExecutionService = holopowerMoveEffectExecutionService;
         this.restEffectExecutionService = restEffectExecutionService;
+        this.swapCenterBackEffectExecutionService = swapCenterBackEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -163,7 +166,7 @@ class MatchBloomEffectDispatcher {
                         )
                     );
                     case "SWAP_CENTER_BACK" -> executed.add(
-                        effectService.executeSwapCenterBackEffect(matchId, userId, effectType, bloomEffectNode)
+                        swapCenterBackEffectExecutionService.executeSwapCenterBackEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "MOVE_TO_HOLOPOWER" -> executed.add(
                         holopowerMoveEffectExecutionService.executeMoveToHolopowerEffect(matchId, userId, effectType, bloomEffectNode)
