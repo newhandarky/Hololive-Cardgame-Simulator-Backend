@@ -29,6 +29,7 @@ class MatchCollabEffectDispatcher {
     private final MatchSummonToStageEffectExecutionService summonToStageEffectExecutionService;
     private final MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService;
     private final MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService;
+    private final MatchDownEffectExecutionService downEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -48,6 +49,7 @@ class MatchCollabEffectDispatcher {
         MatchSummonToStageEffectExecutionService summonToStageEffectExecutionService,
         MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService,
         MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService,
+        MatchDownEffectExecutionService downEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -66,6 +68,7 @@ class MatchCollabEffectDispatcher {
         this.summonToStageEffectExecutionService = summonToStageEffectExecutionService;
         this.archiveBloomEffectExecutionService = archiveBloomEffectExecutionService;
         this.cheerDeckReturnEffectExecutionService = cheerDeckReturnEffectExecutionService;
+        this.downEffectExecutionService = downEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -205,10 +208,10 @@ class MatchCollabEffectDispatcher {
                         holopowerMoveEffectExecutionService.executeMoveToHolopowerEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "DOWN_NO_LIFE" -> executed.add(
-                        effectService.executeDownNoLifeEffect(matchId, userId, effectType, collabEffectNode)
+                        downEffectExecutionService.executeDownNoLifeEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "DOWN_EXTRA_LIFE" -> executed.add(
-                        effectService.executeDownExtraLifeEffect(matchId, userId, effectType, collabEffectNode)
+                        downEffectExecutionService.executeDownExtraLifeEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "BATON_TOUCH_COST_MODIFIER" -> executed.add(
                         batonTouchCostModifierEffectExecutionService.executeBatonTouchCostModifierEffect(
