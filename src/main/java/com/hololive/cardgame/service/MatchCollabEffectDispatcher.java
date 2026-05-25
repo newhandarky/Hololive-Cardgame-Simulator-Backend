@@ -25,6 +25,7 @@ class MatchCollabEffectDispatcher {
     private final MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService;
     private final MatchResultEffectExecutionService matchResultEffectExecutionService;
     private final MatchDiscardHandEffectExecutionService discardHandEffectExecutionService;
+    private final MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -40,6 +41,7 @@ class MatchCollabEffectDispatcher {
         MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService,
         MatchResultEffectExecutionService matchResultEffectExecutionService,
         MatchDiscardHandEffectExecutionService discardHandEffectExecutionService,
+        MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -54,6 +56,7 @@ class MatchCollabEffectDispatcher {
         this.batonTouchCostModifierEffectExecutionService = batonTouchCostModifierEffectExecutionService;
         this.matchResultEffectExecutionService = matchResultEffectExecutionService;
         this.discardHandEffectExecutionService = discardHandEffectExecutionService;
+        this.revealToArchiveEffectExecutionService = revealToArchiveEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -155,7 +158,12 @@ class MatchCollabEffectDispatcher {
                         effectService.executeSummonToStageEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "REVEAL_TO_ARCHIVE" -> executed.add(
-                        effectService.executeRevealToArchiveEffect(matchId, userId, effectType, collabEffectNode)
+                        revealToArchiveEffectExecutionService.executeRevealToArchiveEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            collabEffectNode
+                        )
                     );
                     case "BLOOM_FROM_ARCHIVE" -> executed.add(
                         effectService.executeBloomFromArchiveEffect(matchId, userId, effectType, collabEffectNode)

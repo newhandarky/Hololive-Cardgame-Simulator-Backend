@@ -25,6 +25,7 @@ class MatchBloomEffectDispatcher {
     private final MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService;
     private final MatchResultEffectExecutionService matchResultEffectExecutionService;
     private final MatchDiscardHandEffectExecutionService discardHandEffectExecutionService;
+    private final MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -40,6 +41,7 @@ class MatchBloomEffectDispatcher {
         MatchBatonTouchCostModifierEffectExecutionService batonTouchCostModifierEffectExecutionService,
         MatchResultEffectExecutionService matchResultEffectExecutionService,
         MatchDiscardHandEffectExecutionService discardHandEffectExecutionService,
+        MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -54,6 +56,7 @@ class MatchBloomEffectDispatcher {
         this.batonTouchCostModifierEffectExecutionService = batonTouchCostModifierEffectExecutionService;
         this.matchResultEffectExecutionService = matchResultEffectExecutionService;
         this.discardHandEffectExecutionService = discardHandEffectExecutionService;
+        this.revealToArchiveEffectExecutionService = revealToArchiveEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -162,7 +165,12 @@ class MatchBloomEffectDispatcher {
                         effectService.executeSummonToStageEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "REVEAL_TO_ARCHIVE" -> executed.add(
-                        effectService.executeRevealToArchiveEffect(matchId, userId, effectType, bloomEffectNode)
+                        revealToArchiveEffectExecutionService.executeRevealToArchiveEffect(
+                            matchId,
+                            userId,
+                            effectType,
+                            bloomEffectNode
+                        )
                     );
                     case "BLOOM_FROM_ARCHIVE" -> executed.add(
                         effectService.executeBloomFromArchiveEffect(matchId, userId, effectType, bloomEffectNode)
