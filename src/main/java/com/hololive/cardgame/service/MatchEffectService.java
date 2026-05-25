@@ -100,6 +100,7 @@ public class MatchEffectService {
     private final MatchCardSelectionProbeBuilder cardSelectionProbeBuilder;
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
     private final MatchDamageEffectiveHpResolverService damageEffectiveHpResolverService;
+    private final MatchSpecialDamagePreventionResolverService specialDamagePreventionResolverService;
     private final MatchLookEffectExecutionService lookEffectExecutionService;
     private final MatchDrawEffectExecutionService drawEffectExecutionService;
     private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
@@ -183,6 +184,11 @@ public class MatchEffectService {
             jdbcTemplate,
             objectMapper,
             effectTextParser
+        );
+        this.specialDamagePreventionResolverService = new MatchSpecialDamagePreventionResolverService(
+            jdbcTemplate,
+            effectTextParser,
+            giftTriggerConditionService
         );
         this.lookEffectExecutionService = new MatchLookEffectExecutionService(jdbcTemplate, effectTextParser);
         this.drawEffectExecutionService = new MatchDrawEffectExecutionService(
@@ -331,8 +337,8 @@ public class MatchEffectService {
             this::resolveActiveDamageModifier,
             this::isHpChangeBlockedByOpponentAbility,
             this::resolveHolomemZone,
-            this::isSpecialDamageImmunityActive,
-            this::tryActivateHsd13012SpecialDamageImmunity,
+            specialDamagePreventionResolverService::isSpecialDamageImmunityActive,
+            specialDamagePreventionResolverService::tryActivateHsd13012SpecialDamageImmunity,
             damageEffectiveHpResolverService::resolve,
             this::archiveAttachedCheerCards,
             this::archiveAttachedSupportCards,
@@ -2896,210 +2902,6 @@ public class MatchEffectService {
             targetType,
             targetHolomemCardInstanceId
         );
-    }
-
-    private Map<String, Object> tryActivateHsd13012SpecialDamageImmunity(
-        Long matchId,
-        Long sourceUserId,
-        Long defendingUserId,
-        Long targetHolomemId,
-        String targetZone,
-        int currentTurn
-    ) {
-        if (
-            matchId == null
-                || sourceUserId == null
-                || defendingUserId == null
-                || targetHolomemId == null
-                || currentTurn <= 0
-        ) {
-            return null;
-        }
-        if (Objects.equals(sourceUserId, defendingUserId)) {
-            return null;
-        }
-        if (!"BACK".equals(normalize(targetZone))) {
-            return null;
-        }
-        if (!isOpponentTurnForUser(matchId, defendingUserId)) {
-            return null;
-        }
-        List<Map<String, Object>> holders = jdbcTemplate.queryForList(
-            """
-            SELECT h.id AS holomem_id,
-                   h.match_card_id,
-                   h.card_id,
-                   m.passive_effect_json::text AS passive_text
-            FROM match_holomems h
-            JOIN member_cards m ON m.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.card_id = 'HSD13-012'
-            ORDER BY h.id
-            """,
-            matchId,
-            defendingUserId
-        );
-        if (holders.isEmpty()) {
-            return null;
-        }
-        for (Map<String, Object> holder : holders) {
-            Long holderHolomemId = asLong(holder.get("holomem_id"));
-            Long holderCardInstanceId = asLong(holder.get("match_card_id"));
-            String giftText = loadGiftEffectText(asText(holder.get("passive_text")));
-            if (!StringUtils.hasText(giftText)) {
-                continue;
-            }
-            if (!giftText.contains("自分のバックホロメンが相手から特殊ダメージを受ける時")) {
-                continue;
-            }
-            if (!giftText.contains("このターンの間、自分のバックホロメン全員は特殊ダメージを受けない")) {
-                continue;
-            }
-            if (!matchesGiftTurnOwnershipCondition(matchId, defendingUserId, giftText)) {
-                continue;
-            }
-            Long archivedStackCardInstanceId = archiveOneStackCardFromHolder(
-                matchId,
-                defendingUserId,
-                holderHolomemId,
-                holderCardInstanceId
-            );
-            if (archivedStackCardInstanceId == null || archivedStackCardInstanceId <= 0) {
-                continue;
-            }
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("actions", List.of("SPECIAL_DAMAGE_IMMUNITY"));
-            payload.put("zones", List.of("BACK"));
-            payload.put("sourceCardId", asText(holder.get("card_id")));
-            payload.put("holderHolomemId", holderHolomemId);
-            payload.put("holderCardInstanceId", holderCardInstanceId);
-            payload.put("rawText", giftText);
-            int inserted = jdbcTemplate.update(
-                """
-                INSERT INTO match_turn_effects (
-                    match_id,
-                    source_user_id,
-                    affected_user_id,
-                    effect_type,
-                    stat_type,
-                    modifier_value,
-                    expires_turn,
-                    payload
-                ) VALUES (?, ?, ?, ?, 'ACTION_LOCK', 1, ?, CAST(? AS jsonb))
-                """,
-                matchId,
-                defendingUserId,
-                defendingUserId,
-                "BUFF",
-                currentTurn,
-                effectTextParser.toJsonString(payload)
-            );
-            if (inserted != 1) {
-                return null;
-            }
-            Map<String, Object> summary = new LinkedHashMap<>();
-            summary.put("triggerType", "SPECIAL_DAMAGE_RECEIVED");
-            summary.put("preventedDamage", true);
-            summary.put("holderHolomemId", holderHolomemId);
-            summary.put("holderCardInstanceId", holderCardInstanceId);
-            summary.put("holderCardId", asText(holder.get("card_id")));
-            summary.put("archivedStackCardInstanceId", archivedStackCardInstanceId);
-            summary.put("expiresTurn", currentTurn);
-            summary.put("targetHolomemId", targetHolomemId);
-            return summary;
-        }
-        return null;
-    }
-
-    private Long archiveOneStackCardFromHolder(
-        Long matchId,
-        Long userId,
-        Long holderHolomemId,
-        Long holderCardInstanceId
-    ) {
-        if (matchId == null || userId == null || holderHolomemId == null || holderCardInstanceId == null) {
-            return null;
-        }
-        Long stackCardInstanceId = jdbcTemplate.query(
-            """
-            SELECT s.match_card_id
-            FROM match_holomem_stack_cards s
-            WHERE s.match_holomem_id = ?
-              AND s.match_card_id <> ?
-            ORDER BY s.stack_order DESC, s.id DESC
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("match_card_id") : null,
-            holderHolomemId,
-            holderCardInstanceId
-        );
-        if (stackCardInstanceId == null || stackCardInstanceId <= 0) {
-            return null;
-        }
-        int archiveOrder = nextZoneOrder(matchId, userId, "ARCHIVE");
-        int moved = jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET zone = 'ARCHIVE',
-                order_index = ?,
-                is_face_down = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-            """,
-            archiveOrder,
-            stackCardInstanceId,
-            matchId,
-            userId
-        );
-        if (moved != 1) {
-            return null;
-        }
-        jdbcTemplate.update(
-            """
-            DELETE FROM match_holomem_stack_cards
-            WHERE match_holomem_id = ?
-              AND match_card_id = ?
-            """,
-            holderHolomemId,
-            stackCardInstanceId
-        );
-        return stackCardInstanceId;
-    }
-
-    private boolean isSpecialDamageImmunityActive(
-        Long matchId,
-        Long affectedUserId,
-        int currentTurn,
-        String targetZone
-    ) {
-        if (
-            matchId == null
-                || affectedUserId == null
-                || currentTurn <= 0
-                || !"BACK".equals(normalize(targetZone))
-        ) {
-            return false;
-        }
-        Integer count = jdbcTemplate.query(
-            """
-            SELECT COUNT(*)
-            FROM match_turn_effects
-            WHERE match_id = ?
-              AND affected_user_id = ?
-              AND stat_type = 'ACTION_LOCK'
-              AND expires_turn >= ?
-              AND payload::text LIKE '%"SPECIAL_DAMAGE_IMMUNITY"%'
-              AND payload::text LIKE '%"BACK"%'
-            """,
-            rs -> rs.next() ? rs.getInt(1) : 0,
-            matchId,
-            affectedUserId,
-            currentTurn
-        );
-        return count != null && count > 0;
     }
 
     boolean isOpponentTurnForUser(Long matchId, Long userId) {
