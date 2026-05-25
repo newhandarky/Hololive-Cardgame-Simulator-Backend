@@ -27,6 +27,7 @@ class MatchBloomEffectDispatcher {
     private final MatchDiscardHandEffectExecutionService discardHandEffectExecutionService;
     private final MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService;
     private final MatchSummonToStageEffectExecutionService summonToStageEffectExecutionService;
+    private final MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -44,6 +45,7 @@ class MatchBloomEffectDispatcher {
         MatchDiscardHandEffectExecutionService discardHandEffectExecutionService,
         MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService,
         MatchSummonToStageEffectExecutionService summonToStageEffectExecutionService,
+        MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -60,6 +62,7 @@ class MatchBloomEffectDispatcher {
         this.discardHandEffectExecutionService = discardHandEffectExecutionService;
         this.revealToArchiveEffectExecutionService = revealToArchiveEffectExecutionService;
         this.summonToStageEffectExecutionService = summonToStageEffectExecutionService;
+        this.archiveBloomEffectExecutionService = archiveBloomEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -181,7 +184,7 @@ class MatchBloomEffectDispatcher {
                         )
                     );
                     case "BLOOM_FROM_ARCHIVE" -> executed.add(
-                        effectService.executeBloomFromArchiveEffect(matchId, userId, effectType, bloomEffectNode)
+                        archiveBloomEffectExecutionService.executeBloomFromArchiveEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
                         effectService.executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, bloomEffectNode)
