@@ -32,6 +32,7 @@ class MatchBloomEffectDispatcher {
     private final MatchDownEffectExecutionService downEffectExecutionService;
     private final MatchHealEffectExecutionService healEffectExecutionService;
     private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
+    private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -54,6 +55,7 @@ class MatchBloomEffectDispatcher {
         MatchDownEffectExecutionService downEffectExecutionService,
         MatchHealEffectExecutionService healEffectExecutionService,
         MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService,
+        MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -75,6 +77,7 @@ class MatchBloomEffectDispatcher {
         this.downEffectExecutionService = downEffectExecutionService;
         this.healEffectExecutionService = healEffectExecutionService;
         this.moveZoneEffectExecutionService = moveZoneEffectExecutionService;
+        this.cheerRemovalEffectExecutionService = cheerRemovalEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -167,7 +170,7 @@ class MatchBloomEffectDispatcher {
                         )
                     );
                     case "REMOVE_CHEER" -> executed.add(
-                        effectService.executeRemoveCheerEffect(
+                        cheerRemovalEffectExecutionService.executeRemoveCheerEffect(
                             matchId,
                             userId,
                             effectType,
@@ -177,7 +180,7 @@ class MatchBloomEffectDispatcher {
                         )
                     );
                     case "REMOVE_STAGE_CHEER" -> executed.add(
-                        effectService.executeRemoveStageCheerEffect(matchId, userId, effectType, bloomEffectNode)
+                        cheerRemovalEffectExecutionService.executeRemoveStageCheerEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "SUMMON_TO_STAGE" -> executed.add(
                         summonToStageEffectExecutionService.executeSummonToStageEffect(

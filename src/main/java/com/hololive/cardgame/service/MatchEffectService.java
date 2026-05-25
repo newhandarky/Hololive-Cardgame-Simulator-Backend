@@ -122,6 +122,7 @@ public class MatchEffectService {
     private final MatchDownEffectExecutionService downEffectExecutionService;
     private final MatchHealEffectExecutionService healEffectExecutionService;
     private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
+    private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -312,6 +313,13 @@ public class MatchEffectService {
             this::isActionLockActive,
             this::resolveHolomemCardInstanceId
         );
+        this.cheerRemovalEffectExecutionService = new MatchCheerRemovalEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            this::resolveEffectTargetHolomemId,
+            this::resolveHolomemOwner,
+            this::resolveHolomemCardInstanceId
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -332,6 +340,7 @@ public class MatchEffectService {
             downEffectExecutionService,
             healEffectExecutionService,
             moveZoneEffectExecutionService,
+            cheerRemovalEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -354,6 +363,7 @@ public class MatchEffectService {
             downEffectExecutionService,
             healEffectExecutionService,
             moveZoneEffectExecutionService,
+            cheerRemovalEffectExecutionService,
             this
         );
     }
@@ -446,7 +456,7 @@ public class MatchEffectService {
                         )
                     );
                     case "REMOVE_CHEER" -> executed.add(
-                        executeRemoveCheerEffect(
+                        cheerRemovalEffectExecutionService.executeRemoveCheerEffect(
                             matchId,
                             userId,
                             type,
@@ -3428,154 +3438,6 @@ public class MatchEffectService {
         summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
         summary.put("affectedUserId", affectedUserId);
         summary.put("expiresTurn", currentTurn);
-        return summary;
-    }
-
-    /**
-     * 執行移除 cheer 效果，將 cheer 從 Holomem 轉移至指定區域。
-     */
-    Map<String, Object> executeRemoveCheerEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode,
-        String targetType,
-        Long targetHolomemCardInstanceId
-    ) {
-        Long targetHolomemId = resolveEffectTargetHolomemId(
-            matchId,
-            userId,
-            targetType,
-            targetHolomemCardInstanceId,
-            true
-        );
-        if (targetHolomemId == null) {
-            throw new IllegalStateException("REMOVE_CHEER 找不到目標 Holomen");
-        }
-        Long targetOwnerUserId = resolveHolomemOwner(matchId, targetHolomemId);
-        if (targetOwnerUserId == null) {
-            throw new IllegalStateException("REMOVE_CHEER 結算失敗：找不到目標擁有者");
-        }
-
-        int removeRequested = resolveCheerCount(effectNode, 1);
-        int removeCount = Math.max(removeRequested, 1);
-        List<Map<String, Object>> cheerRows = jdbcTemplate.queryForList(
-            """
-            SELECT id, cheer_card_id, match_card_id
-            FROM match_holomem_cheers
-            WHERE match_holomem_id = ?
-            ORDER BY id
-            LIMIT ?
-            """,
-            targetHolomemId,
-            removeCount
-        );
-
-        List<Long> archivedCardInstanceIds = new ArrayList<>();
-        List<String> removedCheerCardIds = new ArrayList<>();
-        for (Map<String, Object> row : cheerRows) {
-            Long cheerRowId = asLong(row.get("id"));
-            Long cheerCardInstanceId = asLong(row.get("match_card_id"));
-            String cheerCardId = asText(row.get("cheer_card_id"));
-            if (cheerRowId == null || !StringUtils.hasText(cheerCardId)) {
-                continue;
-            }
-            int deleted = jdbcTemplate.update(
-                "DELETE FROM match_holomem_cheers WHERE id = ? AND match_holomem_id = ?",
-                cheerRowId,
-                targetHolomemId
-            );
-            if (deleted != 1) {
-                continue;
-            }
-            removedCheerCardIds.add(cheerCardId);
-            Long archivedCardInstanceId = moveCheerCardInstanceToArchive(
-                matchId,
-                targetOwnerUserId,
-                cheerCardInstanceId,
-                cheerCardId
-            );
-            if (archivedCardInstanceId != null) {
-                archivedCardInstanceIds.add(archivedCardInstanceId);
-            }
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("targetHolomemId", targetHolomemId);
-        summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
-        summary.put("removeRequested", removeCount);
-        summary.put("removeApplied", removedCheerCardIds.size());
-        summary.put("removedCheerCardIds", removedCheerCardIds);
-        summary.put("archivedCheerCardInstanceIds", archivedCardInstanceIds);
-        return summary;
-    }
-
-    /**
-     * 執行移除場上 Cheer 效果，從自己場上任一 Holomem 的附屬 Cheer 中移除指定數量。
-     */
-    Map<String, Object> executeRemoveStageCheerEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode
-    ) {
-        int removeRequested = resolveCheerCount(effectNode, 1);
-        int removeCount = Math.max(removeRequested, 1);
-        List<Map<String, Object>> cheerRows = jdbcTemplate.queryForList(
-            """
-            SELECT hc.id, hc.cheer_card_id, hc.match_holomem_id, hc.match_card_id
-            FROM match_holomem_cheers hc
-            JOIN match_holomems h ON h.id = hc.match_holomem_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-            ORDER BY h.id, hc.id
-            LIMIT ?
-            """,
-            matchId,
-            userId,
-            removeCount
-        );
-
-        List<Long> archivedCardInstanceIds = new ArrayList<>();
-        List<String> removedCheerCardIds = new ArrayList<>();
-        List<Long> sourceHolomemIds = new ArrayList<>();
-        for (Map<String, Object> row : cheerRows) {
-            Long cheerRowId = asLong(row.get("id"));
-            String cheerCardId = asText(row.get("cheer_card_id"));
-            Long sourceHolomemId = asLong(row.get("match_holomem_id"));
-            Long cheerCardInstanceId = asLong(row.get("match_card_id"));
-            if (cheerRowId == null || !StringUtils.hasText(cheerCardId) || sourceHolomemId == null) {
-                continue;
-            }
-            int deleted = jdbcTemplate.update(
-                "DELETE FROM match_holomem_cheers WHERE id = ? AND match_holomem_id = ?",
-                cheerRowId,
-                sourceHolomemId
-            );
-            if (deleted != 1) {
-                continue;
-            }
-            removedCheerCardIds.add(cheerCardId);
-            sourceHolomemIds.add(sourceHolomemId);
-            Long archivedCardInstanceId = moveCheerCardInstanceToArchive(
-                matchId,
-                userId,
-                cheerCardInstanceId,
-                cheerCardId
-            );
-            if (archivedCardInstanceId != null) {
-                archivedCardInstanceIds.add(archivedCardInstanceId);
-            }
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("removeRequested", removeCount);
-        summary.put("removeApplied", removedCheerCardIds.size());
-        summary.put("removedCheerCardIds", removedCheerCardIds);
-        summary.put("sourceHolomemIds", sourceHolomemIds);
-        summary.put("archivedCheerCardInstanceIds", archivedCardInstanceIds);
         return summary;
     }
 

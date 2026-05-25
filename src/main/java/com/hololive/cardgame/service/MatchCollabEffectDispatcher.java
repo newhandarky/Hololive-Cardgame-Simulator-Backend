@@ -32,6 +32,7 @@ class MatchCollabEffectDispatcher {
     private final MatchDownEffectExecutionService downEffectExecutionService;
     private final MatchHealEffectExecutionService healEffectExecutionService;
     private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
+    private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -54,6 +55,7 @@ class MatchCollabEffectDispatcher {
         MatchDownEffectExecutionService downEffectExecutionService,
         MatchHealEffectExecutionService healEffectExecutionService,
         MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService,
+        MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -75,6 +77,7 @@ class MatchCollabEffectDispatcher {
         this.downEffectExecutionService = downEffectExecutionService;
         this.healEffectExecutionService = healEffectExecutionService;
         this.moveZoneEffectExecutionService = moveZoneEffectExecutionService;
+        this.cheerRemovalEffectExecutionService = cheerRemovalEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -163,7 +166,7 @@ class MatchCollabEffectDispatcher {
                         )
                     );
                     case "REMOVE_CHEER" -> executed.add(
-                        effectService.executeRemoveCheerEffect(
+                        cheerRemovalEffectExecutionService.executeRemoveCheerEffect(
                             matchId,
                             userId,
                             effectType,
