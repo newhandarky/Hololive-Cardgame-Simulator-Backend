@@ -31,6 +31,7 @@ class MatchCollabEffectDispatcher {
     private final MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService;
     private final MatchDownEffectExecutionService downEffectExecutionService;
     private final MatchHealEffectExecutionService healEffectExecutionService;
+    private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -52,6 +53,7 @@ class MatchCollabEffectDispatcher {
         MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService,
         MatchDownEffectExecutionService downEffectExecutionService,
         MatchHealEffectExecutionService healEffectExecutionService,
+        MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -72,6 +74,7 @@ class MatchCollabEffectDispatcher {
         this.cheerDeckReturnEffectExecutionService = cheerDeckReturnEffectExecutionService;
         this.downEffectExecutionService = downEffectExecutionService;
         this.healEffectExecutionService = healEffectExecutionService;
+        this.moveZoneEffectExecutionService = moveZoneEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -254,7 +257,7 @@ class MatchCollabEffectDispatcher {
                         lookEffectExecutionService.executeLookHolopowerEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "MOVE_ZONE" -> executed.add(
-                        effectService.executeMoveZoneEffect(
+                        moveZoneEffectExecutionService.executeMoveZoneEffect(
                             matchId,
                             userId,
                             effectType,

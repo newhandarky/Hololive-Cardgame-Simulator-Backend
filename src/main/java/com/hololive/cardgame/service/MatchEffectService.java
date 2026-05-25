@@ -8,7 +8,6 @@ import com.hololive.cardgame.game.action.ActionResult;
 import com.hololive.cardgame.game.action.EffectContext;
 import com.hololive.cardgame.game.action.EffectResolver;
 import com.hololive.cardgame.game.action.GameActionExecutor;
-import com.hololive.cardgame.game.action.HolomemMoveZoneAction;
 import com.hololive.cardgame.game.action.ReduceLifeAction;
 import com.hololive.cardgame.game.action.SendCheerAction;
 import com.hololive.cardgame.service.effect.EffectTextParser;
@@ -122,6 +121,7 @@ public class MatchEffectService {
     private final MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService;
     private final MatchDownEffectExecutionService downEffectExecutionService;
     private final MatchHealEffectExecutionService healEffectExecutionService;
+    private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -302,6 +302,16 @@ public class MatchEffectService {
             this::resolveHolomemCardInstanceId,
             this::isHpChangeBlockedByOpponentAbility
         );
+        this.moveZoneEffectExecutionService = new MatchMoveZoneEffectExecutionService(
+            jdbcTemplate,
+            gameActionExecutor,
+            effectTextParser,
+            this::shouldApplyByDice,
+            this::resolveEffectTargetHolomemId,
+            this::resolveCurrentTurnNumber,
+            this::isActionLockActive,
+            this::resolveHolomemCardInstanceId
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -321,6 +331,7 @@ public class MatchEffectService {
             cheerDeckReturnEffectExecutionService,
             downEffectExecutionService,
             healEffectExecutionService,
+            moveZoneEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -342,6 +353,7 @@ public class MatchEffectService {
             cheerDeckReturnEffectExecutionService,
             downEffectExecutionService,
             healEffectExecutionService,
+            moveZoneEffectExecutionService,
             this
         );
     }
@@ -454,7 +466,7 @@ public class MatchEffectService {
                         )
                     );
                     case "MOVE_ZONE" -> executed.add(
-                        executeMoveZoneEffect(
+                        moveZoneEffectExecutionService.executeMoveZoneEffect(
                             matchId,
                             userId,
                             type,
@@ -3564,258 +3576,6 @@ public class MatchEffectService {
         summary.put("removedCheerCardIds", removedCheerCardIds);
         summary.put("sourceHolomemIds", sourceHolomemIds);
         summary.put("archivedCheerCardInstanceIds", archivedCardInstanceIds);
-        return summary;
-    }
-
-    /**
-     * 執行區域移動效果（CENTER/BACK/COLLAB 等），含休息狀態調整。
-     */
-    Map<String, Object> executeMoveZoneEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode,
-        String targetType,
-        Long targetHolomemCardInstanceId
-    ) {
-        Long targetHolomemId = resolveEffectTargetHolomemId(
-            matchId,
-            userId,
-            targetType,
-            targetHolomemCardInstanceId,
-            true
-        );
-        if (targetHolomemId == null) {
-            throw new IllegalStateException("MOVE_ZONE 找不到目標 Holomen");
-        }
-        Map<String, Object> holomem = jdbcTemplate.query(
-            """
-            SELECT owner_user_id, zone
-            FROM match_holomems
-            WHERE id = ?
-              AND match_id = ?
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("owner_user_id", rs.getLong("owner_user_id"));
-                row.put("zone", rs.getString("zone"));
-                return row;
-            },
-            targetHolomemId,
-            matchId
-        );
-        if (holomem == null) {
-            throw new IllegalStateException("MOVE_ZONE 結算失敗：找不到目標 Holomen");
-        }
-
-        Long targetOwnerUserId = asLong(holomem.get("owner_user_id"));
-        String fromZone = normalize(holomem.get("zone"));
-        String toZone = resolveMoveDestinationZone(effectNode);
-        boolean restAfterMove = shouldRestAfterMove(effectNode);
-        String rawText = effectTextParser.extractText(effectNode, "rawText", "rawEffect");
-        if (!shouldApplyByDice(rawText, effectNode, effectType)) {
-            return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
-        }
-        int currentTurn = resolveCurrentTurnNumber(matchId);
-        if (isActionLockActive(matchId, targetOwnerUserId, currentTurn, "MOVE_STAGE", fromZone, targetHolomemId)) {
-            return executeNoOpEffect(effectType, effectNode, "目前效果限制：不可移動");
-        }
-
-        if (
-            targetHolomemCardInstanceId == null
-            && StringUtils.hasText(rawText)
-            && rawText.contains("バックホロメン")
-            && targetOwnerUserId != null
-        ) {
-            Long backTargetHolomemId = jdbcTemplate.query(
-                """
-                SELECT id
-                FROM match_holomems
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'BACK'
-                ORDER BY id
-                LIMIT 1
-                """,
-                rs -> rs.next() ? rs.getLong("id") : null,
-                matchId,
-                targetOwnerUserId
-            );
-            if (backTargetHolomemId != null) {
-                targetHolomemId = backTargetHolomemId;
-                holomem = jdbcTemplate.query(
-                    """
-                    SELECT owner_user_id, zone
-                    FROM match_holomems
-                    WHERE id = ?
-                      AND match_id = ?
-                    """,
-                    rs -> {
-                        if (!rs.next()) {
-                            return null;
-                        }
-                        Map<String, Object> row = new LinkedHashMap<>();
-                        row.put("owner_user_id", rs.getLong("owner_user_id"));
-                        row.put("zone", rs.getString("zone"));
-                        return row;
-                    },
-                    targetHolomemId,
-                    matchId
-                );
-                if (holomem != null) {
-                    targetOwnerUserId = asLong(holomem.get("owner_user_id"));
-                    fromZone = normalize(holomem.get("zone"));
-                }
-            }
-        }
-
-        if (!"BACK".equals(toZone) && !"CENTER".equals(toZone) && !"COLLAB".equals(toZone)) {
-            toZone = "BACK";
-        }
-
-        if (
-            StringUtils.hasText(rawText)
-            && rawText.contains("コラボホロメンがいないなら")
-            && targetOwnerUserId != null
-        ) {
-            Integer collabCount = jdbcTemplate.queryForObject(
-                """
-                SELECT COUNT(*)
-                FROM match_holomems
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'COLLAB'
-                """,
-                Integer.class,
-                matchId,
-                targetOwnerUserId
-            );
-            if (collabCount != null && collabCount > 0) {
-                Map<String, Object> summary = new LinkedHashMap<>();
-                summary.put("effectType", effectType);
-                summary.put("targetHolomemId", targetHolomemId);
-                summary.put("fromZone", fromZone);
-                summary.put("toZone", toZone);
-                summary.put("moved", false);
-                summary.put("reason", "條件不成立：目標玩家已有 COLLAB");
-                return summary;
-            }
-        }
-
-        if (toZone.equals(fromZone)) {
-            Map<String, Object> summary = new LinkedHashMap<>();
-            summary.put("effectType", effectType);
-            summary.put("targetHolomemId", targetHolomemId);
-            summary.put("fromZone", fromZone);
-            summary.put("toZone", toZone);
-            summary.put("moved", false);
-            summary.put("reason", "目標已在同區域");
-            return summary;
-        }
-
-        if ("BACK".equals(toZone) && targetOwnerUserId != null) {
-            Integer backCount = jdbcTemplate.queryForObject(
-                """
-                SELECT COUNT(*)
-                FROM match_holomems
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'BACK'
-                """,
-                Integer.class,
-                matchId,
-                targetOwnerUserId
-            );
-            if (backCount != null && backCount >= 5) {
-                throw new IllegalStateException("MOVE_ZONE 失敗：目標 BACK 已滿");
-            }
-        }
-        if ("CENTER".equals(toZone) && targetOwnerUserId != null) {
-            Integer centerCount = jdbcTemplate.queryForObject(
-                """
-                SELECT COUNT(*)
-                FROM match_holomems
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'CENTER'
-                """,
-                Integer.class,
-                matchId,
-                targetOwnerUserId
-            );
-            if (centerCount != null && centerCount > 0) {
-                throw new IllegalStateException("MOVE_ZONE 失敗：目標 CENTER 已有 Holomen");
-            }
-        }
-        if ("COLLAB".equals(toZone) && targetOwnerUserId != null) {
-            Integer collabCount = jdbcTemplate.queryForObject(
-                """
-                SELECT COUNT(*)
-                FROM match_holomems
-                WHERE match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'COLLAB'
-                """,
-                Integer.class,
-                matchId,
-                targetOwnerUserId
-            );
-            if (collabCount != null && collabCount > 0) {
-                throw new IllegalStateException("MOVE_ZONE 失敗：目標 COLLAB 已有 Holomen");
-            }
-        }
-
-        Boolean restedAfterMove = null;
-        EffectContext actionContext = new EffectContext(
-            matchId,
-            userId,
-            currentTurn,
-            effectType,
-            resolveHolomemCardInstanceId(targetHolomemId),
-            null
-        );
-        HolomemMoveZoneAction moveAction = new HolomemMoveZoneAction(targetHolomemId, fromZone, toZone, restAfterMove);
-        List<ActionResult> actionResults = gameActionExecutor.execute(actionContext, List.of(moveAction));
-        if (!actionResults.isEmpty() && actionResults.get(0).success()) {
-            Object rested = actionResults.get(0).details().get("rested");
-            if (rested instanceof Boolean value) {
-                restedAfterMove = value;
-            }
-        } else {
-            // fallback: preserve previous SQL behavior
-            jdbcTemplate.update(
-                """
-                UPDATE match_holomems
-                SET zone = ?,
-                    is_rested = CASE WHEN ? THEN TRUE ELSE is_rested END,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                """,
-                toZone,
-                restAfterMove,
-                targetHolomemId,
-                matchId
-            );
-            restedAfterMove = jdbcTemplate.query(
-                "SELECT is_rested FROM match_holomems WHERE id = ? AND match_id = ?",
-                rs -> rs.next() ? rs.getBoolean("is_rested") : null,
-                targetHolomemId,
-                matchId
-            );
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("targetHolomemId", targetHolomemId);
-        summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
-        summary.put("fromZone", fromZone);
-        summary.put("toZone", toZone);
-        summary.put("rested", restedAfterMove);
-        summary.put("moved", true);
         return summary;
     }
 
@@ -7943,35 +7703,6 @@ public class MatchEffectService {
             return byText;
         }
         return defaultValue;
-    }
-
-    /**
-     * 解析移動目的區（CENTER/COLLAB/BACK），預設 BACK。
-     */
-    private String resolveMoveDestinationZone(JsonNode effectNode) {
-        String explicit = effectTextParser.normalizeEffectType(effectTextParser.extractText(effectNode, "toZone", "targetZone"));
-        if (StringUtils.hasText(explicit)) {
-            return explicit;
-        }
-        String text = effectTextParser.extractText(effectNode, "rawText", "rawEffect");
-        if (text.contains("コラボ")) {
-            return "COLLAB";
-        }
-        if (text.contains("センター")) {
-            return "CENTER";
-        }
-        if (text.contains("バック")) {
-            return "BACK";
-        }
-        return "BACK";
-    }
-
-    /**
-     * 判斷移動後是否需改為休息狀態。
-     */
-    private boolean shouldRestAfterMove(JsonNode effectNode) {
-        String text = effectTextParser.extractText(effectNode, "rawText", "rawEffect");
-        return text.contains("お休み");
     }
 
     /**

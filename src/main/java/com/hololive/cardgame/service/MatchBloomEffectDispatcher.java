@@ -31,6 +31,7 @@ class MatchBloomEffectDispatcher {
     private final MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService;
     private final MatchDownEffectExecutionService downEffectExecutionService;
     private final MatchHealEffectExecutionService healEffectExecutionService;
+    private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -52,6 +53,7 @@ class MatchBloomEffectDispatcher {
         MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService,
         MatchDownEffectExecutionService downEffectExecutionService,
         MatchHealEffectExecutionService healEffectExecutionService,
+        MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -72,6 +74,7 @@ class MatchBloomEffectDispatcher {
         this.cheerDeckReturnEffectExecutionService = cheerDeckReturnEffectExecutionService;
         this.downEffectExecutionService = downEffectExecutionService;
         this.healEffectExecutionService = healEffectExecutionService;
+        this.moveZoneEffectExecutionService = moveZoneEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -272,7 +275,7 @@ class MatchBloomEffectDispatcher {
                         archivedStackCostCount = effectService.asInt(archiveSummary.get("archiveApplied"));
                     }
                     case "MOVE_ZONE" -> executed.add(
-                        effectService.executeMoveZoneEffect(
+                        moveZoneEffectExecutionService.executeMoveZoneEffect(
                             matchId,
                             userId,
                             effectType,
