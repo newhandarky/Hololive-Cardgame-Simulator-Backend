@@ -36,7 +36,6 @@ public class MatchEffectService {
 
     private static final Pattern SPECIAL_DAMAGE_PATTERN = Pattern.compile("特殊ダメージ\\s*(\\d+)");
     private static final Pattern DAMAGE_PATTERN = Pattern.compile("ダメージ\\s*(\\d+)");
-    private static final Pattern HEAL_PATTERN = Pattern.compile("HP\\s*(\\d+)\\s*回復");
     private static final Pattern CHEER_COUNT_PATTERN = Pattern.compile("エール\\s*(\\d+)\\s*枚");
     private static final Pattern TAG_PATTERN = Pattern.compile(
         "#([\\p{L}\\p{N}_'\\-]+?)(?=(?:を|が|に|で|と|へ|や|も|、|。|\\s|$))"
@@ -122,6 +121,7 @@ public class MatchEffectService {
     private final MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService;
     private final MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService;
     private final MatchDownEffectExecutionService downEffectExecutionService;
+    private final MatchHealEffectExecutionService healEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -294,6 +294,14 @@ public class MatchEffectService {
             this::executeDownEvent,
             this::loseLifeOnce
         );
+        this.healEffectExecutionService = new MatchHealEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            this::resolveEffectTargetHolomemId,
+            this::resolveHolomemOwner,
+            this::resolveHolomemCardInstanceId,
+            this::isHpChangeBlockedByOpponentAbility
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -312,6 +320,7 @@ public class MatchEffectService {
             archiveBloomEffectExecutionService,
             cheerDeckReturnEffectExecutionService,
             downEffectExecutionService,
+            healEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -332,6 +341,7 @@ public class MatchEffectService {
             archiveBloomEffectExecutionService,
             cheerDeckReturnEffectExecutionService,
             downEffectExecutionService,
+            healEffectExecutionService,
             this
         );
     }
@@ -414,7 +424,7 @@ public class MatchEffectService {
                         )
                     );
                     case "HEAL" -> executed.add(
-                        executeHealEffect(
+                        healEffectExecutionService.executeHealEffect(
                             matchId,
                             userId,
                             type,
@@ -1035,7 +1045,14 @@ public class MatchEffectService {
                 giftNode,
                 holderCardInstanceId
             );
-            case "HEAL" -> executeHealEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
+            case "HEAL" -> healEffectExecutionService.executeHealEffect(
+                matchId,
+                userId,
+                effectType,
+                giftNode,
+                targetType,
+                holderCardInstanceId
+            );
             case "BUFF", "DEBUFF" -> executeBuffDebuffEffect(matchId, userId, effectType, giftNode, targetType);
             case "MATCH_RESULT", "WIN", "LOSE" -> matchResultEffectExecutionService.executeMatchResultEffect(matchId, userId, effectType, giftNode);
             case "UNIMPLEMENTED" -> executeNoOpEffect(effectType, giftNode, "尚未支援的 GIFT 效果");
@@ -3399,102 +3416,6 @@ public class MatchEffectService {
         summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
         summary.put("affectedUserId", affectedUserId);
         summary.put("expiresTurn", currentTurn);
-        return summary;
-    }
-
-    /**
-     * 執行回復效果，將目標傷害值下修至不低於 0。
-     */
-    Map<String, Object> executeHealEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode,
-        String targetType,
-        Long targetHolomemCardInstanceId
-    ) {
-        Long targetHolomemId = resolveEffectTargetHolomemId(
-            matchId,
-            userId,
-            targetType,
-            targetHolomemCardInstanceId,
-            false
-        );
-        if (targetHolomemId == null) {
-            throw new IllegalStateException("HEAL 找不到可回復的 Holomen");
-        }
-        Long targetOwnerUserId = resolveHolomemOwner(matchId, targetHolomemId);
-        if (targetOwnerUserId == null) {
-            throw new IllegalStateException("HEAL 結算失敗：找不到目標擁有者");
-        }
-
-        int healRequested = resolveHealValue(effectNode);
-        if (healRequested <= 0) {
-            Map<String, Object> summary = new LinkedHashMap<>();
-            summary.put("effectType", effectType);
-            summary.put("healRequested", 0);
-            summary.put("healApplied", 0);
-            summary.put("targetHolomemId", targetHolomemId);
-            summary.put("reason", "無可用回復數值");
-            return summary;
-        }
-        if (isHpChangeBlockedByOpponentAbility(matchId, userId, targetOwnerUserId, targetHolomemId, effectType)) {
-            Map<String, Object> summary = new LinkedHashMap<>();
-            summary.put("effectType", effectType);
-            summary.put("targetHolomemId", targetHolomemId);
-            summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
-            summary.put("healRequested", healRequested);
-            summary.put("healApplied", 0);
-            summary.put("reason", "目標在相手のメインステップ中不受相手能力的 HP 變動影響");
-            return summary;
-        }
-
-        Integer beforeDamage = jdbcTemplate.query(
-            """
-            SELECT damage_taken
-            FROM match_holomems
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-            """,
-            rs -> rs.next() ? rs.getInt("damage_taken") : null,
-            targetHolomemId,
-            matchId,
-            targetOwnerUserId
-        );
-        if (beforeDamage == null) {
-            throw new IllegalStateException("HEAL 結算失敗：找不到目標 Holomen");
-        }
-
-        jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET damage_taken = GREATEST(COALESCE(damage_taken, 0) - ?, 0),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-            """,
-            healRequested,
-            targetHolomemId,
-            matchId,
-            targetOwnerUserId
-        );
-
-        int afterDamage = jdbcTemplate.query(
-            "SELECT COALESCE(damage_taken, 0) FROM match_holomems WHERE id = ?",
-            rs -> rs.next() ? rs.getInt(1) : 0,
-            targetHolomemId
-        );
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("targetHolomemId", targetHolomemId);
-        summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
-        summary.put("healRequested", healRequested);
-        summary.put("healApplied", Math.max(beforeDamage - afterDamage, 0));
-        summary.put("damageBefore", beforeDamage);
-        summary.put("damageAfter", afterDamage);
         return summary;
     }
 
@@ -8022,17 +7943,6 @@ public class MatchEffectService {
             return byText;
         }
         return defaultValue;
-    }
-
-    /**
-     * 解析回復值，支援 heal 欄位與 HP 文案。
-     */
-    private int resolveHealValue(JsonNode effectNode) {
-        int fromFields = effectTextParser.extractInt(effectNode, 0, "value", "amount", "heal");
-        if (fromFields > 0) {
-            return fromFields;
-        }
-        return effectTextParser.extractByPattern(effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect")), HEAL_PATTERN);
     }
 
     /**

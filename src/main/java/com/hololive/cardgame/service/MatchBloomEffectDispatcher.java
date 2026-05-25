@@ -30,6 +30,7 @@ class MatchBloomEffectDispatcher {
     private final MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService;
     private final MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService;
     private final MatchDownEffectExecutionService downEffectExecutionService;
+    private final MatchHealEffectExecutionService healEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -50,6 +51,7 @@ class MatchBloomEffectDispatcher {
         MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService,
         MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService,
         MatchDownEffectExecutionService downEffectExecutionService,
+        MatchHealEffectExecutionService healEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -69,6 +71,7 @@ class MatchBloomEffectDispatcher {
         this.archiveBloomEffectExecutionService = archiveBloomEffectExecutionService;
         this.cheerDeckReturnEffectExecutionService = cheerDeckReturnEffectExecutionService;
         this.downEffectExecutionService = downEffectExecutionService;
+        this.healEffectExecutionService = healEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -288,7 +291,7 @@ class MatchBloomEffectDispatcher {
                         )
                     );
                     case "HEAL" -> executed.add(
-                        effectService.executeHealEffect(
+                        healEffectExecutionService.executeHealEffect(
                             matchId,
                             userId,
                             effectType,
