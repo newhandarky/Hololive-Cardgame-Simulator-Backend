@@ -28,6 +28,7 @@ class MatchBloomEffectDispatcher {
     private final MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService;
     private final MatchSummonToStageEffectExecutionService summonToStageEffectExecutionService;
     private final MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService;
+    private final MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -46,6 +47,7 @@ class MatchBloomEffectDispatcher {
         MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService,
         MatchSummonToStageEffectExecutionService summonToStageEffectExecutionService,
         MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService,
+        MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -63,6 +65,7 @@ class MatchBloomEffectDispatcher {
         this.revealToArchiveEffectExecutionService = revealToArchiveEffectExecutionService;
         this.summonToStageEffectExecutionService = summonToStageEffectExecutionService;
         this.archiveBloomEffectExecutionService = archiveBloomEffectExecutionService;
+        this.cheerDeckReturnEffectExecutionService = cheerDeckReturnEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -187,7 +190,7 @@ class MatchBloomEffectDispatcher {
                         archiveBloomEffectExecutionService.executeBloomFromArchiveEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
-                        effectService.executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, bloomEffectNode)
+                        cheerDeckReturnEffectExecutionService.executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, bloomEffectNode)
                     );
                     case "DISCARD_HAND" -> executed.add(
                         discardHandEffectExecutionService.executeDiscardHandEffect(matchId, userId, effectType, bloomEffectNode)

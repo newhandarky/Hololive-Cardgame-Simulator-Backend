@@ -7232,6 +7232,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
         request.setBloomCardInstanceId(bloomCardInstanceId);
         request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
         matchActionService.bloom(matchId, hostId, request);
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
 
         Map<String, Object> cheerAfter = jdbcTemplate.queryForMap(
             "SELECT zone, is_face_down FROM match_cards WHERE id = ?",

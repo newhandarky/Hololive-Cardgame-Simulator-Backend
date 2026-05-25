@@ -28,6 +28,7 @@ class MatchCollabEffectDispatcher {
     private final MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService;
     private final MatchSummonToStageEffectExecutionService summonToStageEffectExecutionService;
     private final MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService;
+    private final MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -46,6 +47,7 @@ class MatchCollabEffectDispatcher {
         MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService,
         MatchSummonToStageEffectExecutionService summonToStageEffectExecutionService,
         MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService,
+        MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -63,6 +65,7 @@ class MatchCollabEffectDispatcher {
         this.revealToArchiveEffectExecutionService = revealToArchiveEffectExecutionService;
         this.summonToStageEffectExecutionService = summonToStageEffectExecutionService;
         this.archiveBloomEffectExecutionService = archiveBloomEffectExecutionService;
+        this.cheerDeckReturnEffectExecutionService = cheerDeckReturnEffectExecutionService;
         this.effectService = effectService;
     }
 
@@ -180,7 +183,7 @@ class MatchCollabEffectDispatcher {
                         archiveBloomEffectExecutionService.executeBloomFromArchiveEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
-                        effectService.executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, collabEffectNode)
+                        cheerDeckReturnEffectExecutionService.executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, collabEffectNode)
                     );
                     case "DISCARD_HAND" -> executed.add(
                         discardHandEffectExecutionService.executeDiscardHandEffect(matchId, userId, effectType, collabEffectNode)

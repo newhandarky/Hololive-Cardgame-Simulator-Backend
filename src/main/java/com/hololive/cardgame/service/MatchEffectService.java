@@ -120,6 +120,7 @@ public class MatchEffectService {
     private final MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService;
     private final MatchSummonToStageEffectExecutionService summonToStageEffectExecutionService;
     private final MatchArchiveBloomEffectExecutionService archiveBloomEffectExecutionService;
+    private final MatchCheerDeckReturnEffectExecutionService cheerDeckReturnEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -274,6 +275,11 @@ public class MatchEffectService {
             searchCriteriaParser,
             searchService
         );
+        this.cheerDeckReturnEffectExecutionService = new MatchCheerDeckReturnEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            cardSelectionRequestResolver
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -290,6 +296,7 @@ public class MatchEffectService {
             revealToArchiveEffectExecutionService,
             summonToStageEffectExecutionService,
             archiveBloomEffectExecutionService,
+            cheerDeckReturnEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -308,6 +315,7 @@ public class MatchEffectService {
             revealToArchiveEffectExecutionService,
             summonToStageEffectExecutionService,
             archiveBloomEffectExecutionService,
+            cheerDeckReturnEffectExecutionService,
             this
         );
     }
@@ -439,7 +447,7 @@ public class MatchEffectService {
                         archiveBloomEffectExecutionService.executeBloomFromArchiveEffect(matchId, userId, type, effectNode)
                     );
                     case "RETURN_CHEER_TO_DECK_BOTTOM" -> executed.add(
-                        executeReturnCheerToDeckBottomEffect(matchId, userId, type, effectNode)
+                        cheerDeckReturnEffectExecutionService.executeReturnCheerToDeckBottomEffect(matchId, userId, type, effectNode)
                     );
                     case "DISCARD_HAND" -> executed.add(
                         discardHandEffectExecutionService.executeDiscardHandEffect(matchId, userId, type, effectNode)
@@ -951,7 +959,12 @@ public class MatchEffectService {
                 effectType,
                 giftNode
             );
-            case "RETURN_CHEER_TO_DECK_BOTTOM" -> executeReturnCheerToDeckBottomEffect(matchId, userId, effectType, giftNode);
+            case "RETURN_CHEER_TO_DECK_BOTTOM" -> cheerDeckReturnEffectExecutionService.executeReturnCheerToDeckBottomEffect(
+                matchId,
+                userId,
+                effectType,
+                giftNode
+            );
             case "DISCARD_HAND" -> discardHandEffectExecutionService.executeDiscardHandEffect(matchId, userId, effectType, giftNode);
             case "REST" -> restEffectExecutionService.executeRestEffect(
                 matchId,
@@ -2051,165 +2064,6 @@ public class MatchEffectService {
             return List.of();
         }
         return toLongList(holoxRevealNode.get("archivedSupportCardInstanceIds"));
-    }
-
-    /**
-     * 將目標 Holomem 身上的 cheer 返回牌庫底。
-     */
-    Map<String, Object> executeReturnCheerToDeckBottomEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        String colorFilter = resolveCheerColorFilter(rawText);
-        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "エールデッキの下に戻", 1);
-        int returnCount = Math.max(requestedCount, 1);
-        boolean fromStageAttachedCheer = rawText.contains("ステージのエール");
-
-        List<Map<String, Object>> candidates;
-        if (fromStageAttachedCheer) {
-            candidates = jdbcTemplate.query(
-                """
-                SELECT hc.id AS cheer_row_id,
-                       hc.match_card_id,
-                       hc.cheer_card_id AS card_id,
-                       cc.color
-                FROM match_holomem_cheers hc
-                JOIN match_holomems h ON h.id = hc.match_holomem_id
-                JOIN cheer_cards cc ON cc.card_id = hc.cheer_card_id
-                WHERE h.match_id = ?
-                  AND h.owner_user_id = ?
-                  AND (? = '' OR cc.color = ?)
-                ORDER BY hc.id
-                LIMIT ?
-                """,
-                (rs, rowNum) -> {
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("cheer_row_id", rs.getLong("cheer_row_id"));
-                    long matchCardId = rs.getLong("match_card_id");
-                    row.put("match_card_id", rs.wasNull() ? null : matchCardId);
-                    row.put("card_id", rs.getString("card_id"));
-                    row.put("color", rs.getString("color"));
-                    return row;
-                },
-                matchId,
-                userId,
-                nullToEmpty(colorFilter),
-                nullToEmpty(colorFilter),
-                returnCount
-            );
-        } else {
-            candidates = jdbcTemplate.query(
-                """
-                SELECT mc.id, mc.card_id, cc.color
-                FROM match_cards mc
-                JOIN cheer_cards cc ON cc.card_id = mc.card_id
-                WHERE mc.match_id = ?
-                  AND mc.owner_user_id = ?
-                  AND mc.zone = 'ARCHIVE'
-                  AND (? = '' OR cc.color = ?)
-                ORDER BY mc.order_index NULLS LAST, mc.id
-                LIMIT ?
-                """,
-                (rs, rowNum) -> {
-                    Map<String, Object> row = new LinkedHashMap<>();
-                    row.put("id", rs.getLong("id"));
-                    row.put("card_id", rs.getString("card_id"));
-                    row.put("color", rs.getString("color"));
-                    return row;
-                },
-                matchId,
-                userId,
-                nullToEmpty(colorFilter),
-                nullToEmpty(colorFilter),
-                returnCount
-            );
-        }
-
-        List<Long> movedCardInstanceIds = new ArrayList<>();
-        List<String> movedCardIds = new ArrayList<>();
-        int nextCheerDeckOrder = nextZoneOrder(matchId, userId, "CHEER_DECK");
-        for (Map<String, Object> row : candidates) {
-            String cardId = asText(row.get("card_id"));
-            if (!StringUtils.hasText(cardId)) {
-                continue;
-            }
-            Long cardInstanceId;
-            if (fromStageAttachedCheer) {
-                cardInstanceId = asLong(row.get("match_card_id"));
-                if (cardInstanceId == null || cardInstanceId <= 0) {
-                    cardInstanceId = jdbcTemplate.query(
-                        """
-                        SELECT id
-                        FROM match_cards
-                        WHERE match_id = ?
-                          AND owner_user_id = ?
-                          AND zone = 'STAGE'
-                          AND card_id = ?
-                        ORDER BY id
-                        LIMIT 1
-                        """,
-                        rs -> rs.next() ? rs.getLong("id") : null,
-                        matchId,
-                        userId,
-                        cardId
-                    );
-                }
-            } else {
-                cardInstanceId = asLong(row.get("id"));
-            }
-            if (cardInstanceId == null || cardInstanceId <= 0) {
-                continue;
-            }
-            String sourceZone = fromStageAttachedCheer ? "STAGE" : "ARCHIVE";
-            int moved = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'CHEER_DECK',
-                    order_index = ?,
-                    is_face_down = TRUE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = ?
-                """,
-                nextCheerDeckOrder++,
-                cardInstanceId,
-                matchId,
-                userId,
-                sourceZone
-            );
-            if (moved != 1) {
-                continue;
-            }
-            if (fromStageAttachedCheer) {
-                Long cheerRowId = asLong(row.get("cheer_row_id"));
-                if (cheerRowId != null && cheerRowId > 0) {
-                    jdbcTemplate.update(
-                        """
-                        DELETE FROM match_holomem_cheers
-                        WHERE id = ?
-                        """,
-                        cheerRowId
-                    );
-                }
-            }
-            movedCardInstanceIds.add(cardInstanceId);
-            movedCardIds.add(cardId);
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("sourceZone", fromStageAttachedCheer ? "STAGE" : "ARCHIVE");
-        summary.put("returnRequested", returnCount);
-        summary.put("returnApplied", movedCardInstanceIds.size());
-        summary.put("colorFilter", colorFilter);
-        summary.put("returnedCardInstanceIds", movedCardInstanceIds);
-        summary.put("returnedCardIds", movedCardIds);
-        return summary;
     }
 
     /**
