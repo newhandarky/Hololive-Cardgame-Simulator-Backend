@@ -5683,6 +5683,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
         request.setBloomCardInstanceId(bloomCardInstanceId);
         request.setTargetHolomemCardInstanceId(targetHolomemCardInstanceId);
         matchActionService.bloom(matchId, hostId, request);
+        resolvePendingInteractionIfExists(matchId, hostId, "TRIGGER_EFFECT_CONFIRM");
 
         String summonedZone = jdbcTemplate.queryForObject(
             "SELECT zone FROM match_cards WHERE id = ?",

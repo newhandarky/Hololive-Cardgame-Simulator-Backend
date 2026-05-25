@@ -118,6 +118,7 @@ public class MatchEffectService {
     private final MatchResultEffectExecutionService matchResultEffectExecutionService;
     private final MatchDiscardHandEffectExecutionService discardHandEffectExecutionService;
     private final MatchRevealToArchiveEffectExecutionService revealToArchiveEffectExecutionService;
+    private final MatchSummonToStageEffectExecutionService summonToStageEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -259,6 +260,13 @@ public class MatchEffectService {
             cardSelectionRequestResolver,
             searchService
         );
+        this.summonToStageEffectExecutionService = new MatchSummonToStageEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            searchCriteriaParser,
+            cardSelectionRequestResolver,
+            searchService
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -273,6 +281,7 @@ public class MatchEffectService {
             matchResultEffectExecutionService,
             discardHandEffectExecutionService,
             revealToArchiveEffectExecutionService,
+            summonToStageEffectExecutionService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -289,6 +298,7 @@ public class MatchEffectService {
             matchResultEffectExecutionService,
             discardHandEffectExecutionService,
             revealToArchiveEffectExecutionService,
+            summonToStageEffectExecutionService,
             this
         );
     }
@@ -411,7 +421,7 @@ public class MatchEffectService {
                         )
                     );
                     case "SUMMON_TO_STAGE" -> executed.add(
-                        executeSummonToStageEffect(matchId, userId, type, effectNode)
+                        summonToStageEffectExecutionService.executeSummonToStageEffect(matchId, userId, type, effectNode)
                     );
                     case "REVEAL_TO_ARCHIVE" -> executed.add(
                         revealToArchiveEffectExecutionService.executeRevealToArchiveEffect(matchId, userId, type, effectNode)
@@ -914,7 +924,12 @@ public class MatchEffectService {
                 triggerTargetCardInstanceId
             );
             case "REATTACH" -> executeReattachEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
-            case "SUMMON_TO_STAGE" -> executeSummonToStageEffect(matchId, userId, effectType, giftNode);
+            case "SUMMON_TO_STAGE" -> summonToStageEffectExecutionService.executeSummonToStageEffect(
+                matchId,
+                userId,
+                effectType,
+                giftNode
+            );
             case "REVEAL_TO_ARCHIVE" -> revealToArchiveEffectExecutionService.executeRevealToArchiveEffect(
                 matchId,
                 userId,
@@ -1909,126 +1924,6 @@ public class MatchEffectService {
         summary.put("movedCheerCardIds", movedCheerCardIds);
         summary.put("movedCheerRowIds", movedCheerRowIds);
         summary.put("sourceMode", sourceMode);
-        return summary;
-    }
-
-    /**
-     * 執行上場效果：從手牌/檔案區等來源召喚 Holomem 到場地可用區位。
-     */
-    Map<String, Object> executeSummonToStageEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode
-    ) {
-        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "ステージに出", 1);
-        int summonCount = Math.max(requestedCount, 1);
-        SearchCriteria resolved = searchCriteriaParser.resolveSearchCriteria(effectNode);
-        SearchCriteria criteria = new SearchCriteria(
-            "MEMBER",
-            resolved.levelType(),
-            resolved.tag(),
-            resolved.nameContains(),
-            resolved.color(),
-            resolved.rested(),
-            resolved.minRemainHp(),
-            resolved.maxRemainHp(),
-            resolved.allOf(),
-            resolved.anyOf()
-        );
-        List<Map<String, Object>> candidates = loadCandidatesFromZone(
-            matchId,
-            userId,
-            "DECK",
-            criteria,
-            false
-        );
-        List<Map<String, Object>> selected = candidates.subList(0, Math.min(summonCount, candidates.size()));
-        String preferredZone = resolveMoveDestinationZone(effectNode);
-        int currentTurn = resolveCurrentTurnNumber(matchId);
-
-        List<Long> summonedCardInstanceIds = new ArrayList<>();
-        List<Long> summonedHolomemIds = new ArrayList<>();
-        List<String> summonedCardIds = new ArrayList<>();
-        List<String> summonedZones = new ArrayList<>();
-        for (Map<String, Object> row : selected) {
-            Long cardInstanceId = asLong(row.get("id"));
-            String cardId = asText(row.get("card_id"));
-            String levelType = asText(row.get("level_type"));
-            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
-                continue;
-            }
-            String targetZone = resolveAvailableStageZone(matchId, userId, preferredZone);
-            if (!StringUtils.hasText(targetZone)) {
-                break;
-            }
-
-            int moved = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'STAGE',
-                    order_index = NULL,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'DECK'
-                """,
-                cardInstanceId,
-                matchId,
-                userId
-            );
-            if (moved != 1) {
-                continue;
-            }
-
-            Long holomemId = jdbcTemplate.query(
-                """
-                INSERT INTO match_holomems (
-                    match_id,
-                    owner_user_id,
-                    match_card_id,
-                    card_id,
-                    zone,
-                    is_rested,
-                    is_face_down,
-                    damage_taken,
-                    current_level,
-                    entered_turn_number
-                ) VALUES (?, ?, ?, ?, ?, FALSE, FALSE, 0, ?, ?)
-                RETURNING id
-                """,
-                rs -> rs.next() ? rs.getLong("id") : null,
-                matchId,
-                userId,
-                cardInstanceId,
-                cardId,
-                targetZone,
-                normalizeHolomemLevel(levelType),
-                currentTurn
-            );
-            if (holomemId == null) {
-                continue;
-            }
-            recordHolomemStackCard(holomemId, cardInstanceId);
-
-            summonedCardInstanceIds.add(cardInstanceId);
-            summonedHolomemIds.add(holomemId);
-            summonedCardIds.add(cardId);
-            summonedZones.add(targetZone);
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("summonRequested", summonCount);
-        summary.put("candidateCount", candidates.size());
-        summary.put("summonApplied", summonedCardInstanceIds.size());
-        summary.put("summonedCardInstanceIds", summonedCardInstanceIds);
-        summary.put("summonedHolomemIds", summonedHolomemIds);
-        summary.put("summonedCardIds", summonedCardIds);
-        summary.put("summonedZones", summonedZones);
-        summary.put("criteria", buildCriteriaSummary(criteria));
         return summary;
     }
 
