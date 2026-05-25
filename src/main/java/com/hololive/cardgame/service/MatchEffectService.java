@@ -50,9 +50,6 @@ public class MatchEffectService {
     private static final Pattern ATTACHED_SUPPORT_DAMAGE_REDUCTION_PATTERN = Pattern.compile(
         "受けるダメージ\\s*[−-]\\s*(\\d+)"
     );
-    private static final Pattern PASSIVE_GIFT_HP_PATTERN = Pattern.compile(
-        "HP\\s*([+＋−-]\\s*\\d+)"
-    );
     private static final Pattern PASSIVE_GIFT_DAMAGE_REDUCTION_VALUE_PATTERN = Pattern.compile(
         "受ける(?:アーツ)?ダメージ\\s*[ー\\-−]\\s*(\\d+)"
     );
@@ -102,6 +99,7 @@ public class MatchEffectService {
     private final MatchCardSelectionRequestResolver cardSelectionRequestResolver;
     private final MatchCardSelectionProbeBuilder cardSelectionProbeBuilder;
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
+    private final MatchDamageEffectiveHpResolverService damageEffectiveHpResolverService;
     private final MatchLookEffectExecutionService lookEffectExecutionService;
     private final MatchDrawEffectExecutionService drawEffectExecutionService;
     private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
@@ -180,6 +178,11 @@ public class MatchEffectService {
             cardSelectionSummaryBuilder,
             cardSelectionCandidateProvider,
             this::shouldApplyByDice
+        );
+        this.damageEffectiveHpResolverService = new MatchDamageEffectiveHpResolverService(
+            jdbcTemplate,
+            objectMapper,
+            effectTextParser
         );
         this.lookEffectExecutionService = new MatchLookEffectExecutionService(jdbcTemplate, effectTextParser);
         this.drawEffectExecutionService = new MatchDrawEffectExecutionService(
@@ -330,7 +333,7 @@ public class MatchEffectService {
             this::resolveHolomemZone,
             this::isSpecialDamageImmunityActive,
             this::tryActivateHsd13012SpecialDamageImmunity,
-            this::resolveDamageEffectiveHp,
+            damageEffectiveHpResolverService::resolve,
             this::archiveAttachedCheerCards,
             this::archiveAttachedSupportCards,
             this::archiveHolomemStackCards,
@@ -1469,23 +1472,6 @@ public class MatchEffectService {
         String cardName,
         String artName,
         Set<String> tags
-    ) {}
-
-    /**
-     * 描述「常駐 Gift HP 加成」的受益者。
-     *
-     * <p>目前只先保留 `HSD13-007` 這類判斷真正需要的欄位：
-     *
-     * <p>- 自己是誰（避免把「このホロメン」誤套到別人身上）
-     * <p>- 站位 / 等級 / tag（保留未來擴到其他自動常駐文案的空間）
-     * <p>- 身上的 Cheer 數量（像 `このホロメンのエール1枚につき` 會直接用到）
-     */
-    record PassiveGiftHpTargetContext(
-        Long holomemId,
-        String stageZone,
-        String levelType,
-        Set<String> tags,
-        int attachedCheerCount
     ) {}
 
     /**
@@ -2910,31 +2896,6 @@ public class MatchEffectService {
             targetType,
             targetHolomemCardInstanceId
         );
-    }
-
-    private MatchDamageEffectExecutionService.EffectiveHp resolveDamageEffectiveHp(
-        Long matchId,
-        Long targetOwnerUserId,
-        Long targetHolomemId,
-        String targetCardId
-    ) {
-        int baseHp = jdbcTemplate.query(
-            "SELECT hp FROM member_cards WHERE card_id = ?",
-            rs -> rs.next() ? rs.getInt("hp") : 0,
-            targetCardId
-        );
-        int attachedSupportHpBonus = resolveAttachedSupportStatBonus(
-            matchId,
-            targetHolomemId,
-            ATTACHED_SUPPORT_HP_PATTERN
-        );
-        PassiveGiftHpTargetContext targetContext = loadPassiveGiftHpTargetContext(matchId, targetOwnerUserId, targetHolomemId);
-        PassiveGiftHolderContext holderContext = loadPassiveGiftHolderContext(matchId, targetOwnerUserId, targetHolomemId);
-        int passiveGiftHpBonus = targetContext == null || holderContext == null
-            ? 0
-            : resolvePassiveGiftHpBonusFromHolder(holderContext, targetContext);
-        int hp = Math.max(baseHp + attachedSupportHpBonus + passiveGiftHpBonus, 0);
-        return new MatchDamageEffectExecutionService.EffectiveHp(baseHp, attachedSupportHpBonus, hp);
     }
 
     private Map<String, Object> tryActivateHsd13012SpecialDamageImmunity(
@@ -5496,55 +5457,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 載入常駐 Gift HP 加成受益者所需資訊。
-     *
-     * <p>這和藝能加成不同，因為 `HSD13-007` 的條件直接依賴「這張 Holomem 身上有幾張 Cheer」。
-     * 因此這裡除了基本站位/等級/tag，還要把附著 Cheer 數量一起帶出來。
-     */
-    PassiveGiftHpTargetContext loadPassiveGiftHpTargetContext(Long matchId, Long userId, Long holomemId) {
-        return jdbcTemplate.query(
-            """
-            SELECT h.id,
-                   h.zone,
-                   h.current_level,
-                   mp.current_life,
-                   oshi.name AS oshi_card_name,
-                   COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text,
-                   (
-                       SELECT COUNT(*)
-                       FROM match_holomem_cheers hc
-                       WHERE hc.match_holomem_id = h.id
-                   ) AS attached_cheer_count
-            FROM match_holomems h
-            JOIN cards c ON c.card_id = h.card_id
-            JOIN match_players mp
-              ON mp.match_id = h.match_id
-             AND mp.user_id = h.owner_user_id
-            LEFT JOIN cards oshi ON oshi.card_id = mp.oshi_card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                return new PassiveGiftHpTargetContext(
-                    rs.getLong("id"),
-                    effectTextParser.normalizeEffectType(rs.getString("zone")),
-                    effectTextParser.normalizeEffectType(rs.getString("current_level")),
-                    parseTagsJson(rs.getString("tags_json_text")),
-                    rs.getInt("attached_cheer_count")
-                );
-            },
-            matchId,
-            userId,
-            holomemId
-        );
-    }
-
-    /**
      * 載入受傷減免判斷所需的最小 target 狀態。
      *
      * <p>目前除了既有的 self / collab 類型，也開始支援：
@@ -6313,44 +6225,6 @@ public class MatchEffectService {
             matchId,
             userId
         ));
-    }
-
-    /**
-     * 以單一 holder 的常駐文案判斷是否給自己 HP 加成。
-     *
-     * <p>目前先保守支援 `HSD13-007` 這類「這張 Holomem 每有 1 張 Cheer 就 HP+N」。
-     * 這裡故意不把所有 `HP+N` 文案都吃掉，而是要求：
-     *
-     * <p>- 文案明確寫 `このホロメン`
-     * <p>- 文案明確依 `エール1枚につき`
-     * <p>- 加成目標必須就是 holder 自己
-     *
-     * <p>如此可以避免把其他條件更複雜、尚未建模完成的 HP 文案誤判成已支援。
-     */
-    int resolvePassiveGiftHpBonusFromHolder(
-        PassiveGiftHolderContext holderContext,
-        PassiveGiftHpTargetContext targetContext
-    ) {
-        String rawText = extractPassiveGiftRawText(holderContext.passiveEffectJsonText());
-        if (!StringUtils.hasText(rawText)) {
-            return 0;
-        }
-        if (!rawText.contains("このホロメン") || !rawText.contains("エール1枚につき")) {
-            return 0;
-        }
-        if (!Objects.equals(holderContext.holomemId(), targetContext.holomemId())) {
-            return 0;
-        }
-
-        Matcher matcher = PASSIVE_GIFT_HP_PATTERN.matcher(rawText);
-        if (!matcher.find()) {
-            return 0;
-        }
-        int hpBonusPerCheer = parseSignedNumber(matcher.group(1));
-        if (hpBonusPerCheer == 0 || targetContext.attachedCheerCount() <= 0) {
-            return 0;
-        }
-        return hpBonusPerCheer * targetContext.attachedCheerCount();
     }
 
     /**

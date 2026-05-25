@@ -1,5 +1,7 @@
 package com.hololive.cardgame.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hololive.cardgame.service.effect.EffectTextParser;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -13,10 +15,20 @@ public class MatchEffectCombatModifierService {
 
     private final JdbcTemplate jdbcTemplate;
     private final MatchEffectService matchEffectService;
+    private final MatchDamageEffectiveHpResolverService damageEffectiveHpResolverService;
 
-    public MatchEffectCombatModifierService(JdbcTemplate jdbcTemplate, MatchEffectService matchEffectService) {
+    public MatchEffectCombatModifierService(
+        JdbcTemplate jdbcTemplate,
+        MatchEffectService matchEffectService,
+        ObjectMapper objectMapper
+    ) {
         this.jdbcTemplate = jdbcTemplate;
         this.matchEffectService = matchEffectService;
+        this.damageEffectiveHpResolverService = new MatchDamageEffectiveHpResolverService(
+            jdbcTemplate,
+            objectMapper,
+            new EffectTextParser(objectMapper)
+        );
     }
 
     public int resolveAttachedSupportHpBonus(Long matchId, Long matchHolomemId) {
@@ -290,20 +302,7 @@ public class MatchEffectCombatModifierService {
     }
 
     public int resolvePassiveGiftHpBonus(Long matchId, Long userId, Long targetHolomemId) {
-        if (matchId == null || userId == null || targetHolomemId == null) {
-            return 0;
-        }
-        MatchEffectService.PassiveGiftHpTargetContext targetContext =
-            matchEffectService.loadPassiveGiftHpTargetContext(matchId, userId, targetHolomemId);
-        if (targetContext == null) {
-            return 0;
-        }
-        MatchEffectService.PassiveGiftHolderContext holderContext =
-            matchEffectService.loadPassiveGiftHolderContext(matchId, userId, targetHolomemId);
-        if (holderContext == null) {
-            return 0;
-        }
-        return matchEffectService.resolvePassiveGiftHpBonusFromHolder(holderContext, targetContext);
+        return damageEffectiveHpResolverService.resolvePassiveGiftHpBonus(matchId, userId, targetHolomemId);
     }
 
     private String normalize(String value) {
