@@ -33,8 +33,6 @@ import org.springframework.util.StringUtils;
 @Service
 public class MatchEffectService {
 
-    private static final Pattern SPECIAL_DAMAGE_PATTERN = Pattern.compile("特殊ダメージ\\s*(\\d+)");
-    private static final Pattern DAMAGE_PATTERN = Pattern.compile("ダメージ\\s*(\\d+)");
     private static final Pattern CHEER_COUNT_PATTERN = Pattern.compile("エール\\s*(\\d+)\\s*枚");
     private static final Pattern TAG_PATTERN = Pattern.compile(
         "#([\\p{L}\\p{N}_'\\-]+?)(?=(?:を|が|に|で|と|へ|や|も|、|。|\\s|$))"
@@ -123,6 +121,7 @@ public class MatchEffectService {
     private final MatchHealEffectExecutionService healEffectExecutionService;
     private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
     private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
+    private final MatchDamageEffectExecutionService damageEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -319,6 +318,26 @@ public class MatchEffectService {
             this::resolveEffectTargetHolomemId,
             this::resolveHolomemOwner,
             this::resolveHolomemCardInstanceId
+        );
+        this.damageEffectExecutionService = new MatchDamageEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            this::resolveEffectTargetHolomemId,
+            this::resolveHolomemOwner,
+            this::resolveCurrentTurnNumber,
+            this::resolveActiveDamageModifier,
+            this::isHpChangeBlockedByOpponentAbility,
+            this::resolveHolomemZone,
+            this::isSpecialDamageImmunityActive,
+            this::tryActivateHsd13012SpecialDamageImmunity,
+            this::resolveDamageEffectiveHp,
+            this::archiveAttachedCheerCards,
+            this::archiveAttachedSupportCards,
+            this::archiveHolomemStackCards,
+            this::isDownWithoutLifeLoss,
+            this::loseLifeOnce,
+            this::executeDownEvent,
+            this::extractLostLifeCardInstanceIds
         );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
@@ -2883,153 +2902,22 @@ public class MatchEffectService {
                 rawText
             );
         }
-        Long targetHolomemId = resolveEffectTargetHolomemId(
+        return damageEffectExecutionService.executeDamageEffect(
             matchId,
             userId,
+            effectType,
+            effectNode,
             targetType,
-            targetHolomemCardInstanceId,
-            true
+            targetHolomemCardInstanceId
         );
-        if (targetHolomemId == null) {
-            throw new IllegalStateException("DAMAGE 找不到可攻擊的對手 Holomen");
-        }
-        Long targetOwnerUserId = resolveHolomemOwner(matchId, targetHolomemId);
-        if (targetOwnerUserId == null) {
-            throw new IllegalStateException("DAMAGE 結算失敗：找不到目標擁有者");
-        }
+    }
 
-        int baseDamage = resolveDamageValue(effectNode);
-        if (baseDamage <= 0) {
-            Map<String, Object> summary = new LinkedHashMap<>();
-            summary.put("effectType", effectType);
-            summary.put("damageRequested", 0);
-            summary.put("damageApplied", 0);
-            summary.put("baseDamage", 0);
-            summary.put("damageModifierApplied", 0);
-            summary.put("targetHolomemId", targetHolomemId);
-            summary.put("downed", false);
-            summary.put("lifeReduced", false);
-            summary.put("reason", "無可用傷害數值");
-            return summary;
-        }
-        int currentTurn = resolveCurrentTurnNumber(matchId);
-        int damageModifier = resolveActiveDamageModifier(matchId, userId, currentTurn);
-        int damage = Math.max(baseDamage + damageModifier, 0);
-        boolean specialDamage = StringUtils.hasText(rawText) && rawText.contains("特殊ダメージ");
-        if (damage <= 0) {
-            Map<String, Object> summary = new LinkedHashMap<>();
-            summary.put("effectType", effectType);
-            summary.put("damageRequested", baseDamage);
-            summary.put("damageApplied", 0);
-            summary.put("baseDamage", baseDamage);
-            summary.put("damageModifierApplied", damageModifier);
-            summary.put("targetHolomemId", targetHolomemId);
-            summary.put("downed", false);
-            summary.put("lifeReduced", false);
-            summary.put("reason", "修正後傷害小於等於 0");
-            return summary;
-        }
-        if (isHpChangeBlockedByOpponentAbility(matchId, userId, targetOwnerUserId, targetHolomemId, effectType)) {
-            Map<String, Object> summary = new LinkedHashMap<>();
-            summary.put("effectType", effectType);
-            summary.put("damageRequested", baseDamage);
-            summary.put("damageApplied", 0);
-            summary.put("baseDamage", baseDamage);
-            summary.put("damageModifierApplied", damageModifier);
-            summary.put("targetHolomemId", targetHolomemId);
-            summary.put("downed", false);
-            summary.put("lifeReduced", false);
-            summary.put("reason", "目標在相手のメインステップ中不受相手能力的 HP 變動影響");
-            return summary;
-        }
-        String targetCurrentZone = resolveHolomemZone(matchId, targetHolomemId);
-        if (
-            specialDamage
-                && isSpecialDamageImmunityActive(matchId, targetOwnerUserId, currentTurn, targetCurrentZone)
-        ) {
-            Map<String, Object> summary = new LinkedHashMap<>();
-            summary.put("effectType", effectType);
-            summary.put("damageRequested", baseDamage);
-            summary.put("damageApplied", 0);
-            summary.put("baseDamage", baseDamage);
-            summary.put("damageModifierApplied", damageModifier);
-            summary.put("targetHolomemId", targetHolomemId);
-            summary.put("downed", false);
-            summary.put("lifeReduced", false);
-            summary.put("specialDamagePrevented", true);
-            summary.put("reason", "特殊ダメージ無効化効果が有効");
-            return summary;
-        }
-        Map<String, Object> specialDamageGiftSummary = specialDamage
-            ? tryActivateHsd13012SpecialDamageImmunity(
-                matchId,
-                userId,
-                targetOwnerUserId,
-                targetHolomemId,
-                targetCurrentZone,
-                currentTurn
-            )
-            : null;
-        if (specialDamageGiftSummary != null && toBoolean(specialDamageGiftSummary.get("preventedDamage"))) {
-            Map<String, Object> summary = new LinkedHashMap<>();
-            summary.put("effectType", effectType);
-            summary.put("damageRequested", baseDamage);
-            summary.put("damageApplied", 0);
-            summary.put("baseDamage", baseDamage);
-            summary.put("damageModifierApplied", damageModifier);
-            summary.put("targetHolomemId", targetHolomemId);
-            summary.put("downed", false);
-            summary.put("lifeReduced", false);
-            summary.put("specialDamagePrevented", true);
-            summary.put("specialDamageGift", specialDamageGiftSummary);
-            summary.put("reason", "HSD13-012 特殊ダメージ無効化");
-            return summary;
-        }
-
-        jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET damage_taken = COALESCE(damage_taken, 0) + ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-            """,
-            damage,
-            targetHolomemId,
-            matchId,
-            targetOwnerUserId
-        );
-
-        Map<String, Object> holomemState = jdbcTemplate.query(
-            """
-            SELECT id, match_card_id, card_id, zone, damage_taken
-            FROM match_holomems
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", rs.getLong("id"));
-                row.put("match_card_id", rs.getLong("match_card_id"));
-                row.put("card_id", rs.getString("card_id"));
-                row.put("zone", rs.getString("zone"));
-                row.put("damage_taken", rs.getInt("damage_taken"));
-                return row;
-            },
-            targetHolomemId,
-            matchId,
-            targetOwnerUserId
-        );
-        if (holomemState == null) {
-            throw new IllegalStateException("DAMAGE 結算失敗：找不到目標 Holomen");
-        }
-
-        String targetCardId = asText(holomemState.get("card_id"));
+    private MatchDamageEffectExecutionService.EffectiveHp resolveDamageEffectiveHp(
+        Long matchId,
+        Long targetOwnerUserId,
+        Long targetHolomemId,
+        String targetCardId
+    ) {
         int baseHp = jdbcTemplate.query(
             "SELECT hp FROM member_cards WHERE card_id = ?",
             rs -> rs.next() ? rs.getInt("hp") : 0,
@@ -3046,94 +2934,7 @@ public class MatchEffectService {
             ? 0
             : resolvePassiveGiftHpBonusFromHolder(holderContext, targetContext);
         int hp = Math.max(baseHp + attachedSupportHpBonus + passiveGiftHpBonus, 0);
-        int damageTaken = asInt(holomemState.get("damage_taken"));
-
-        boolean downed = hp > 0 && damageTaken >= hp;
-        boolean lifeReduced = false;
-        Long lostLifeCardInstanceId = null;
-        List<Long> lostLifeCardInstanceIds = new ArrayList<>();
-        Map<String, Object> downEventSummary = null;
-        List<Long> archivedCheerCardInstanceIds = new ArrayList<>();
-        List<Long> archivedSupportCardInstanceIds = new ArrayList<>();
-        List<Long> archivedHolomemCardInstanceIds = new ArrayList<>();
-        if (downed) {
-            Long targetCardInstanceId = asLong(holomemState.get("match_card_id"));
-            String targetZone = normalize(holomemState.get("zone"));
-            archivedCheerCardInstanceIds = archiveAttachedCheerCards(matchId, targetHolomemId, targetOwnerUserId);
-            archivedSupportCardInstanceIds = archiveAttachedSupportCards(matchId, targetHolomemId, targetOwnerUserId);
-            archivedHolomemCardInstanceIds = archiveHolomemStackCards(matchId, targetHolomemId, targetOwnerUserId);
-
-            jdbcTemplate.update(
-                "DELETE FROM match_holomems WHERE id = ? AND match_id = ?",
-                targetHolomemId,
-                matchId
-            );
-            if (archivedHolomemCardInstanceIds.isEmpty() && targetCardInstanceId != null) {
-                int archiveOrder = nextZoneOrder(matchId, targetOwnerUserId, "ARCHIVE");
-                jdbcTemplate.update(
-                    """
-                    UPDATE match_cards
-                    SET zone = 'ARCHIVE',
-                        order_index = ?,
-                        is_face_down = FALSE,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                      AND match_id = ?
-                      AND owner_user_id = ?
-                    """,
-                    archiveOrder,
-                    targetCardInstanceId,
-                    matchId,
-                    targetOwnerUserId
-                );
-            }
-
-            boolean suppressLifeLoss = isDownWithoutLifeLoss(effectNode);
-            if (!suppressLifeLoss && "CENTER".equals(targetZone)) {
-                lostLifeCardInstanceId = loseLifeOnce(matchId, targetOwnerUserId);
-                lifeReduced = lostLifeCardInstanceId != null;
-                if (lostLifeCardInstanceId != null) {
-                    lostLifeCardInstanceIds.add(lostLifeCardInstanceId);
-                }
-            }
-            boolean deferDownEvent = effectNode != null && effectNode.path("deferDownEvent").asBoolean(false);
-            downEventSummary = executeDownEvent(
-                matchId,
-                userId,
-                targetOwnerUserId,
-                targetCardId,
-                currentTurn,
-                !deferDownEvent,
-                targetZone
-            );
-            if (!deferDownEvent && toBoolean(downEventSummary.get("lifeReduced"))) {
-                lifeReduced = true;
-                lostLifeCardInstanceIds.addAll(extractLostLifeCardInstanceIds(downEventSummary));
-            }
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("targetHolomemId", targetHolomemId);
-        summary.put("damageRequested", baseDamage);
-        summary.put("damageApplied", damage);
-        summary.put("baseDamage", baseDamage);
-        summary.put("damageModifierApplied", damageModifier);
-        summary.put("targetBaseHp", baseHp);
-        summary.put("targetAttachedSupportHpBonus", attachedSupportHpBonus);
-        summary.put("targetHp", hp);
-        summary.put("targetDamageTaken", damageTaken);
-        summary.put("downed", downed);
-        summary.put("archivedCheerCardInstanceIds", archivedCheerCardInstanceIds);
-        summary.put("archivedSupportCardInstanceIds", archivedSupportCardInstanceIds);
-        summary.put("archivedHolomemCardInstanceIds", archivedHolomemCardInstanceIds);
-        summary.put("lifeReduced", lifeReduced);
-        summary.put("lostLifeCardInstanceId", lostLifeCardInstanceIds.isEmpty() ? null : lostLifeCardInstanceIds.get(0));
-        summary.put("lostLifeCardInstanceIds", lostLifeCardInstanceIds);
-        if (downEventSummary != null) {
-            summary.put("downEvent", downEventSummary);
-        }
-        return summary;
+        return new MatchDamageEffectExecutionService.EffectiveHp(baseHp, attachedSupportHpBonus, hp);
     }
 
     private Map<String, Object> tryActivateHsd13012SpecialDamageImmunity(
@@ -8501,26 +8302,6 @@ public class MatchEffectService {
         }
         if (StringUtils.hasText(merged) && merged.contains("ライフ")) {
             return 1;
-        }
-        return 0;
-    }
-
-    /**
-     * 解析傷害數值，支援 value/amount 欄位與「ダメージ」文案。
-     */
-    private int resolveDamageValue(JsonNode effectNode) {
-        int fromFields = effectTextParser.extractInt(effectNode, 0, "value", "amount", "damage");
-        if (fromFields > 0) {
-            return fromFields;
-        }
-        String merged = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect", "rawHeader"));
-        int special = effectTextParser.extractByPattern(merged, SPECIAL_DAMAGE_PATTERN);
-        if (special > 0) {
-            return special;
-        }
-        int normal = effectTextParser.extractByPattern(merged, DAMAGE_PATTERN);
-        if (normal > 0) {
-            return normal;
         }
         return 0;
     }
