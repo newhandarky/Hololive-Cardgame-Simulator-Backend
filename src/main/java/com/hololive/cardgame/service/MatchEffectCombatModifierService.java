@@ -2,6 +2,8 @@ package com.hololive.cardgame.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hololive.cardgame.service.effect.EffectTextParser;
+import com.hololive.cardgame.service.effect.GiftTriggerMatcher;
+import com.hololive.cardgame.service.effect.SearchCriteriaParser;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -16,19 +18,33 @@ public class MatchEffectCombatModifierService {
     private final JdbcTemplate jdbcTemplate;
     private final MatchEffectService matchEffectService;
     private final MatchDamageEffectiveHpResolverService damageEffectiveHpResolverService;
+    private final MatchPassiveGiftIncomingDamageReductionResolverService passiveGiftIncomingDamageReductionResolverService;
 
     public MatchEffectCombatModifierService(
         JdbcTemplate jdbcTemplate,
         MatchEffectService matchEffectService,
-        ObjectMapper objectMapper
+        ObjectMapper objectMapper,
+        DiceService diceService
     ) {
         this.jdbcTemplate = jdbcTemplate;
         this.matchEffectService = matchEffectService;
+        EffectTextParser effectTextParser = new EffectTextParser(objectMapper);
         this.damageEffectiveHpResolverService = new MatchDamageEffectiveHpResolverService(
             jdbcTemplate,
             objectMapper,
-            new EffectTextParser(objectMapper)
+            effectTextParser
         );
+        this.passiveGiftIncomingDamageReductionResolverService =
+            new MatchPassiveGiftIncomingDamageReductionResolverService(
+                jdbcTemplate,
+                objectMapper,
+                effectTextParser,
+                new GiftTriggerMatcher(),
+                new SearchCriteriaParser(jdbcTemplate, effectTextParser),
+                diceService,
+                new GiftTurnUsageReader(jdbcTemplate),
+                new PassiveGiftTriggerActionWriter(jdbcTemplate, objectMapper, effectTextParser)
+            );
     }
 
     public int resolveAttachedSupportHpBonus(Long matchId, Long matchHolomemId) {
@@ -271,34 +287,12 @@ public class MatchEffectCombatModifierService {
         Long targetHolomemId,
         String incomingSourceLevelType
     ) {
-        if (matchId == null || userId == null || targetHolomemId == null) {
-            return 0;
-        }
-        MatchEffectService.PassiveGiftIncomingDamageReductionTargetContext targetContext =
-            matchEffectService.loadPassiveGiftIncomingDamageReductionTargetContext(
-                matchId,
-                userId,
-                targetHolomemId,
-                incomingSourceLevelType
-            );
-        if (targetContext == null) {
-            return 0;
-        }
-        List<MatchEffectService.PassiveGiftHolderContext> holderContexts =
-            matchEffectService.loadPassiveGiftHolderContexts(matchId, userId);
-        if (holderContexts.isEmpty()) {
-            return 0;
-        }
-        int total = 0;
-        for (MatchEffectService.PassiveGiftHolderContext holderContext : holderContexts) {
-            total += matchEffectService.resolvePassiveGiftIncomingDamageReductionFromHolder(
-                matchId,
-                userId,
-                holderContext,
-                targetContext
-            );
-        }
-        return total;
+        return passiveGiftIncomingDamageReductionResolverService.resolvePassiveGiftIncomingDamageReduction(
+            matchId,
+            userId,
+            targetHolomemId,
+            incomingSourceLevelType
+        );
     }
 
     public int resolvePassiveGiftHpBonus(Long matchId, Long userId, Long targetHolomemId) {
