@@ -89,6 +89,7 @@ public class MatchEffectService {
     private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
     private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
     private final MatchDamageEffectExecutionService damageEffectExecutionService;
+    private final MatchArtDownTriggeredEffectExecutionService artDownTriggeredEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -317,6 +318,14 @@ public class MatchEffectService {
             this::loseLifeOnce,
             this::executeDownEvent,
             this::extractLostLifeCardInstanceIds
+        );
+        this.artDownTriggeredEffectExecutionService = new MatchArtDownTriggeredEffectExecutionService(
+            objectMapper,
+            effectTextParser,
+            this::extractAttachedSupportRawText,
+            this::inferBloomEffectTypes,
+            this::inferBloomTargetType,
+            this::applySupportEffect
         );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
@@ -5068,74 +5077,12 @@ public class MatchEffectService {
         Long attackerCardInstanceId,
         String artEffectJsonText
     ) {
-        String rawText = extractAttachedSupportRawText(artEffectJsonText);
-        String followupText = extractArtDownTriggeredClause(rawText);
-        if (!StringUtils.hasText(followupText)) {
-            return buildNoTriggeredArtEffectSummary(rawText, "藝能沒有擊倒後效果");
-        }
-
-        List<String> effectTypes = inferBloomEffectTypes(followupText);
-        if (effectTypes.isEmpty()) {
-            return buildNoTriggeredArtEffectSummary(followupText, "無法解析藝能擊倒後效果類型");
-        }
-
-        ObjectNode effectNode = objectMapper.createObjectNode();
-        effectNode.put("type", effectTypes.get(0));
-        effectNode.set("effects", objectMapper.valueToTree(effectTypes));
-        effectNode.put("rawText", followupText);
-
-        Map<String, Object> summary = applySupportEffect(
+        return artDownTriggeredEffectExecutionService.applyArtDownTriggeredEffects(
             matchId,
             userId,
-            effectTypes.get(0),
-            effectTextParser.toJsonString(effectNode),
-            inferBloomTargetType(effectTypes.get(0)),
-            null,
-            attackerCardInstanceId
+            attackerCardInstanceId,
+            artEffectJsonText
         );
-        Map<String, Object> wrapped = new LinkedHashMap<>();
-        wrapped.put("triggerType", "ART_DOWNED_OPPONENT");
-        wrapped.put("rawText", followupText);
-        wrapped.putAll(summary);
-        return wrapped;
-    }
-
-    /**
-     * 從藝能全文中截出「擊倒後才發動」的後半段。
-     *
-     * <p>目前先支援官方常見句型 `このアーツで相手のホロメンをダウンさせた時、...`。
-     * 若將來出現更多變體，再把這個 helper 擴成 pattern list 即可。
-     */
-    private String extractArtDownTriggeredClause(String rawText) {
-        if (!StringUtils.hasText(rawText)) {
-            return null;
-        }
-        String marker = "このアーツで相手のホロメンをダウンさせた時";
-        int markerIndex = rawText.indexOf(marker);
-        if (markerIndex < 0) {
-            return null;
-        }
-        String clause = rawText.substring(markerIndex + marker.length()).trim();
-        while (clause.startsWith("、") || clause.startsWith("。") || clause.startsWith("：") || clause.startsWith(":")) {
-            clause = clause.substring(1).trim();
-        }
-        return StringUtils.hasText(clause) ? clause : null;
-    }
-
-    /**
-     * 建立「本次藝能沒有 down 後 follow-up」的統一摘要。
-     */
-    private Map<String, Object> buildNoTriggeredArtEffectSummary(String rawText, String reason) {
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("triggerType", "ART_DOWNED_OPPONENT");
-        summary.put("rawText", rawText);
-        summary.put("requestedEffects", List.of());
-        summary.put("executedEffects", List.of());
-        summary.put("unsupportedEffects", List.of());
-        summary.put("skippedEffects", List.of());
-        summary.put("applied", false);
-        summary.put("reason", reason);
-        return summary;
     }
 
     /**
