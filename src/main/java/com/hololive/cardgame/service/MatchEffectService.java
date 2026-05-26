@@ -93,6 +93,7 @@ public class MatchEffectService {
     private final MatchDamageEffectExecutionService damageEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
+    private final MatchGiftEffectDispatcher giftEffectDispatcher;
 
     /**
      * 效果結算服務建構子。
@@ -372,6 +373,28 @@ public class MatchEffectService {
             cheerRemovalEffectExecutionService,
             effectTypeInferenceService,
             this
+        );
+        this.giftEffectDispatcher = new MatchGiftEffectDispatcher(
+            cardSelectionExecutionService,
+            lookEffectExecutionService,
+            drawEffectExecutionService,
+            holopowerMoveEffectExecutionService,
+            restEffectExecutionService,
+            swapCenterBackEffectExecutionService,
+            collabSwapEffectExecutionService,
+            actionLockEffectExecutionService,
+            extraBloomAllowanceEffectExecutionService,
+            batonTouchCostModifierEffectExecutionService,
+            matchResultEffectExecutionService,
+            discardHandEffectExecutionService,
+            revealToArchiveEffectExecutionService,
+            summonToStageEffectExecutionService,
+            archiveBloomEffectExecutionService,
+            cheerDeckReturnEffectExecutionService,
+            downEffectExecutionService,
+            healEffectExecutionService,
+            effectTypeInferenceService,
+            new MatchGiftEffectServiceHandlers(this)
         );
     }
 
@@ -840,120 +863,14 @@ public class MatchEffectService {
         JsonNode giftNode,
         String effectType
     ) {
-        String targetType = effectTypeInferenceService.inferTargetType(effectType);
-        return switch (effectType) {
-            case "DRAW" -> drawEffectExecutionService.executeDrawEffect(matchId, userId, effectType, giftNode);
-            case "SEARCH" -> cardSelectionExecutionService.executeSearchEffect(matchId, userId, effectType, giftNode, null);
-            case "REPLACE_ARCHIVE_WITH_HAND" -> executeReplaceArchiveWithHandEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode,
-                holderCardInstanceId
-            );
-            case "RETURN_TO_HAND" -> cardSelectionExecutionService.executeReturnToHandEffect(matchId, userId, effectType, giftNode, null);
-            case "RETURN_TO_DECK_TOP" -> cardSelectionExecutionService.executeReturnToDeckTopEffect(matchId, userId, effectType, giftNode, null);
-            case "ADD_CHEER" -> executeAddCheerEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
-            case "DAMAGE" -> executeDamageEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode,
-                targetType,
-                triggerTargetCardInstanceId
-            );
-            case "REATTACH" -> executeReattachEffect(matchId, userId, effectType, giftNode, targetType, holderCardInstanceId);
-            case "SUMMON_TO_STAGE" -> summonToStageEffectExecutionService.executeSummonToStageEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode
-            );
-            case "REVEAL_TO_ARCHIVE" -> revealToArchiveEffectExecutionService.executeRevealToArchiveEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode
-            );
-            case "BLOOM_FROM_ARCHIVE" -> archiveBloomEffectExecutionService.executeBloomFromArchiveEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode
-            );
-            case "RETURN_CHEER_TO_DECK_BOTTOM" -> cheerDeckReturnEffectExecutionService.executeReturnCheerToDeckBottomEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode
-            );
-            case "DISCARD_HAND" -> discardHandEffectExecutionService.executeDiscardHandEffect(matchId, userId, effectType, giftNode);
-            case "REST" -> restEffectExecutionService.executeRestEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode,
-                targetType,
-                holderCardInstanceId
-            );
-            case "SWAP_CENTER_BACK" -> swapCenterBackEffectExecutionService.executeSwapCenterBackEffect(matchId, userId, effectType, giftNode);
-            case "MOVE_TO_HOLOPOWER" -> holopowerMoveEffectExecutionService.executeMoveToHolopowerEffect(matchId, userId, effectType, giftNode);
-            case "DOWN_NO_LIFE" -> downEffectExecutionService.executeDownNoLifeEffect(matchId, userId, effectType, giftNode);
-            case "DOWN_EXTRA_LIFE" -> downEffectExecutionService.executeDownExtraLifeEffect(matchId, userId, effectType, giftNode);
-            case "BATON_TOUCH_COST_MODIFIER" -> batonTouchCostModifierEffectExecutionService.executeBatonTouchCostModifierEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode,
-                targetType,
-                holderCardInstanceId
-            );
-            case "ACTION_LOCK" -> actionLockEffectExecutionService.executeActionLockEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode,
-                targetType,
-                holderCardInstanceId
-            );
-            case "ALLOW_EXTRA_BLOOM" -> extraBloomAllowanceEffectExecutionService.executeAllowExtraBloomEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode,
-                null,
-                holderCardInstanceId
-            );
-            case "LOOK_TOP_DECK" -> lookEffectExecutionService.executeLookTopDeckEffect(matchId, userId, effectType, giftNode);
-            case "LOOK_OPPONENT_HAND" -> lookEffectExecutionService.executeLookOpponentHandEffect(matchId, userId, effectType, giftNode);
-            case "LOOK_HOLOPOWER" -> lookEffectExecutionService.executeLookHolopowerEffect(matchId, userId, effectType, giftNode);
-            case "ARCHIVE_STACK_CARD" -> executeArchiveStackCardEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode,
-                holderCardInstanceId
-            );
-            case "SWAP_WITH_COLLAB" -> collabSwapEffectExecutionService.executeSwapWithCollabEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode,
-                holderCardInstanceId
-            );
-            case "HEAL" -> healEffectExecutionService.executeHealEffect(
-                matchId,
-                userId,
-                effectType,
-                giftNode,
-                targetType,
-                holderCardInstanceId
-            );
-            case "BUFF", "DEBUFF" -> executeBuffDebuffEffect(matchId, userId, effectType, giftNode, targetType);
-            case "MATCH_RESULT", "WIN", "LOSE" -> matchResultEffectExecutionService.executeMatchResultEffect(matchId, userId, effectType, giftNode);
-            case "UNIMPLEMENTED" -> executeNoOpEffect(effectType, giftNode, "尚未支援的 GIFT 效果");
-            default -> throw new UnsupportedOperationException("UNSUPPORTED_GIFT_EFFECT");
-        };
+        return giftEffectDispatcher.execute(
+            matchId,
+            userId,
+            holderCardInstanceId,
+            triggerTargetCardInstanceId,
+            effectType,
+            giftNode
+        );
     }
 
     /**
@@ -1472,7 +1389,7 @@ public class MatchEffectService {
      * <p>目前用於 `HBP02-039`。公開本體在 `ATTACK_ART` 的 `holoxReveal` payload，這裡只負責把
      * 本次公開進 Archive 的支援卡 1 張改到手牌。
      */
-    private Map<String, Object> executeReplaceArchiveWithHandEffect(
+    Map<String, Object> executeReplaceArchiveWithHandEffect(
         Long matchId,
         Long userId,
         String effectType,
