@@ -21,6 +21,7 @@ public class MatchEffectCombatModifierService {
     private final MatchAttachedSupportIncomingDamageReductionResolverService attachedSupportIncomingDamageReductionResolverService;
     private final MatchPassiveGiftIncomingDamageReductionResolverService passiveGiftIncomingDamageReductionResolverService;
     private final MatchPassiveGiftArtBonusResolverService passiveGiftArtBonusResolverService;
+    private final MatchPassiveGiftArtCostReductionResolverService passiveGiftArtCostReductionResolverService;
 
     public MatchEffectCombatModifierService(
         JdbcTemplate jdbcTemplate,
@@ -50,6 +51,13 @@ public class MatchEffectCombatModifierService {
                 new PassiveGiftTriggerActionWriter(jdbcTemplate, objectMapper, effectTextParser)
             );
         this.passiveGiftArtBonusResolverService = new MatchPassiveGiftArtBonusResolverService(
+            jdbcTemplate,
+            objectMapper,
+            effectTextParser,
+            new GiftTriggerMatcher(),
+            new SearchCriteriaParser(jdbcTemplate, effectTextParser)
+        );
+        this.passiveGiftArtCostReductionResolverService = new MatchPassiveGiftArtCostReductionResolverService(
             jdbcTemplate,
             objectMapper,
             effectTextParser,
@@ -194,40 +202,12 @@ public class MatchEffectCombatModifierService {
         Long attackerHolomemId,
         String attackerArtName
     ) {
-        if (matchId == null || userId == null || attackerHolomemId == null) {
-            return Map.of();
-        }
-        MatchEffectService.PassiveGiftArtCostReductionTargetContext attackerContext =
-            matchEffectService.loadPassiveGiftArtCostReductionTargetContext(matchId, userId, attackerHolomemId, attackerArtName);
-        if (attackerContext == null) {
-            return Map.of();
-        }
-        List<MatchEffectService.PassiveGiftHolderContext> holderContexts =
-            matchEffectService.loadPassiveGiftArtBonusHolderContexts(matchId, userId);
-        if (holderContexts.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, Integer> total = new LinkedHashMap<>();
-        for (MatchEffectService.PassiveGiftHolderContext holderContext : holderContexts) {
-            Map<String, Integer> reduction = matchEffectService.resolvePassiveGiftArtCostReductionFromHolder(
-                matchId,
-                userId,
-                holderContext,
-                attackerContext
-            );
-            if (reduction.isEmpty()) {
-                continue;
-            }
-            for (Map.Entry<String, Integer> entry : reduction.entrySet()) {
-                String color = entry.getKey();
-                int value = entry.getValue() == null ? 0 : entry.getValue();
-                if (!StringUtils.hasText(color) || value <= 0) {
-                    continue;
-                }
-                total.merge(color, value, Integer::sum);
-            }
-        }
-        return total;
+        return passiveGiftArtCostReductionResolverService.resolvePassiveGiftArtCheerCostReduction(
+            matchId,
+            userId,
+            attackerHolomemId,
+            attackerArtName
+        );
     }
 
     public int resolveArtTextDamageBonus(

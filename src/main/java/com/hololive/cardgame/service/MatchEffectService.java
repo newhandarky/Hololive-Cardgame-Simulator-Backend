@@ -46,14 +46,8 @@ public class MatchEffectService {
     static final Pattern ATTACHED_SUPPORT_ARTS_PATTERN = Pattern.compile(
         "この(?:マスコット|ツール|ファン)が付いているホロメンのアーツ\\s*([+＋−-]\\s*\\d+)"
     );
-    private static final Pattern PASSIVE_GIFT_ART_COST_REDUCTION_PATTERN = Pattern.compile(
-        "アーツ(?:[「『][^」』]+[」』])?に必要な\\s*(赤|青|緑|白|紫|黄|無色)\\s*[ー\\-−]\\s*(\\d+)"
-    );
     private static final Pattern PASSIVE_GIFT_REFERENCED_OSHI_SKILL_PATTERN = Pattern.compile(
         "(SP)?推しスキル[「『]([^」』]+)[」』]を使っていた"
-    );
-    private static final Pattern PASSIVE_GIFT_REFERENCED_ART_NAME_PATTERN = Pattern.compile(
-        "アーツ[「『]([^」』]+)[」』]"
     );
     private static final Pattern DOWN_EXTRA_LIFE_PATTERN = Pattern.compile("ライフを\\s*(\\d+)\\s*つ?減ら");
     private static final Pattern DOWN_EXTRA_LIFE_MINUS_PATTERN = Pattern.compile("ライフ\\s*[ー\\-−]\\s*(\\d+)");
@@ -1420,26 +1414,6 @@ public class MatchEffectService {
         Long holomemId,
         String stageZone,
         String passiveEffectJsonText
-    ) {}
-
-    /**
-     * 描述「常駐 Gift 藝能費用減免」的受益者。
-     *
-     * <p>這類文案目前已知會同時依賴：
-     *
-     * <p>- 受益者站位（例如 `センターホロメン`）
-     * <p>- 受益者卡名（例如 `〈アーニャ・メルフィッサ〉`）
-     * <p>- 受益者是否附著指定名稱的 support（例如 `〈古代武器〉が付いている`）
-     *
-     * <p>因此需要比一般 `アーツ+N` 多帶出卡名欄位。
-     */
-    record PassiveGiftArtCostReductionTargetContext(
-        Long holomemId,
-        String stageZone,
-        String levelType,
-        String cardName,
-        String artName,
-        Set<String> tags
     ) {}
 
     /**
@@ -4977,48 +4951,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 載入常駐 Gift 藝能費用減免受益者所需資訊。
-     */
-    PassiveGiftArtCostReductionTargetContext loadPassiveGiftArtCostReductionTargetContext(
-        Long matchId,
-        Long userId,
-        Long holomemId,
-        String attackerArtName
-    ) {
-        return jdbcTemplate.query(
-            """
-            SELECT h.id,
-                   h.zone,
-                   h.current_level,
-                   c.name,
-                   COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text
-            FROM match_holomems h
-            JOIN cards c ON c.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                return new PassiveGiftArtCostReductionTargetContext(
-                    rs.getLong("id"),
-                    effectTextParser.normalizeEffectType(rs.getString("zone")),
-                    effectTextParser.normalizeEffectType(rs.getString("current_level")),
-                    rs.getString("name"),
-                    attackerArtName,
-                    parseTagsJson(rs.getString("tags_json_text"))
-                );
-            },
-            matchId,
-            userId,
-            holomemId
-        );
-    }
-
-    /**
      * 載入藝能自體加成所需的 Holomem 狀態。
      *
      * <p>目前先沿用和 `PassiveGiftHpTargetContext` 類似的資料結構，因為 `HSD13-007` 這類文案
@@ -5105,115 +5037,6 @@ public class MatchEffectService {
         );
     }
 
-    /**
-     * 載入常駐藝能加成可能的 holder。
-     *
-     * <p>`HSD08-004` 這類舊案例只需要中心位 holder，但像 `HBP05-013` 會把 holder 限制寫成
-     * `[センターポジション・コラボポジション限定]`。因此藝能加成入口需要額外把 `COLLAB` holder
-     * 也納入，再交由文案 matcher 做最終站位過濾。
-     */
-    List<PassiveGiftHolderContext> loadPassiveGiftArtBonusHolderContexts(Long matchId, Long userId) {
-        return jdbcTemplate.query(
-            """
-            SELECT h.id,
-                   h.zone,
-                   mc.passive_effect_json::text AS passive_effect_json_text
-            FROM match_holomems h
-            JOIN member_cards mc ON mc.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.zone IN ('CENTER', 'COLLAB')
-              AND mc.passive_effect_json IS NOT NULL
-            ORDER BY CASE h.zone
-                        WHEN 'CENTER' THEN 1
-                        WHEN 'COLLAB' THEN 2
-                        ELSE 9
-                     END,
-                     h.id
-            """,
-            (rs, rowNum) -> new PassiveGiftHolderContext(
-                rs.getLong("id"),
-                effectTextParser.normalizeEffectType(rs.getString("zone")),
-                rs.getString("passive_effect_json_text")
-            ),
-            matchId,
-            userId
-        );
-    }
-
-    /**
-     * 以單一 holder 的常駐文案判斷是否減少攻擊者藝能所需 Cheer。
-     */
-    Map<String, Integer> resolvePassiveGiftArtCostReductionFromHolder(
-        Long matchId,
-        Long userId,
-        PassiveGiftHolderContext holderContext,
-        PassiveGiftArtCostReductionTargetContext attackerContext
-    ) {
-        String rawText = extractPassiveGiftRawText(holderContext.passiveEffectJsonText());
-        if (!StringUtils.hasText(rawText)) {
-            return Map.of();
-        }
-        Matcher reductionMatcher = PASSIVE_GIFT_ART_COST_REDUCTION_PATTERN.matcher(rawText);
-        if (!reductionMatcher.find()) {
-            return Map.of();
-        }
-        if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(rawText, holderContext.stageZone())) {
-            return Map.of();
-        }
-        if (!matchesPassiveGiftArtTargetZoneRestriction(rawText, attackerContext.stageZone())) {
-            return Map.of();
-        }
-        if (!matchesPassiveGiftHistoricalOshiSkillCondition(matchId, userId, rawText)) {
-            return Map.of();
-        }
-        if (!matchesPassiveGiftReferencedArtNameCondition(rawText, attackerContext.artName())) {
-            return Map.of();
-        }
-        if (rawText.contains("このホロメンのアーツ")) {
-            if (!Objects.equals(holderContext.holomemId(), attackerContext.holomemId())) {
-                return Map.of();
-            }
-            return buildPassiveGiftArtCostReductionResult(reductionMatcher);
-        }
-
-        String targetClause = extractPassiveGiftArtCostTargetClause(rawText);
-        if (!StringUtils.hasText(targetClause)) {
-            return Map.of();
-        }
-        if (targetClause.contains("このホロメン")
-            && !Objects.equals(holderContext.holomemId(), attackerContext.holomemId())) {
-            return Map.of();
-        }
-        if (!matchesPassiveGiftTargetAttachedSupportCondition(targetClause, attackerContext.holomemId())) {
-            return Map.of();
-        }
-
-        String normalizedTargetClause = stripPassiveGiftTargetAttachedSupportCondition(targetClause);
-        if (!normalizedTargetClause.contains("このホロメン")) {
-            SearchCriteria criteria = resolveMemberCriteriaFromRawText(normalizedTargetClause);
-            if (!matchesPassiveGiftArtCostTargetCriteria(criteria, attackerContext)) {
-                return Map.of();
-            }
-        }
-
-        return buildPassiveGiftArtCostReductionResult(reductionMatcher);
-    }
-
-    private Map<String, Integer> buildPassiveGiftArtCostReductionResult(Matcher reductionMatcher) {
-        if (reductionMatcher == null) {
-            return Map.of();
-        }
-        String color = normalizeColorType(resolveCheerColorFilter(reductionMatcher.group(1)));
-        int reduction = Integer.parseInt(reductionMatcher.group(2));
-        if (!StringUtils.hasText(color) || reduction <= 0) {
-            return Map.of();
-        }
-        Map<String, Integer> result = new LinkedHashMap<>();
-        result.put(color, reduction);
-        return result;
-    }
-
     private boolean matchesPassiveGiftHistoricalOshiSkillCondition(
         Long matchId,
         Long userId,
@@ -5251,20 +5074,6 @@ public class MatchEffectService {
         return count != null && count > 0;
     }
 
-    private boolean matchesPassiveGiftReferencedArtNameCondition(String rawText, String attackerArtName) {
-        if (!StringUtils.hasText(rawText)) {
-            return false;
-        }
-        Matcher matcher = PASSIVE_GIFT_REFERENCED_ART_NAME_PATTERN.matcher(rawText);
-        if (!matcher.find()) {
-            return true;
-        }
-        String requiredArtName = matcher.group(1) == null ? "" : matcher.group(1).trim();
-        return StringUtils.hasText(requiredArtName)
-            && StringUtils.hasText(attackerArtName)
-            && attackerArtName.contains(requiredArtName);
-    }
-
     /**
      * 判斷常駐 Gift 是否要求 holder 身上附著指定名稱的支援卡。
      */
@@ -5299,123 +5108,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 判斷常駐 Gift 是否要求「受益者」身上附著指定名稱的支援卡。
-     */
-    private boolean matchesPassiveGiftTargetAttachedSupportCondition(String targetClause, Long targetHolomemId) {
-        if (!StringUtils.hasText(targetClause) || targetHolomemId == null) {
-            return true;
-        }
-        int attachedIndex = targetClause.indexOf("が付いている");
-        if (attachedIndex < 0) {
-            return true;
-        }
-        String requirementPrefix = targetClause.substring(0, attachedIndex);
-        if (requirementPrefix.contains("マスコット")) {
-            return loadAttachedSupportTypes(targetHolomemId).contains("MASCOT");
-        }
-        if (requirementPrefix.contains("ツール")) {
-            return loadAttachedSupportTypes(targetHolomemId).contains("TOOL");
-        }
-        if (requirementPrefix.contains("ファン")) {
-            return loadAttachedSupportTypes(targetHolomemId).contains("FAN");
-        }
-        List<String> requiredSupportNames = giftTriggerMatcher.extractNameTokens(requirementPrefix);
-        if (requiredSupportNames.isEmpty()) {
-            return true;
-        }
-        List<String> attachedSupportNames = loadAttachedSupportNames(targetHolomemId);
-        if (attachedSupportNames.isEmpty()) {
-            return false;
-        }
-        for (String attachedSupportName : attachedSupportNames) {
-            if (!StringUtils.hasText(attachedSupportName)) {
-                continue;
-            }
-            for (String requiredSupportName : requiredSupportNames) {
-                if (attachedSupportName.contains(requiredSupportName)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private Set<String> loadAttachedSupportTypes(Long holomemId) {
-        if (holomemId == null) {
-            return Set.of();
-        }
-        List<String> supportTypes = jdbcTemplate.query(
-            """
-            SELECT hs.support_type
-            FROM match_holomem_supports hs
-            WHERE hs.match_holomem_id = ?
-            ORDER BY hs.id
-            """,
-            (rs, rowNum) -> normalize(rs.getString("support_type")),
-            holomemId
-        );
-        if (supportTypes == null || supportTypes.isEmpty()) {
-            return Set.of();
-        }
-        return supportTypes.stream()
-            .filter(StringUtils::hasText)
-            .collect(Collectors.toCollection(LinkedHashSet::new));
-    }
-
-    /**
-     * 判斷常駐藝能 buff 是否對目前攻擊者站位生效。
-     *
-     * <p>這裡只看「受益者」描述，避免把 holder restriction
-     * （例如 `[センターポジション・コラボポジション限定]`）誤判成攻擊者一定要在 `COLLAB`。
-     */
-    private boolean matchesPassiveGiftArtTargetZoneRestriction(String rawText, String attackerStageZone) {
-        if (!StringUtils.hasText(rawText)) {
-            return true;
-        }
-        String targetClause = extractPassiveGiftArtBonusTargetClause(rawText);
-        String zoneClause = StringUtils.hasText(targetClause) ? targetClause : rawText;
-        boolean mentionsCenterHolomem = zoneClause.contains("センターホロメン");
-        boolean mentionsCollabHolomem = zoneClause.contains("コラボホロメン");
-        boolean mentionsBackHolomem = zoneClause.contains("バックホロメン");
-        if (!mentionsCenterHolomem && !mentionsCollabHolomem && !mentionsBackHolomem) {
-            return true;
-        }
-        if (mentionsCenterHolomem && "CENTER".equals(attackerStageZone)) {
-            return true;
-        }
-        if (mentionsCollabHolomem && "COLLAB".equals(attackerStageZone)) {
-            return true;
-        }
-        if (mentionsBackHolomem && "BACK".equals(attackerStageZone)) {
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * 判斷常駐 Gift 藝能費用減免的受益者是否符合名稱 / tag / level 條件。
-     */
-    private boolean matchesPassiveGiftArtCostTargetCriteria(
-        SearchCriteria criteria,
-        PassiveGiftArtCostReductionTargetContext attackerContext
-    ) {
-        if (criteria == null || criteria.isEmpty()) {
-            return true;
-        }
-        if (StringUtils.hasText(criteria.levelType()) && !criteria.levelType().equals(attackerContext.levelType())) {
-            return false;
-        }
-        if (StringUtils.hasText(criteria.tag()) && !attackerContext.tags().contains(criteria.tag())) {
-            return false;
-        }
-        if (StringUtils.hasText(criteria.nameContains())
-            && !attackerContext.cardName().contains(criteria.nameContains())) {
-            return false;
-        }
-        return true;
-    }
-
-    /**
      * 載入指定 Holomem 目前附著的 support 名稱。
      */
     private List<String> loadAttachedSupportNames(Long holomemId) {
@@ -5433,26 +5125,6 @@ public class MatchEffectService {
             (rs, rowNum) -> rs.getString("name"),
             holomemId
         );
-    }
-
-    private Set<String> loadOpponentStageTags(Long matchId, Long userId) {
-        if (matchId == null || userId == null) {
-            return Set.of();
-        }
-        return new LinkedHashSet<>(jdbcTemplate.query(
-            """
-            SELECT DISTINCT tag.value AS tag
-            FROM match_holomems h
-            JOIN cards c ON c.card_id = h.card_id
-            CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(c.tags_json, '[]'::jsonb)) AS tag(value)
-            WHERE h.match_id = ?
-              AND h.owner_user_id <> ?
-              AND h.zone IN ('CENTER', 'COLLAB', 'BACK')
-            """,
-            (rs, rowNum) -> rs.getString("tag"),
-            matchId,
-            userId
-        ));
     }
 
     /**
@@ -5985,42 +5657,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 擷取 `...のアーツ+N` / `...全員のアーツ+N` 前真正決定受益者的子句。
-     */
-    private String extractPassiveGiftArtBonusTargetClause(String rawText) {
-        if (!StringUtils.hasText(rawText)) {
-            return "";
-        }
-        int markerIndex = rawText.indexOf("のアーツ");
-        if (markerIndex >= 0) {
-            return rawText.substring(0, markerIndex).trim();
-        }
-        String specialDamageClause = extractTrailingClauseBeforeMarker(rawText, "に与える特殊ダメージ");
-        if (StringUtils.hasText(specialDamageClause)) {
-            int opponentTargetIndex = specialDamageClause.indexOf("が相手の");
-            if (opponentTargetIndex > 0) {
-                return specialDamageClause.substring(0, opponentTargetIndex).trim();
-            }
-            return specialDamageClause;
-        }
-        return rawText.trim();
-    }
-
-    /**
-     * 擷取 `...のアーツに必要な` 前的受益者子句。
-     */
-    private String extractPassiveGiftArtCostTargetClause(String rawText) {
-        if (!StringUtils.hasText(rawText)) {
-            return "";
-        }
-        String clause = extractTrailingClauseBeforeMarker(rawText, "のアーツに必要な");
-        if (StringUtils.hasText(clause)) {
-            return clause;
-        }
-        return extractTrailingClauseBeforeMarker(rawText, "のアーツ");
-    }
-
-    /**
      * 擷取 `...が受けるダメージ` / `...で受けるダメージ` 前真正決定受保護對象的子句。
      */
     private String extractPassiveGiftIncomingDamageReductionTargetClause(String rawText) {
@@ -6043,44 +5679,6 @@ public class MatchEffectService {
             rawText.lastIndexOf('\n', markerIndex)
         );
         return rawText.substring(clauseStart < 0 ? 0 : clauseStart + 1, markerIndex).trim();
-    }
-
-    /**
-     * 移除受益者子句中「附著指定 support」的前置描述，避免把 support 名稱誤當成受益者卡名。
-     */
-    private String stripPassiveGiftTargetAttachedSupportCondition(String targetClause) {
-        if (!StringUtils.hasText(targetClause)) {
-            return "";
-        }
-        int attachedIndex = targetClause.indexOf("が付いている");
-        if (attachedIndex < 0) {
-            return targetClause;
-        }
-        return targetClause.substring(attachedIndex + "が付いている".length()).trim();
-    }
-
-    /**
-     * 判斷常駐藝能 buff 的受益者是否符合具名角色限制。
-     *
-     * <p>像 `HSD03-008` 這種文案會在同一子句列出多個 `〈名稱〉`，表示任一名稱符合即可受益。
-     * 若子句中沒有具名 token，才 fallback 到既有 `nameContains` 的單一名稱判斷。
-     */
-    private boolean matchesPassiveGiftArtTargetNameCondition(String targetClause, String attackerCardName) {
-        if (!StringUtils.hasText(targetClause)) {
-            return true;
-        }
-        String normalizedCardName = nullToEmpty(attackerCardName);
-        List<String> explicitNameTokens = giftTriggerMatcher.extractNameTokens(targetClause);
-        if (!explicitNameTokens.isEmpty()) {
-            for (String explicitNameToken : explicitNameTokens) {
-                if (StringUtils.hasText(explicitNameToken) && normalizedCardName.contains(explicitNameToken)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        String nameContains = resolveSearchCriteriaFromRawText(targetClause).nameContains();
-        return !StringUtils.hasText(nameContains) || normalizedCardName.contains(nameContains);
     }
 
     private String extractTrailingClauseBeforeMarker(String rawText, String marker) {
