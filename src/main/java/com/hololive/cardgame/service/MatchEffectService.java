@@ -89,7 +89,6 @@ public class MatchEffectService {
     private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
     private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
     private final MatchDamageEffectExecutionService damageEffectExecutionService;
-    private final MatchArtDownTriggeredEffectExecutionService artDownTriggeredEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
 
@@ -318,14 +317,6 @@ public class MatchEffectService {
             this::loseLifeOnce,
             this::executeDownEvent,
             this::extractLostLifeCardInstanceIds
-        );
-        this.artDownTriggeredEffectExecutionService = new MatchArtDownTriggeredEffectExecutionService(
-            objectMapper,
-            effectTextParser,
-            this::extractAttachedSupportRawText,
-            this::inferBloomEffectTypes,
-            this::inferBloomTargetType,
-            this::applySupportEffect
         );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
@@ -3571,7 +3562,7 @@ public class MatchEffectService {
     /**
      * 從 Bloom/Collab 文案推斷效果類型列表。
      */
-    private List<String> inferBloomEffectTypes(String bloomText) {
+    List<String> inferBloomEffectTypes(String bloomText) {
         Set<String> effectTypes = new LinkedHashSet<>();
         String text = effectTextParser.normalizeDigits(bloomText == null ? "" : bloomText);
         if (!StringUtils.hasText(text)) {
@@ -4789,32 +4780,6 @@ public class MatchEffectService {
             """,
             (rs, rowNum) -> rs.getString("name"),
             holomemId
-        );
-    }
-
-    /**
-     * 在藝能擊倒對手後，解析並執行該藝能自己的 follow-up 效果。
-     *
-     * <p>這裡處理的不是 Gift，也不是支援卡，而是「藝能文案本身」在 down 事件成立後才解鎖的後段效果。
-     * 例如 `HSD13-007`：
-     *
-     * <p>- 前段：依 Cheer 數量提升本次藝能傷害
-     * <p>- 後段：只有這次藝能真的把對手打倒時，才從 Cheer Deck 再貼 1 張
-     *
-     * <p>之所以獨立做成入口，而不是塞進 Gift trigger，是因為這類效果的來源是「本次藝能本身」，
-     * 不應與 stage 上其他被動 Gift 共用同一個觸發模型。
-     */
-    Map<String, Object> applyArtDownTriggeredEffects(
-        Long matchId,
-        Long userId,
-        Long attackerCardInstanceId,
-        String artEffectJsonText
-    ) {
-        return artDownTriggeredEffectExecutionService.applyArtDownTriggeredEffects(
-            matchId,
-            userId,
-            attackerCardInstanceId,
-            artEffectJsonText
         );
     }
 
