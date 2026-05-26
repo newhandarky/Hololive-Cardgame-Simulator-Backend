@@ -81,6 +81,7 @@ public class MatchEffectService {
     private final MatchCardSelectionExecutionService cardSelectionExecutionService;
     private final MatchDamageEffectiveHpResolverService damageEffectiveHpResolverService;
     private final MatchSpecialDamagePreventionResolverService specialDamagePreventionResolverService;
+    private final MatchPassiveGiftHpChangePreventionResolverService hpChangePreventionResolverService;
     private final MatchLookEffectExecutionService lookEffectExecutionService;
     private final MatchDrawEffectExecutionService drawEffectExecutionService;
     private final MatchHolopowerMoveEffectExecutionService holopowerMoveEffectExecutionService;
@@ -164,6 +165,13 @@ public class MatchEffectService {
             jdbcTemplate,
             effectTextParser,
             giftTriggerConditionService
+        );
+        this.hpChangePreventionResolverService = new MatchPassiveGiftHpChangePreventionResolverService(
+            jdbcTemplate,
+            objectMapper,
+            effectTextParser,
+            giftTriggerMatcher,
+            searchCriteriaParser
         );
         this.lookEffectExecutionService = new MatchLookEffectExecutionService(jdbcTemplate, effectTextParser);
         this.drawEffectExecutionService = new MatchDrawEffectExecutionService(
@@ -284,7 +292,7 @@ public class MatchEffectService {
             this::resolveEffectTargetHolomemId,
             this::resolveHolomemOwner,
             this::resolveHolomemCardInstanceId,
-            this::isHpChangeBlockedByOpponentAbility
+            hpChangePreventionResolverService::isHpChangeBlockedByOpponentAbility
         );
         this.moveZoneEffectExecutionService = new MatchMoveZoneEffectExecutionService(
             jdbcTemplate,
@@ -310,7 +318,7 @@ public class MatchEffectService {
             this::resolveHolomemOwner,
             this::resolveCurrentTurnNumber,
             this::resolveActiveDamageModifier,
-            this::isHpChangeBlockedByOpponentAbility,
+            hpChangePreventionResolverService::isHpChangeBlockedByOpponentAbility,
             this::resolveHolomemZone,
             specialDamagePreventionResolverService::isSpecialDamageImmunityActive,
             specialDamagePreventionResolverService::tryActivateHsd13012SpecialDamageImmunity,
@@ -1453,25 +1461,6 @@ public class MatchEffectService {
         String cardName,
         String artName,
         Set<String> tags
-    ) {}
-
-    /**
-     * 描述「相手能力不能改變 HP」判斷所需的最小 target 狀態。
-     */
-    private record PassiveGiftHpChangePreventionTargetContext(
-        Long holomemId,
-        String stageZone,
-        String levelType,
-        String cardName,
-        Set<String> tags
-    ) {}
-
-    /**
-     * 描述當前回合狀態，供靜態常駐條件判斷。
-     */
-    private record MatchTurnContext(
-        String phase,
-        Long currentTurnPlayerId
     ) {}
 
     /**
@@ -4954,63 +4943,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 讀取當前 phase 與 turn player。
-     */
-    private MatchTurnContext loadMatchTurnContext(Long matchId) {
-        return jdbcTemplate.query(
-            """
-            SELECT current_phase, current_turn_player_id
-            FROM matches
-            WHERE id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                return new MatchTurnContext(
-                    effectTextParser.normalizeEffectType(rs.getString("current_phase")),
-                    asLong(rs.getObject("current_turn_player_id"))
-                );
-            },
-            matchId
-        );
-    }
-
-    /**
-     * 判斷靜態 Gift 指向的受益目標是否要求特定站位。
-     */
-    private boolean matchesPassiveGiftTargetZoneRestriction(String rawText, String targetStageZone) {
-        if (!StringUtils.hasText(rawText)) {
-            return true;
-        }
-        boolean mentionsCenterHolomem = rawText.contains("センターホロメン");
-        boolean mentionsCollabHolomem = rawText.contains("コラボホロメン");
-        boolean mentionsBackHolomem = rawText.contains("バックホロメン");
-        boolean mentionsCenterPositionDamageTarget = rawText.contains("センターポジションで受けるダメージ");
-        boolean mentionsCollabPositionDamageTarget = rawText.contains("コラボポジションで受けるダメージ");
-        boolean mentionsBackPositionDamageTarget = rawText.contains("バックポジションで受けるダメージ");
-        if (!mentionsCenterHolomem
-            && !mentionsCollabHolomem
-            && !mentionsBackHolomem
-            && !mentionsCenterPositionDamageTarget
-            && !mentionsCollabPositionDamageTarget
-            && !mentionsBackPositionDamageTarget) {
-            return true;
-        }
-        if ((mentionsCenterHolomem || mentionsCenterPositionDamageTarget) && "CENTER".equals(targetStageZone)) {
-            return true;
-        }
-        if ((mentionsCollabHolomem || mentionsCollabPositionDamageTarget) && "COLLAB".equals(targetStageZone)) {
-            return true;
-        }
-        if ((mentionsBackHolomem || mentionsBackPositionDamageTarget) && "BACK".equals(targetStageZone)) {
-            return true;
-        }
-        return false;
-    }
-
-    /**
      * 彙總目前生效中的傷害修正值（match_turn_effects）。
      */
     private int resolveActiveDamageModifier(Long matchId, Long affectedUserId, int currentTurn) {
@@ -5154,46 +5086,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 載入「相手能力不能改變 HP」所需的 target 狀態。
-     */
-    private PassiveGiftHpChangePreventionTargetContext loadPassiveGiftHpChangePreventionTargetContext(
-        Long matchId,
-        Long userId,
-        Long holomemId
-    ) {
-        return jdbcTemplate.query(
-            """
-            SELECT h.id,
-                   h.zone,
-                   h.current_level,
-                   c.name,
-                   COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text
-            FROM match_holomems h
-            JOIN cards c ON c.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                return new PassiveGiftHpChangePreventionTargetContext(
-                    rs.getLong("id"),
-                    effectTextParser.normalizeEffectType(rs.getString("zone")),
-                    effectTextParser.normalizeEffectType(rs.getString("current_level")),
-                    rs.getString("name"),
-                    parseTagsJson(rs.getString("tags_json_text"))
-                );
-            },
-            matchId,
-            userId,
-            holomemId
-        );
-    }
-
-    /**
      * 載入藝能自體加成所需的 Holomem 狀態。
      *
      * <p>目前先沿用和 `PassiveGiftHpTargetContext` 類似的資料結構，因為 `HSD13-007` 這類文案
@@ -5288,40 +5180,6 @@ public class MatchEffectService {
      * 也納入，再交由文案 matcher 做最終站位過濾。
      */
     List<PassiveGiftHolderContext> loadPassiveGiftArtBonusHolderContexts(Long matchId, Long userId) {
-        return jdbcTemplate.query(
-            """
-            SELECT h.id,
-                   h.zone,
-                   mc.passive_effect_json::text AS passive_effect_json_text
-            FROM match_holomems h
-            JOIN member_cards mc ON mc.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.zone IN ('CENTER', 'COLLAB')
-              AND mc.passive_effect_json IS NOT NULL
-            ORDER BY CASE h.zone
-                        WHEN 'CENTER' THEN 1
-                        WHEN 'COLLAB' THEN 2
-                        ELSE 9
-                     END,
-                     h.id
-            """,
-            (rs, rowNum) -> new PassiveGiftHolderContext(
-                rs.getLong("id"),
-                effectTextParser.normalizeEffectType(rs.getString("zone")),
-                rs.getString("passive_effect_json_text")
-            ),
-            matchId,
-            userId
-        );
-    }
-
-    /**
-     * 載入場上所有可能提供「相手能力不能改變 HP」的 holder。
-     *
-     * <p>目前官方已知案例落在 `CENTER / COLLAB`，並交由文案 matcher 做最終站位判斷。
-     */
-    private List<PassiveGiftHolderContext> loadPassiveGiftHpChangePreventionHolderContexts(Long matchId, Long userId) {
         return jdbcTemplate.query(
             """
             SELECT h.id,
@@ -5991,87 +5849,6 @@ public class MatchEffectService {
             return "";
         }
         return matcher.group(2) == null ? "" : matcher.group(2).trim();
-    }
-
-    /**
-     * 判斷單一 holder 是否提供「相手能力不能改變 HP」保護。
-     */
-    private boolean blocksOpponentAbilityHpChangeFromHolder(
-        PassiveGiftHolderContext holderContext,
-        PassiveGiftHpChangePreventionTargetContext targetContext
-    ) {
-        String rawText = extractPassiveGiftRawText(holderContext.passiveEffectJsonText());
-        if (!StringUtils.hasText(rawText) || targetContext == null) {
-            return false;
-        }
-        if (!rawText.contains("相手のメインステップ")
-            || !rawText.contains("HP")
-            || !rawText.contains("相手の能力")
-            || !rawText.contains("減らず")
-            || !rawText.contains("変動しない")) {
-            return false;
-        }
-        if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(rawText, holderContext.stageZone())) {
-            return false;
-        }
-        if (rawText.contains("このホロメンのHP")) {
-            return Objects.equals(holderContext.holomemId(), targetContext.holomemId());
-        }
-
-        if (!matchesPassiveGiftTargetZoneRestriction(rawText, targetContext.stageZone())) {
-            return false;
-        }
-        SearchCriteria criteria = resolveMemberCriteriaFromRawText(rawText);
-        if (StringUtils.hasText(criteria.levelType()) && !criteria.levelType().equals(targetContext.levelType())) {
-            return false;
-        }
-        if (StringUtils.hasText(criteria.tag()) && !targetContext.tags().contains(criteria.tag())) {
-            return false;
-        }
-        if (StringUtils.hasText(criteria.nameContains())) {
-            String cardName = targetContext.cardName() == null ? "" : targetContext.cardName();
-            if (!cardName.contains(criteria.nameContains())) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * 判斷目標是否受到「相手能力不能改變 HP」靜態 Gift 保護。
-     */
-    private boolean isHpChangeBlockedByOpponentAbility(
-        Long matchId,
-        Long sourceUserId,
-        Long targetOwnerUserId,
-        Long targetHolomemId,
-        String effectType
-    ) {
-        if (matchId == null
-            || sourceUserId == null
-            || targetOwnerUserId == null
-            || targetHolomemId == null
-            || Objects.equals(sourceUserId, targetOwnerUserId)
-            || "ART_DAMAGE".equals(normalize(effectType))) {
-            return false;
-        }
-        MatchTurnContext turnContext = loadMatchTurnContext(matchId);
-        if (turnContext == null
-            || !"MAIN".equals(turnContext.phase())
-            || !Objects.equals(turnContext.currentTurnPlayerId(), sourceUserId)) {
-            return false;
-        }
-        PassiveGiftHpChangePreventionTargetContext targetContext =
-            loadPassiveGiftHpChangePreventionTargetContext(matchId, targetOwnerUserId, targetHolomemId);
-        if (targetContext == null) {
-            return false;
-        }
-        for (PassiveGiftHolderContext holderContext : loadPassiveGiftHpChangePreventionHolderContexts(matchId, targetOwnerUserId)) {
-            if (blocksOpponentAbilityHpChangeFromHolder(holderContext, targetContext)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
