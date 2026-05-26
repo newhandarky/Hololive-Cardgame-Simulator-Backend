@@ -20,6 +20,7 @@ public class MatchEffectCombatModifierService {
     private final MatchDamageEffectiveHpResolverService damageEffectiveHpResolverService;
     private final MatchAttachedSupportIncomingDamageReductionResolverService attachedSupportIncomingDamageReductionResolverService;
     private final MatchPassiveGiftIncomingDamageReductionResolverService passiveGiftIncomingDamageReductionResolverService;
+    private final MatchPassiveGiftArtBonusResolverService passiveGiftArtBonusResolverService;
 
     public MatchEffectCombatModifierService(
         JdbcTemplate jdbcTemplate,
@@ -48,6 +49,13 @@ public class MatchEffectCombatModifierService {
                 new GiftTurnUsageReader(jdbcTemplate),
                 new PassiveGiftTriggerActionWriter(jdbcTemplate, objectMapper, effectTextParser)
             );
+        this.passiveGiftArtBonusResolverService = new MatchPassiveGiftArtBonusResolverService(
+            jdbcTemplate,
+            objectMapper,
+            effectTextParser,
+            new GiftTriggerMatcher(),
+            new SearchCriteriaParser(jdbcTemplate, effectTextParser)
+        );
     }
 
     public int resolveAttachedSupportHpBonus(Long matchId, Long matchHolomemId) {
@@ -172,30 +180,12 @@ public class MatchEffectCombatModifierService {
     }
 
     public int resolvePassiveGiftArtBonus(Long matchId, Long userId, Long attackerHolomemId, String targetZone) {
-        if (matchId == null || userId == null || attackerHolomemId == null) {
-            return 0;
-        }
-        MatchEffectService.StaticArtBonusTargetContext attackerContext =
-            matchEffectService.loadStaticArtBonusTargetContext(matchId, userId, attackerHolomemId);
-        if (attackerContext == null) {
-            return 0;
-        }
-        List<MatchEffectService.PassiveGiftHolderContext> holderContexts =
-            matchEffectService.loadPassiveGiftArtBonusHolderContexts(matchId, userId);
-        if (holderContexts.isEmpty()) {
-            return 0;
-        }
-        int total = 0;
-        for (MatchEffectService.PassiveGiftHolderContext holderContext : holderContexts) {
-            total += matchEffectService.resolvePassiveGiftArtBonusFromHolder(
-                matchId,
-                userId,
-                holderContext,
-                attackerContext,
-                targetZone
-            );
-        }
-        return total;
+        return passiveGiftArtBonusResolverService.resolvePassiveGiftArtBonus(
+            matchId,
+            userId,
+            attackerHolomemId,
+            targetZone
+        );
     }
 
     public Map<String, Integer> resolvePassiveGiftArtCheerCostReduction(

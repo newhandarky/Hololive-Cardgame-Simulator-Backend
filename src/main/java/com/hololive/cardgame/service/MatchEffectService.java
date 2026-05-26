@@ -49,12 +49,6 @@ public class MatchEffectService {
     private static final Pattern PASSIVE_GIFT_ART_COST_REDUCTION_PATTERN = Pattern.compile(
         "アーツ(?:[「『][^」』]+[」』])?に必要な\\s*(赤|青|緑|白|紫|黄|無色)\\s*[ー\\-−]\\s*(\\d+)"
     );
-    private static final Pattern OPPONENT_STAGE_TAG_PRESENCE_PATTERN = Pattern.compile(
-        "相手のステージに\\[([^\\]]+)]を持つホロメンがいる"
-    );
-    private static final Pattern INLINE_TAG_TOKEN_PATTERN = Pattern.compile(
-        "#([\\p{L}\\p{N}_'\\-]+?)(?=(?:#|か|を|が|に|で|と|へ|や|も|、|。|\\]|\\s|$))"
-    );
     private static final Pattern PASSIVE_GIFT_REFERENCED_OSHI_SKILL_PATTERN = Pattern.compile(
         "(SP)?推しスキル[「『]([^」』]+)[」』]を使っていた"
     );
@@ -63,7 +57,6 @@ public class MatchEffectService {
     );
     private static final Pattern DOWN_EXTRA_LIFE_PATTERN = Pattern.compile("ライフを\\s*(\\d+)\\s*つ?減ら");
     private static final Pattern DOWN_EXTRA_LIFE_MINUS_PATTERN = Pattern.compile("ライフ\\s*[ー\\-−]\\s*(\\d+)");
-    private static final Pattern PASSIVE_GIFT_SPECIAL_DAMAGE_BONUS_PATTERN = Pattern.compile("特殊ダメージ\\s*[+＋]\\s*(\\d+)");
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -1393,20 +1386,6 @@ public class MatchEffectService {
         }
         return true;
     }
-
-    /**
-     * 描述常駐藝能加成的受益者。
-     *
-     * <p>目前只保留常駐 Gift 判斷真正需要的欄位，避免把完整 Holomem state 傳遞到每個 helper。
-     */
-    record StaticArtBonusTargetContext(
-        Long holomemId,
-        String stageZone,
-        String levelType,
-        String cardName,
-        Set<String> tags,
-        Set<String> opponentStageTags
-    ) {}
 
     /**
      * 描述「藝能自己文字所提供的加成」受益者。
@@ -4998,52 +4977,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 載入「常駐藝能加成的受益者」資訊。
-     *
-     * <p>目前只需要最基本的 3 類條件：
-     *
-     * <p>1. 站位：例如 `コラボポジション`
-     * <p>2. 等級：例如 `Debutホロメン`
-     * <p>3. tag：例如 `#4期生`
-     *
-     * <p>因此這裡只抓規則判斷需要的最小欄位，避免把整個 Holomem 狀態物件搬進來。
-     */
-    StaticArtBonusTargetContext loadStaticArtBonusTargetContext(Long matchId, Long userId, Long holomemId) {
-        Set<String> opponentStageTags = loadOpponentStageTags(matchId, userId);
-        return jdbcTemplate.query(
-            """
-            SELECT h.id,
-                   h.zone,
-                   h.current_level,
-                   c.name,
-                   COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text
-            FROM match_holomems h
-            JOIN cards c ON c.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                return new StaticArtBonusTargetContext(
-                    rs.getLong("id"),
-                    effectTextParser.normalizeEffectType(rs.getString("zone")),
-                    effectTextParser.normalizeEffectType(rs.getString("current_level")),
-                    rs.getString("name"),
-                    parseTagsJson(rs.getString("tags_json_text")),
-                    opponentStageTags
-                );
-            },
-            matchId,
-            userId,
-            holomemId
-        );
-    }
-
-    /**
      * 載入常駐 Gift 藝能費用減免受益者所需資訊。
      */
     PassiveGiftArtCostReductionTargetContext loadPassiveGiftArtCostReductionTargetContext(
@@ -5206,138 +5139,6 @@ public class MatchEffectService {
             matchId,
             userId
         );
-    }
-
-    /**
-     * 以單一 holder 的常駐文案判斷是否給攻擊者加成。
-     *
-     * <p>這裡故意保持保守：
-     *
-     * <p>- 文案沒有 `アーツ+N` 就不算
-     * <p>- 文案要求的站位 / 等級 / tag 任一不符合就不算
-     *
-     * <p>如此可避免把其他非攻擊加成文案誤判為 `+damage`。
-     */
-    int resolvePassiveGiftArtBonusFromHolder(
-        Long matchId,
-        Long userId,
-        PassiveGiftHolderContext holderContext,
-        StaticArtBonusTargetContext attackerContext,
-        String targetZone
-    ) {
-        String rawText = extractPassiveGiftRawText(holderContext.passiveEffectJsonText());
-        if (!StringUtils.hasText(rawText)) {
-            return 0;
-        }
-        int artBonus = extractArtsModifierTotal(rawText)
-            + extractPassiveGiftSpecialDamageBonus(rawText, attackerContext, targetZone);
-        if (artBonus > 0 && rawText.contains("2ndホロメンがいるなら")) {
-            int conditionalExtraBonus = extractArtsModifierTotal(extractClauseAfter(rawText, "さらに"));
-            if (conditionalExtraBonus > 0 && !hasStageHolomemWithLevelType(matchId, userId, "SECOND")) {
-                artBonus = Math.max(artBonus - conditionalExtraBonus, 0);
-            }
-        }
-        if (artBonus == 0) {
-            return 0;
-        }
-        if (!giftTriggerMatcher.matchesGiftHolderZoneRestriction(rawText, holderContext.stageZone())) {
-            return 0;
-        }
-        if (!matchesPassiveGiftAttachedSupportCondition(rawText, holderContext.holomemId())) {
-            return 0;
-        }
-        if (!matchesPassiveGiftArtTargetZoneRestriction(rawText, attackerContext.stageZone())) {
-            return 0;
-        }
-        if (rawText.contains("このホロメンのアーツ")
-            && !Objects.equals(holderContext.holomemId(), attackerContext.holomemId())) {
-            return 0;
-        }
-        if (!matchesPassiveGiftOpponentStageTagCondition(rawText, attackerContext.opponentStageTags())) {
-            return 0;
-        }
-        if (!matchesPassiveGiftHistoricalOshiSkillCondition(matchId, userId, rawText)) {
-            return 0;
-        }
-        if (rawText.contains("このホロメンのアーツ")) {
-            return artBonus;
-        }
-
-        String targetClause = extractPassiveGiftArtBonusTargetClause(rawText);
-        if (!matchesPassiveGiftTargetAttachedSupportCondition(targetClause, attackerContext.holomemId())) {
-            return 0;
-        }
-        String normalizedTargetClause = stripPassiveGiftTargetAttachedSupportCondition(targetClause);
-        if (normalizedTargetClause.contains("このホロメン以外")
-            && Objects.equals(holderContext.holomemId(), attackerContext.holomemId())) {
-            return 0;
-        }
-        SearchCriteria criteria = resolveMemberCriteriaFromRawText(normalizedTargetClause);
-        if (StringUtils.hasText(criteria.levelType()) && !criteria.levelType().equals(attackerContext.levelType())) {
-            return 0;
-        }
-        if (StringUtils.hasText(criteria.tag()) && !attackerContext.tags().contains(criteria.tag())) {
-            return 0;
-        }
-        if (!matchesPassiveGiftArtTargetNameCondition(normalizedTargetClause, attackerContext.cardName())) {
-            return 0;
-        }
-        return artBonus;
-    }
-
-    private int extractPassiveGiftSpecialDamageBonus(
-        String rawText,
-        StaticArtBonusTargetContext attackerContext,
-        String targetZone
-    ) {
-        if (!StringUtils.hasText(rawText) || attackerContext == null) {
-            return 0;
-        }
-        int specialDamageBonus = effectTextParser.extractByPattern(rawText, PASSIVE_GIFT_SPECIAL_DAMAGE_BONUS_PATTERN);
-        if (specialDamageBonus <= 0) {
-            return 0;
-        }
-        if (rawText.contains("相手のセンターホロメンに与える") && !"CENTER".equals(effectTextParser.normalizeEffectType(targetZone))) {
-            return 0;
-        }
-        String targetClause = extractTrailingClauseBeforeMarker(rawText, "に与える特殊ダメージ");
-        if (StringUtils.hasText(targetClause)
-            && !matchesPassiveGiftArtTargetNameCondition(targetClause, attackerContext.cardName())) {
-            return 0;
-        }
-        return specialDamageBonus;
-    }
-
-    private String extractClauseAfter(String rawText, String marker) {
-        if (!StringUtils.hasText(rawText) || !StringUtils.hasText(marker)) {
-            return "";
-        }
-        int index = rawText.indexOf(marker);
-        if (index < 0) {
-            return "";
-        }
-        return rawText.substring(index + marker.length());
-    }
-
-    private boolean hasStageHolomemWithLevelType(Long matchId, Long userId, String levelType) {
-        if (matchId == null || userId == null || !StringUtils.hasText(levelType)) {
-            return false;
-        }
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('CENTER', 'COLLAB', 'BACK')
-              AND UPPER(COALESCE(current_level, '')) = UPPER(?)
-            """,
-            Integer.class,
-            matchId,
-            userId,
-            levelType
-        );
-        return count != null && count > 0;
     }
 
     /**
@@ -5612,41 +5413,6 @@ public class MatchEffectService {
             return false;
         }
         return true;
-    }
-
-    /**
-     * 判斷常駐藝能 buff 是否依賴「相手ステージ存在特定 tag」條件。
-     */
-    private boolean matchesPassiveGiftOpponentStageTagCondition(String rawText, Set<String> opponentStageTags) {
-        if (!StringUtils.hasText(rawText)) {
-            return true;
-        }
-        Matcher matcher = OPPONENT_STAGE_TAG_PRESENCE_PATTERN.matcher(rawText);
-        if (!matcher.find()) {
-            return true;
-        }
-        Set<String> requiredTags = parseTagsFromText(matcher.group(1));
-        if (requiredTags.isEmpty()) {
-            return false;
-        }
-        for (String requiredTag : requiredTags) {
-            if (opponentStageTags.contains(requiredTag)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private Set<String> parseTagsFromText(String text) {
-        Set<String> tags = new LinkedHashSet<>();
-        if (!StringUtils.hasText(text)) {
-            return tags;
-        }
-        Matcher matcher = INLINE_TAG_TOKEN_PATTERN.matcher(text);
-        while (matcher.find()) {
-            tags.add("#" + matcher.group(1));
-        }
-        return tags;
     }
 
     /**
