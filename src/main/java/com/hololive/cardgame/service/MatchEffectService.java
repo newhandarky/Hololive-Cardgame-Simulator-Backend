@@ -58,6 +58,7 @@ public class MatchEffectService {
     private final GameActionExecutor gameActionExecutor;
     private final EffectTextParser effectTextParser;
     private final MatchEffectTypeInferenceService effectTypeInferenceService;
+    private final MatchGiftEffectExecutionCoordinator giftEffectExecutionCoordinator;
     private final GiftTriggerMatcher giftTriggerMatcher;
     private final SearchCriteriaParser searchCriteriaParser;
     private final MatchEffectSearchService searchService;
@@ -109,6 +110,10 @@ public class MatchEffectService {
         this.gameActionExecutor = gameActionExecutor;
         this.effectTextParser = new EffectTextParser(objectMapper);
         this.effectTypeInferenceService = new MatchEffectTypeInferenceService(effectTextParser);
+        this.giftEffectExecutionCoordinator = new MatchGiftEffectExecutionCoordinator(
+            effectTextParser,
+            effectTypeInferenceService
+        );
         this.giftTriggerMatcher = new GiftTriggerMatcher();
         this.searchCriteriaParser = new SearchCriteriaParser(jdbcTemplate, effectTextParser);
         this.searchService = new MatchEffectSearchService(jdbcTemplate, effectTextParser);
@@ -730,91 +735,18 @@ public class MatchEffectService {
         ObjectNode giftNode = objectMapper.createObjectNode();
         giftNode.put("rawText", giftText);
         giftTriggerContextService.appendStoredGiftExecutionContext(giftNode, storedTriggerContext);
-        int clauseSeparatorIndex = findClauseSeparator(giftText);
-        List<String> costEffectTypes = clauseSeparatorIndex >= 0
-            ? effectTypeInferenceService.inferEffectTypes(extractCostClause(giftText))
-            : List.of();
-        List<String> resolvedEffectTypes = clauseSeparatorIndex >= 0
-            ? effectTypeInferenceService.inferEffectTypes(extractResolvedEffectClause(giftText))
-            : List.of();
-        boolean hasMeaningfulSequentialCost = hasMeaningfulSequentialCost(costEffectTypes);
-        List<String> effectTypes;
-        if (clauseSeparatorIndex >= 0 && hasMeaningfulSequentialCost) {
-            effectTypes = mergeEffectTypes(costEffectTypes, resolvedEffectTypes);
-        } else if (clauseSeparatorIndex >= 0 && !resolvedEffectTypes.isEmpty()) {
-            // 不是所有 `：` 都代表「成本：效果」。
-            //
-            // 像 `HBP05-035` 這種 Gift 文案：
-            // `...ダウンした時に使える：自分のデッキから...`
-            //
-            // 冒號前只是觸發敘述，沒有任何可支付成本。若這裡硬把前半句當成本段，
-            // 共用文案分類器只會得到 `UNIMPLEMENTED`，接著被誤判成
-            // 「前置成本未支付」，導致真正的 SEARCH 永遠不會執行。
-            //
-            // 因此只有在冒號前確實解析出可執行的成本 effect 時，才走 sequential cost。
-            // 否則直接以冒號後的主要效果段為準。
-            effectTypes = resolvedEffectTypes;
-        } else {
-            effectTypes = effectTypeInferenceService.inferEffectTypes(giftText);
-        }
-        List<Map<String, Object>> executed = new ArrayList<>();
-        List<String> unsupported = new ArrayList<>();
-        List<Map<String, Object>> skippedEffects = new ArrayList<>();
-        List<Map<String, Object>> costExecutions = new ArrayList<>();
-        if (clauseSeparatorIndex >= 0 && hasMeaningfulSequentialCost) {
-            for (String effectType : costEffectTypes) {
-                executeGiftEffectSafely(
-                    matchId,
-                    userId,
-                    holderCardInstanceId,
-                    triggerTargetCardInstanceId,
-                    giftNode,
-                    effectType,
-                    executed,
-                    unsupported,
-                    skippedEffects,
-                    costExecutions
-                );
-            }
-            if (!costEffectTypes.isEmpty() && !areSequentialCostEffectsSatisfied(costExecutions)) {
-                for (String effectType : resolvedEffectTypes) {
-                    Map<String, Object> skipped = buildSkippedEffect(effectType, "前置成本未支付");
-                    executed.add(skipped);
-                    skippedEffects.add(skipped);
-                }
-            } else {
-                for (String effectType : resolvedEffectTypes) {
-                    executeGiftEffectSafely(
-                        matchId,
-                        userId,
-                        holderCardInstanceId,
-                        triggerTargetCardInstanceId,
-                        giftNode,
-                        effectType,
-                        executed,
-                        unsupported,
-                        skippedEffects,
-                        null
-                    );
-                }
-            }
-        } else {
-            for (String effectType : effectTypes) {
-                executeGiftEffectSafely(
-                    matchId,
-                    userId,
-                    holderCardInstanceId,
-                    triggerTargetCardInstanceId,
-                    giftNode,
-                    effectType,
-                    executed,
-                    unsupported,
-                    skippedEffects,
-                    null
-                );
-            }
-        }
-        return new GiftExecutionSummary(effectTypes, executed, unsupported, skippedEffects);
+        return giftEffectExecutionCoordinator.execute(
+            giftText,
+            giftNode,
+            (effectType, node) -> executeGiftEffectByType(
+                matchId,
+                userId,
+                holderCardInstanceId,
+                triggerTargetCardInstanceId,
+                node,
+                effectType
+            )
+        );
     }
 
     private boolean isHbp06020SelfDownedGiftText(String giftText) {
@@ -895,70 +827,6 @@ public class MatchEffectService {
             userId
         );
         return count == null ? 0 : Math.max(count, 0);
-    }
-
-    /**
-     * 判斷冒號前是否真的存在「需要先支付」的成本效果。
-     *
-     * <p>目前共用文案分類器在完全看不懂的句段上，會保底回傳 `UNIMPLEMENTED`。
-     * 這對一般效果偵測是可接受的，但若直接拿來當 sequential cost 判斷，就會把
-     * `使える：`、`次の能力を得る：` 這類純敘述前半句誤認成成本段。
-     *
-     * <p>因此這裡要求冒號前至少要解析出一個「真正可執行」的 effect type，才視為有成本。
-     */
-    private boolean hasMeaningfulSequentialCost(List<String> costEffectTypes) {
-        return MatchGiftExecutionHelper.hasMeaningfulSequentialCost(costEffectTypes);
-    }
-
-    /**
-     * 以一致方式執行單一 Gift effect type，並把結果回填到各摘要集合。
-     *
-     * <p>這一層把「單一 effect 的 switch 分派」從主流程抽出，讓 `成本段` 與 `效果段` 可以共用同一套
-     * 執行邏輯。否則只要一加入 `成本：效果` 的序列規則，就會把整段 switch 複製兩次，後續維護容易分叉。
-     */
-    private void executeGiftEffectSafely(
-        Long matchId,
-        Long userId,
-        Long holderCardInstanceId,
-        Long triggerTargetCardInstanceId,
-        JsonNode giftNode,
-        String effectType,
-        List<Map<String, Object>> executed,
-        List<String> unsupported,
-        List<Map<String, Object>> skippedEffects,
-        List<Map<String, Object>> costExecutions
-    ) {
-        try {
-            Map<String, Object> summary = executeGiftEffectByType(
-                matchId,
-                userId,
-                holderCardInstanceId,
-                triggerTargetCardInstanceId,
-                giftNode,
-                effectType
-            );
-            if (summary != null) {
-                executed.add(summary);
-                if (costExecutions != null) {
-                    costExecutions.add(summary);
-                }
-            }
-        } catch (UnsupportedOperationException ex) {
-            unsupported.add(effectType);
-            Map<String, Object> skipped = buildSkippedEffect(effectType, "UNSUPPORTED_EFFECT");
-            executed.add(skipped);
-            skippedEffects.add(skipped);
-            if (costExecutions != null) {
-                costExecutions.add(skipped);
-            }
-        } catch (RuntimeException ex) {
-            Map<String, Object> skipped = buildSkippedEffect(effectType, ex.getMessage());
-            executed.add(skipped);
-            skippedEffects.add(skipped);
-            if (costExecutions != null) {
-                costExecutions.add(skipped);
-            }
-        }
     }
 
     /**
@@ -1086,32 +954,6 @@ public class MatchEffectService {
             case "UNIMPLEMENTED" -> executeNoOpEffect(effectType, giftNode, "尚未支援的 GIFT 效果");
             default -> throw new UnsupportedOperationException("UNSUPPORTED_GIFT_EFFECT");
         };
-    }
-
-    /**
-     * 判斷 `成本段` 是否真的支付成功。
-     *
-     * <p>只要成本段中的任一效果沒有真正生效，例如：
-     *
-     * <p>- `discardApplied = 0`
-     * <p>- `removeApplied = 0`
-     * <p>- `applied = false`
-     *
-     * <p>就視為後段效果不能繼續執行。
-     */
-    private boolean areSequentialCostEffectsSatisfied(List<Map<String, Object>> costExecutions) {
-        return MatchGiftExecutionHelper.areSequentialCostEffectsSatisfied(costExecutions);
-    }
-
-    /**
-     * 嘗試以共通欄位判斷單一 effect summary 是否有實際生效。
-     */
-    private boolean isEffectSummaryApplied(Map<String, Object> summary) {
-        return MatchGiftExecutionHelper.isEffectSummaryApplied(summary);
-    }
-
-    private List<String> mergeEffectTypes(List<String> first, List<String> second) {
-        return MatchGiftExecutionHelper.mergeEffectTypes(first, second);
     }
 
     /**
