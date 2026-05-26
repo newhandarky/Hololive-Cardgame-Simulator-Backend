@@ -22,6 +22,7 @@ public class MatchEffectCombatModifierService {
     private final MatchPassiveGiftIncomingDamageReductionResolverService passiveGiftIncomingDamageReductionResolverService;
     private final MatchPassiveGiftArtBonusResolverService passiveGiftArtBonusResolverService;
     private final MatchPassiveGiftArtCostReductionResolverService passiveGiftArtCostReductionResolverService;
+    private final MatchArtTextDamageBonusResolverService artTextDamageBonusResolverService;
 
     public MatchEffectCombatModifierService(
         JdbcTemplate jdbcTemplate,
@@ -63,6 +64,12 @@ public class MatchEffectCombatModifierService {
             effectTextParser,
             new GiftTriggerMatcher(),
             new SearchCriteriaParser(jdbcTemplate, effectTextParser)
+        );
+        this.artTextDamageBonusResolverService = new MatchArtTextDamageBonusResolverService(
+            jdbcTemplate,
+            objectMapper,
+            effectTextParser,
+            new GiftTriggerMatcher()
         );
     }
 
@@ -217,20 +224,12 @@ public class MatchEffectCombatModifierService {
         Long attackerHolomemId,
         String artEffectJsonText
     ) {
-        if (matchId == null || userId == null || attackerHolomemId == null || !StringUtils.hasText(artEffectJsonText)) {
-            return 0;
-        }
-        MatchEffectService.ArtSelfBonusTargetContext attackerContext =
-            matchEffectService.loadArtSelfBonusTargetContext(matchId, userId, attackerHolomemId);
-        if (attackerContext == null) {
-            return 0;
-        }
-        return matchEffectService.resolveArtTextDamageBonusFromRawText(
+        return artTextDamageBonusResolverService.resolveArtTextDamageBonus(
             matchId,
             userId,
             turnNumber,
-            matchEffectService.extractAttachedSupportRawText(artEffectJsonText),
-            attackerContext
+            attackerHolomemId,
+            artEffectJsonText
         );
     }
 

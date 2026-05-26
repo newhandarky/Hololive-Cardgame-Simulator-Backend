@@ -1382,32 +1382,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 描述「藝能自己文字所提供的加成」受益者。
-     *
-     * <p>和中心位常駐 Gift 不同，這類加成直接寫在藝能文案內，常見模式是：
-     *
-     * <p>- `このホロメンのエール1枚につき、このアーツ+20`
-     *
-     * <p>- `自分のライフが3以下の時、このアーツ+70`
-     *
-     * <p>因此除了基本站位/等級/tag，還必須帶出：
-     *
-     * <p>- 實際附著 Cheer 數量
-     * <p>- 目前玩家的 LIFE
-     *
-     * <p>才能在攻擊時計算像 `HSD13-007`、`HSD07-009` 這類條件加傷。
-     */
-    record ArtSelfBonusTargetContext(
-        Long holomemId,
-        String stageZone,
-        String levelType,
-        Set<String> tags,
-        int attachedCheerCount,
-        int currentLife,
-        String oshiCardName
-    ) {}
-
-    /**
      * 描述提供常駐 Gift 的 holder。
      */
     record PassiveGiftHolderContext(
@@ -4951,57 +4925,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 載入藝能自體加成所需的 Holomem 狀態。
-     *
-     * <p>目前先沿用和 `PassiveGiftHpTargetContext` 類似的資料結構，因為 `HSD13-007` 這類文案
-     * 的核心條件同樣是「這張 Holomem 現在身上究竟有幾張 Cheer」。
-     */
-    ArtSelfBonusTargetContext loadArtSelfBonusTargetContext(Long matchId, Long userId, Long holomemId) {
-        return jdbcTemplate.query(
-            """
-            SELECT h.id,
-                   h.zone,
-                   h.current_level,
-                   mp.current_life,
-                   oshi.name AS oshi_card_name,
-                   COALESCE(c.tags_json, '[]'::jsonb)::text AS tags_json_text,
-                   (
-                       SELECT COUNT(*)
-                       FROM match_holomem_cheers hc
-                       WHERE hc.match_holomem_id = h.id
-                   ) AS attached_cheer_count
-            FROM match_holomems h
-            JOIN cards c ON c.card_id = h.card_id
-            JOIN match_players mp
-              ON mp.match_id = h.match_id
-             AND mp.user_id = h.owner_user_id
-            LEFT JOIN cards oshi ON oshi.card_id = mp.oshi_card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                return new ArtSelfBonusTargetContext(
-                    rs.getLong("id"),
-                    effectTextParser.normalizeEffectType(rs.getString("zone")),
-                    effectTextParser.normalizeEffectType(rs.getString("current_level")),
-                    parseTagsJson(rs.getString("tags_json_text")),
-                    rs.getInt("attached_cheer_count"),
-                    rs.getInt("current_life"),
-                    rs.getString("oshi_card_name")
-                );
-            },
-            matchId,
-            userId,
-            holomemId
-        );
-    }
-
-    /**
      * 載入指定 Holomem 自己的 passive gift 文案。
      *
      * <p>常駐 HP Gift 和 `HSD08-004` 這種中心位 aura 不同，效果來源就是這張卡自己，
@@ -5128,168 +5051,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 依藝能 raw text 判斷是否存在「附著 Cheer 數量決定的自體加傷」。
-     *
-     * <p>這裡刻意保持保守，只先吃明確且已驗證的模板：
-     *
-     * <p>- `このホロメンのエール1枚につき`
-     * <p>- `このアーツ+N`
-     *
-     * <p>如此可以先讓 `HSD13-007` 正確落地，同時避免把其他尚未完整建模的 BUFF 藝能誤算成
-     * 「每張 Cheer 都會放大傷害」。
-     */
-    int resolveArtTextDamageBonusFromRawText(
-        Long matchId,
-        Long userId,
-        int turnNumber,
-        String rawText,
-        ArtSelfBonusTargetContext attackerContext
-    ) {
-        if (!StringUtils.hasText(rawText) || attackerContext == null) {
-            return 0;
-        }
-        int total = 0;
-
-        // `HSD13-007` 的每張 Cheer 加傷和 `HSD07-009` 的低 LIFE 加傷都會寫成 `このアーツ+N`。
-        // 這裡先把 raw text 切成單一句子，再各自套條件，避免把同一張卡不同句子的 +N 混在一起重複計算。
-        String cheerClause = extractSentenceFromMarker(rawText, "このホロメンのエール1枚につき");
-        if (StringUtils.hasText(cheerClause) && cheerClause.contains("このアーツ")) {
-            int artBonusPerCheer = extractArtsModifierTotal(cheerClause);
-            if (artBonusPerCheer != 0 && attackerContext.attachedCheerCount() > 0) {
-                total += artBonusPerCheer * attackerContext.attachedCheerCount();
-            }
-        }
-
-        String lowLifeClause = extractSentenceFromMarker(rawText, "自分のライフが3以下の時");
-        if (StringUtils.hasText(lowLifeClause) && lowLifeClause.contains("このアーツ") && attackerContext.currentLife() <= 3) {
-            total += extractArtsModifierTotal(lowLifeClause);
-        }
-
-        String ownHolomemArtClause = extractSentenceFromMarker(rawText, "このターンに自分の〈");
-        if (StringUtils.hasText(ownHolomemArtClause)
-            && ownHolomemArtClause.contains("〉がアーツを使っていたなら")
-            && ownHolomemArtClause.contains("このアーツ")) {
-            List<String> requiredNames = giftTriggerMatcher.extractNameTokens(ownHolomemArtClause);
-            if (didUserUseArtWithNamedHolomemThisTurn(matchId, userId, turnNumber, requiredNames)) {
-                total += extractArtsModifierTotal(ownHolomemArtClause);
-            }
-        }
-
-        String ownOshiSkillClause = extractSentenceFromMarker(rawText, "このターンに自分の推しスキル");
-        if (StringUtils.hasText(ownOshiSkillClause)
-            && ownOshiSkillClause.contains("使っていたなら")
-            && ownOshiSkillClause.contains("このアーツ")) {
-            String skillName = extractReferencedOshiSkillName(ownOshiSkillClause);
-            if (didUserUseOshiSkillThisTurn(matchId, userId, turnNumber, skillName)) {
-                total += extractArtsModifierTotal(ownOshiSkillClause);
-            }
-        }
-
-        String attachedCheerThresholdClause = extractSentenceFromMarker(rawText, "このホロメンにエールが");
-        if (StringUtils.hasText(attachedCheerThresholdClause)
-            && attachedCheerThresholdClause.contains("枚以上付いているなら")
-            && attachedCheerThresholdClause.contains("このアーツ")) {
-            String requiredOshiName = resolveRequiredOshiName(rawText);
-            Integer minimumAttachedCheerCount = extractMinimumAttachedCheerCount(attachedCheerThresholdClause);
-            if (matchesRequiredOshiName(requiredOshiName, attackerContext.oshiCardName())
-                && minimumAttachedCheerCount != null
-                && attackerContext.attachedCheerCount() >= minimumAttachedCheerCount) {
-                total += extractArtsModifierTotal(attachedCheerThresholdClause);
-            }
-        }
-
-        return total;
-    }
-
-    private Integer extractMinimumAttachedCheerCount(String rawText) {
-        if (!StringUtils.hasText(rawText)) {
-            return null;
-        }
-        Matcher matcher = Pattern.compile("このホロメンにエールが([0-9０-９]+)枚以上付いている").matcher(rawText);
-        if (!matcher.find()) {
-            return null;
-        }
-        return parseSignedNumber(matcher.group(1));
-    }
-
-    private boolean matchesRequiredOshiName(String requiredOshiName, String actualOshiCardName) {
-        if (!StringUtils.hasText(requiredOshiName)) {
-            return true;
-        }
-        return StringUtils.hasText(actualOshiCardName) && actualOshiCardName.contains(requiredOshiName);
-    }
-
-    private boolean didUserUseArtWithNamedHolomemThisTurn(
-        Long matchId,
-        Long userId,
-        int turnNumber,
-        List<String> requiredNames
-    ) {
-        if (matchId == null || userId == null || turnNumber <= 0 || requiredNames == null || requiredNames.isEmpty()) {
-            return false;
-        }
-        List<String> attackerNames = jdbcTemplate.query(
-            """
-            SELECT c.name
-            FROM match_actions ma
-            JOIN cards c ON c.card_id = ma.payload ->> 'attackerCardId'
-            WHERE ma.match_id = ?
-              AND ma.user_id = ?
-              AND ma.turn_number = ?
-              AND ma.action_type = 'ATTACK_ART'
-            ORDER BY ma.id
-            """,
-            (rs, rowNum) -> rs.getString("name"),
-            matchId,
-            userId,
-            turnNumber
-        );
-        if (attackerNames.isEmpty()) {
-            return false;
-        }
-        for (String attackerName : attackerNames) {
-            if (containsAnyName(attackerName, requiredNames)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean didUserUseOshiSkillThisTurn(Long matchId, Long userId, int turnNumber, String skillName) {
-        if (matchId == null || userId == null || turnNumber <= 0 || !StringUtils.hasText(skillName)) {
-            return false;
-        }
-        Integer count = jdbcTemplate.query(
-            """
-            SELECT COUNT(*)
-            FROM match_actions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND turn_number = ?
-              AND action_type = 'USE_OSHI_SKILL'
-              AND payload ->> 'skillName' = ?
-            """,
-            rs -> rs.next() ? rs.getInt(1) : 0,
-            matchId,
-            userId,
-            turnNumber,
-            skillName
-        );
-        return count != null && count > 0;
-    }
-
-    private String extractReferencedOshiSkillName(String rawText) {
-        if (!StringUtils.hasText(rawText)) {
-            return "";
-        }
-        Matcher matcher = PASSIVE_GIFT_REFERENCED_OSHI_SKILL_PATTERN.matcher(rawText);
-        if (!matcher.find()) {
-            return "";
-        }
-        return matcher.group(2) == null ? "" : matcher.group(2).trim();
-    }
-
-    /**
      * 在藝能擊倒對手後，解析並執行該藝能自己的 follow-up 效果。
      *
      * <p>這裡處理的不是 Gift，也不是支援卡，而是「藝能文案本身」在 down 事件成立後才解鎖的後段效果。
@@ -5359,28 +5120,6 @@ public class MatchEffectService {
             clause = clause.substring(1).trim();
         }
         return StringUtils.hasText(clause) ? clause : null;
-    }
-
-    /**
-     * 從指定 marker 開始，擷取到同一句結束為止。
-     *
-     * <p>用途是把官方 raw text 拆成較小的條件片段，讓像 `HSD13-007`、`HSD07-009` 這種
-     * 同時含有多段藝能條件的卡，只解析自己那一句對應的 `アーツ+N`。
-     */
-    private String extractSentenceFromMarker(String rawText, String marker) {
-        if (!StringUtils.hasText(rawText) || !StringUtils.hasText(marker)) {
-            return null;
-        }
-        int markerIndex = rawText.indexOf(marker);
-        if (markerIndex < 0) {
-            return null;
-        }
-        String clause = rawText.substring(markerIndex).trim();
-        int sentenceEnd = clause.indexOf('。');
-        if (sentenceEnd >= 0) {
-            clause = clause.substring(0, sentenceEnd);
-        }
-        return clause.trim();
     }
 
     /**
@@ -5533,23 +5272,6 @@ public class MatchEffectService {
         } catch (Exception ignored) {
             return effectTextParser.normalizeDigits(passiveEffectJsonText);
         }
-    }
-
-    /**
-     * 從靜態文案中擷取藝能加成值。
-     *
-     * <p>這裡採可累加寫法，而不是只抓第一個 `アーツ+N`，是為了保留未來處理複數敘述的空間。
-     */
-    private int extractArtsModifierTotal(String rawText) {
-        if (!StringUtils.hasText(rawText)) {
-            return 0;
-        }
-        Matcher matcher = ARTS_MODIFIER_PATTERN.matcher(rawText);
-        int total = 0;
-        while (matcher.find()) {
-            total += parseSignedNumber(matcher.group(1));
-        }
-        return total;
     }
 
     /**
