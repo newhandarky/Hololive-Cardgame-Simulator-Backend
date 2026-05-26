@@ -18,6 +18,7 @@ public class MatchEffectCombatModifierService {
     private final JdbcTemplate jdbcTemplate;
     private final MatchEffectService matchEffectService;
     private final MatchDamageEffectiveHpResolverService damageEffectiveHpResolverService;
+    private final MatchAttachedSupportIncomingDamageReductionResolverService attachedSupportIncomingDamageReductionResolverService;
     private final MatchPassiveGiftIncomingDamageReductionResolverService passiveGiftIncomingDamageReductionResolverService;
 
     public MatchEffectCombatModifierService(
@@ -34,6 +35,8 @@ public class MatchEffectCombatModifierService {
             objectMapper,
             effectTextParser
         );
+        this.attachedSupportIncomingDamageReductionResolverService =
+            new MatchAttachedSupportIncomingDamageReductionResolverService(jdbcTemplate, effectTextParser);
         this.passiveGiftIncomingDamageReductionResolverService =
             new MatchPassiveGiftIncomingDamageReductionResolverService(
                 jdbcTemplate,
@@ -68,31 +71,11 @@ public class MatchEffectCombatModifierService {
         Long matchHolomemId,
         String targetStageZone
     ) {
-        if (matchId == null || matchHolomemId == null) {
-            return 0;
-        }
-        List<String> effectJsonTexts = jdbcTemplate.query(
-            """
-            SELECT sc.effect_json::text AS effect_json_text
-            FROM match_holomem_supports hs
-            JOIN support_cards sc ON sc.card_id = hs.support_card_id
-            JOIN match_holomems h ON h.id = hs.match_holomem_id
-            WHERE hs.match_holomem_id = ?
-              AND h.match_id = ?
-            ORDER BY hs.id
-            """,
-            (rs, rowNum) -> rs.getString("effect_json_text"),
+        return attachedSupportIncomingDamageReductionResolverService.resolveAttachedSupportIncomingDamageReduction(
+            matchId,
             matchHolomemId,
-            matchId
+            targetStageZone
         );
-        if (effectJsonTexts.isEmpty()) {
-            return 0;
-        }
-        int total = 0;
-        for (String effectJsonText : effectJsonTexts) {
-            total += matchEffectService.extractAttachedSupportIncomingDamageReduction(effectJsonText, targetStageZone);
-        }
-        return total;
     }
 
     public List<Map<String, Object>> previewAttachedSupportConditionalTriggers(
