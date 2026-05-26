@@ -33,6 +33,7 @@ class MatchBloomEffectDispatcher {
     private final MatchHealEffectExecutionService healEffectExecutionService;
     private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
     private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
+    private final MatchEffectTypeInferenceService effectTypeInferenceService;
     private final MatchEffectService effectService;
 
     MatchBloomEffectDispatcher(
@@ -56,6 +57,7 @@ class MatchBloomEffectDispatcher {
         MatchHealEffectExecutionService healEffectExecutionService,
         MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService,
         MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService,
+        MatchEffectTypeInferenceService effectTypeInferenceService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -78,6 +80,7 @@ class MatchBloomEffectDispatcher {
         this.healEffectExecutionService = healEffectExecutionService;
         this.moveZoneEffectExecutionService = moveZoneEffectExecutionService;
         this.cheerRemovalEffectExecutionService = cheerRemovalEffectExecutionService;
+        this.effectTypeInferenceService = effectTypeInferenceService;
         this.effectService = effectService;
     }
 
@@ -95,7 +98,7 @@ class MatchBloomEffectDispatcher {
         int archivedStackCostCount = -1;
 
         for (String effectType : effectTypes) {
-            String targetType = effectService.inferBloomTargetType(effectType);
+            String targetType = effectTypeInferenceService.inferTargetType(effectType);
             try {
                 switch (effectType) {
                     case "DRAW" -> executed.add(

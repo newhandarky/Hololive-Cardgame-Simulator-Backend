@@ -57,6 +57,7 @@ public class MatchEffectService {
     private final DiceService diceService;
     private final GameActionExecutor gameActionExecutor;
     private final EffectTextParser effectTextParser;
+    private final MatchEffectTypeInferenceService effectTypeInferenceService;
     private final GiftTriggerMatcher giftTriggerMatcher;
     private final SearchCriteriaParser searchCriteriaParser;
     private final MatchEffectSearchService searchService;
@@ -107,6 +108,7 @@ public class MatchEffectService {
         this.diceService = diceService;
         this.gameActionExecutor = gameActionExecutor;
         this.effectTextParser = new EffectTextParser(objectMapper);
+        this.effectTypeInferenceService = new MatchEffectTypeInferenceService(effectTextParser);
         this.giftTriggerMatcher = new GiftTriggerMatcher();
         this.searchCriteriaParser = new SearchCriteriaParser(jdbcTemplate, effectTextParser);
         this.searchService = new MatchEffectSearchService(jdbcTemplate, effectTextParser);
@@ -339,6 +341,7 @@ public class MatchEffectService {
             healEffectExecutionService,
             moveZoneEffectExecutionService,
             cheerRemovalEffectExecutionService,
+            effectTypeInferenceService,
             this
         );
         this.collabEffectDispatcher = new MatchCollabEffectDispatcher(
@@ -362,6 +365,7 @@ public class MatchEffectService {
             healEffectExecutionService,
             moveZoneEffectExecutionService,
             cheerRemovalEffectExecutionService,
+            effectTypeInferenceService,
             this
         );
     }
@@ -727,8 +731,12 @@ public class MatchEffectService {
         giftNode.put("rawText", giftText);
         giftTriggerContextService.appendStoredGiftExecutionContext(giftNode, storedTriggerContext);
         int clauseSeparatorIndex = findClauseSeparator(giftText);
-        List<String> costEffectTypes = clauseSeparatorIndex >= 0 ? inferBloomEffectTypes(extractCostClause(giftText)) : List.of();
-        List<String> resolvedEffectTypes = clauseSeparatorIndex >= 0 ? inferBloomEffectTypes(extractResolvedEffectClause(giftText)) : List.of();
+        List<String> costEffectTypes = clauseSeparatorIndex >= 0
+            ? effectTypeInferenceService.inferEffectTypes(extractCostClause(giftText))
+            : List.of();
+        List<String> resolvedEffectTypes = clauseSeparatorIndex >= 0
+            ? effectTypeInferenceService.inferEffectTypes(extractResolvedEffectClause(giftText))
+            : List.of();
         boolean hasMeaningfulSequentialCost = hasMeaningfulSequentialCost(costEffectTypes);
         List<String> effectTypes;
         if (clauseSeparatorIndex >= 0 && hasMeaningfulSequentialCost) {
@@ -740,14 +748,14 @@ public class MatchEffectService {
             // `...ダウンした時に使える：自分のデッキから...`
             //
             // 冒號前只是觸發敘述，沒有任何可支付成本。若這裡硬把前半句當成本段，
-            // `inferBloomEffectTypes(...)` 只會得到 `UNIMPLEMENTED`，接著被誤判成
+            // 共用文案分類器只會得到 `UNIMPLEMENTED`，接著被誤判成
             // 「前置成本未支付」，導致真正的 SEARCH 永遠不會執行。
             //
             // 因此只有在冒號前確實解析出可執行的成本 effect 時，才走 sequential cost。
             // 否則直接以冒號後的主要效果段為準。
             effectTypes = resolvedEffectTypes;
         } else {
-            effectTypes = inferBloomEffectTypes(giftText);
+            effectTypes = effectTypeInferenceService.inferEffectTypes(giftText);
         }
         List<Map<String, Object>> executed = new ArrayList<>();
         List<String> unsupported = new ArrayList<>();
@@ -892,7 +900,7 @@ public class MatchEffectService {
     /**
      * 判斷冒號前是否真的存在「需要先支付」的成本效果。
      *
-     * <p>目前 `inferBloomEffectTypes(...)` 在完全看不懂的句段上，會保底回傳 `UNIMPLEMENTED`。
+     * <p>目前共用文案分類器在完全看不懂的句段上，會保底回傳 `UNIMPLEMENTED`。
      * 這對一般效果偵測是可接受的，但若直接拿來當 sequential cost 判斷，就會把
      * `使える：`、`次の能力を得る：` 這類純敘述前半句誤認成成本段。
      *
@@ -964,7 +972,7 @@ public class MatchEffectService {
         JsonNode giftNode,
         String effectType
     ) {
-        String targetType = inferBloomTargetType(effectType);
+        String targetType = effectTypeInferenceService.inferTargetType(effectType);
         return switch (effectType) {
             case "DRAW" -> drawEffectExecutionService.executeDrawEffect(matchId, userId, effectType, giftNode);
             case "SEARCH" -> cardSelectionExecutionService.executeSearchEffect(matchId, userId, effectType, giftNode, null);
@@ -1110,7 +1118,7 @@ public class MatchEffectService {
      * 僅解析 Gift effectType，不執行效果。
      */
     GiftExecutionSummary previewGiftEffects(String giftText) {
-        List<String> effectTypes = inferBloomEffectTypes(giftText);
+        List<String> effectTypes = effectTypeInferenceService.inferEffectTypes(giftText);
         return new GiftExecutionSummary(effectTypes, List.of(), List.of(), List.of());
     }
 
@@ -2857,7 +2865,7 @@ public class MatchEffectService {
         if (!StringUtils.hasText(bloomText)) {
             return emptyBloomEffectPlan(null, null);
         }
-        List<String> effectTypes = inferBloomEffectTypes(bloomText);
+        List<String> effectTypes = effectTypeInferenceService.inferEffectTypes(bloomText);
         String normalizedCardId = normalize(bloomCardId);
         Integer diceRoll = normalizedCardId.startsWith("HBP04-059") ? null : resolveBloomDiceRoll(bloomText);
         Map<String, Object> bloomEffectPayload = buildFallbackEffectPayload(effectTypes, bloomText, null);
@@ -2921,7 +2929,7 @@ public class MatchEffectService {
         if (!StringUtils.hasText(collabText)) {
             return emptyBloomEffectPlan(null, null);
         }
-        List<String> effectTypes = inferBloomEffectTypes(collabText);
+        List<String> effectTypes = effectTypeInferenceService.inferEffectTypes(collabText);
         Integer diceRoll = resolveBloomDiceRoll(collabText);
         Map<String, Object> collabEffectPayload = buildFallbackEffectPayload(effectTypes, collabText, diceRoll);
         return activeBloomEffectPlan(effectTypes, collabEffectPayload, collabText, diceRoll);
@@ -3309,7 +3317,7 @@ public class MatchEffectService {
         List<String> effectTypes = resolveEffectTypes(readText(structuredNode, "type"), structuredNode);
         String rawText = readText(structuredNode, "rawText", "rawEffect", "text");
         if (effectTypes.isEmpty() && StringUtils.hasText(rawText)) {
-            effectTypes = inferBloomEffectTypes(rawText);
+            effectTypes = effectTypeInferenceService.inferEffectTypes(rawText);
         }
         if (effectTypes.isEmpty()) {
             effectTypes = List.of("UNIMPLEMENTED");
@@ -3557,157 +3565,6 @@ public class MatchEffectService {
             }
         }
         return trimmed.substring(0, end).trim();
-    }
-
-    /**
-     * 從 Bloom/Collab 文案推斷效果類型列表。
-     */
-    List<String> inferBloomEffectTypes(String bloomText) {
-        Set<String> effectTypes = new LinkedHashSet<>();
-        String text = effectTextParser.normalizeDigits(bloomText == null ? "" : bloomText);
-        if (!StringUtils.hasText(text)) {
-            effectTypes.add("UNIMPLEMENTED");
-            return new ArrayList<>(effectTypes);
-        }
-        boolean archiveReplacementToHand = text.contains("アーカイブするかわりに手札に加えられる");
-
-        if (text.contains("手札に加える")) {
-            effectTypes.add("SEARCH");
-        }
-        if (archiveReplacementToHand) {
-            effectTypes.add("REPLACE_ARCHIVE_WITH_HAND");
-            effectTypes.remove("SEARCH");
-        }
-        if (text.contains("手札に戻")) {
-            effectTypes.add("RETURN_TO_HAND");
-        }
-        if (text.contains("デッキの上に戻")) {
-            effectTypes.add("RETURN_TO_DECK_TOP");
-        }
-        if (text.contains("引く")) {
-            effectTypes.add("DRAW");
-        }
-        if (text.contains("エール") && text.contains("送")) {
-            effectTypes.add("ADD_CHEER");
-        }
-        if (
-            text.contains("付け替え")
-            || text.contains("割り振って付け")
-            || text.contains("付けられる")
-            || text.contains("付ける")
-        ) {
-            effectTypes.add("REATTACH");
-        }
-        if (text.contains("ステージに出せ") || text.contains("ステージに出す")) {
-            effectTypes.add("SUMMON_TO_STAGE");
-        }
-        if (text.contains("公開し、アーカイブ")) {
-            effectTypes.add("REVEAL_TO_ARCHIVE");
-        }
-        if (text.contains("アーカイブのホロメンを使ってBloom")) {
-            effectTypes.add("BLOOM_FROM_ARCHIVE");
-        }
-        if (text.contains("エールデッキの下に戻")) {
-            effectTypes.add("RETURN_CHEER_TO_DECK_BOTTOM");
-        }
-        if (text.contains("エールデッキに戻")) {
-            effectTypes.add("RETURN_CHEER_TO_DECK_BOTTOM");
-        }
-        if (text.contains("エール") && (text.contains("アーカイブできる") || text.contains("アーカイブする"))) {
-            effectTypes.add("REMOVE_CHEER");
-        }
-        if (
-            text.contains("重なっているホロメン")
-                && (text.contains("アーカイブできる") || text.contains("アーカイブする"))
-        ) {
-            effectTypes.add("ARCHIVE_STACK_CARD");
-        }
-        if (text.contains("手札") && (text.contains("アーカイブする") || text.contains("アーカイブできる"))) {
-            effectTypes.add("DISCARD_HAND");
-        }
-        if (text.contains("お休みさせる")) {
-            effectTypes.add("REST");
-        }
-        if (text.contains("センターホロメン") && text.contains("バックホロメン") && text.contains("交代")) {
-            effectTypes.add("SWAP_CENTER_BACK");
-        }
-        if (text.contains("ホロパワーにする")) {
-            effectTypes.add("MOVE_TO_HOLOPOWER");
-        }
-        if (text.contains("ダウンさせる") && text.contains("ダウンしても相手のライフは減らない")) {
-            effectTypes.add("DOWN_NO_LIFE");
-        }
-        if (
-            text.contains("ダウンさせる")
-                && text.contains("ライフ")
-                && (text.contains("追加") || text.contains("さらに"))
-        ) {
-            effectTypes.add("DOWN_EXTRA_LIFE");
-        }
-        if (text.contains("バトンタッチに必要な無色") && (text.contains("+") || text.contains("＋"))) {
-            effectTypes.add("BATON_TOUCH_COST_MODIFIER");
-        }
-        if (
-            text.contains("できない")
-                && (text.contains("バトンタッチ") || text.contains("移動") || text.contains("交代") || text.contains("Bloom") || text.contains("ブルーム"))
-        ) {
-            effectTypes.add("ACTION_LOCK");
-        }
-        if (text.contains("もう1回Bloomできる")) {
-            effectTypes.add("ALLOW_EXTRA_BLOOM");
-        }
-        if (text.contains("デッキの上から1枚を見る")) {
-            effectTypes.add("LOOK_TOP_DECK");
-        }
-        if (
-            text.contains("相手")
-                && text.contains("手札")
-                && (text.contains("見る") || text.contains("見"))
-        ) {
-            effectTypes.add("LOOK_OPPONENT_HAND");
-        }
-        if (
-            text.contains("ホロパワー")
-                && (text.contains("見る") || text.contains("見"))
-        ) {
-            effectTypes.add("LOOK_HOLOPOWER");
-        }
-        if (text.contains("交代できる")) {
-            effectTypes.add("SWAP_WITH_COLLAB");
-        }
-        if (text.contains("移動させる")) {
-            effectTypes.add("MOVE_ZONE");
-        }
-        if (text.contains("回復")) {
-            effectTypes.add("HEAL");
-        }
-        if (text.contains("ダメージ")) {
-            effectTypes.add("DAMAGE");
-        }
-        if (text.contains("勝利") || text.contains("敗北") || text.contains("引き分け")) {
-            effectTypes.add("MATCH_RESULT");
-        }
-        if (text.contains("アーツ")) {
-            if (text.contains("-")) {
-                effectTypes.add("DEBUFF");
-            } else if (text.contains("+")) {
-                effectTypes.add("BUFF");
-            }
-        }
-        if (effectTypes.isEmpty()) {
-            effectTypes.add("UNIMPLEMENTED");
-        }
-        return new ArrayList<>(effectTypes);
-    }
-
-    /**
-     * 依效果類型推斷 Bloom 目標側（SELF/ENEMY）。
-     */
-    String inferBloomTargetType(String effectType) {
-        return switch (effectType) {
-            case "DAMAGE", "DEBUFF", "MOVE_ZONE", "REST", "DOWN_NO_LIFE", "DOWN_EXTRA_LIFE" -> "ENEMY";
-            default -> "SELF";
-        };
     }
 
     /**

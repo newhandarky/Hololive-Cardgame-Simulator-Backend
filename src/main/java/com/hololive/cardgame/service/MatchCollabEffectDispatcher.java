@@ -33,6 +33,7 @@ class MatchCollabEffectDispatcher {
     private final MatchHealEffectExecutionService healEffectExecutionService;
     private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
     private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
+    private final MatchEffectTypeInferenceService effectTypeInferenceService;
     private final MatchEffectService effectService;
 
     MatchCollabEffectDispatcher(
@@ -56,6 +57,7 @@ class MatchCollabEffectDispatcher {
         MatchHealEffectExecutionService healEffectExecutionService,
         MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService,
         MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService,
+        MatchEffectTypeInferenceService effectTypeInferenceService,
         MatchEffectService effectService
     ) {
         this.cardSelectionExecutionService = cardSelectionExecutionService;
@@ -78,6 +80,7 @@ class MatchCollabEffectDispatcher {
         this.healEffectExecutionService = healEffectExecutionService;
         this.moveZoneEffectExecutionService = moveZoneEffectExecutionService;
         this.cheerRemovalEffectExecutionService = cheerRemovalEffectExecutionService;
+        this.effectTypeInferenceService = effectTypeInferenceService;
         this.effectService = effectService;
     }
 
@@ -96,7 +99,7 @@ class MatchCollabEffectDispatcher {
         int removedCheerCount = -1;
 
         for (String effectType : effectTypes) {
-            String targetType = effectService.inferBloomTargetType(effectType);
+            String targetType = effectTypeInferenceService.inferTargetType(effectType);
             String effectiveTargetType = targetType;
             if ("MOVE_ZONE".equals(effectType)) {
                 effectiveTargetType = effectService.resolveCollabMoveTargetType(collabEffectNode, targetType);

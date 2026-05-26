@@ -23,6 +23,7 @@ public class MatchTriggeredCombatEffectService {
         DiceService diceService
     ) {
         EffectTextParser effectTextParser = new EffectTextParser(objectMapper);
+        MatchEffectTypeInferenceService effectTypeInferenceService = new MatchEffectTypeInferenceService(effectTextParser);
         this.triggeredGiftDamagePreventionExecutionService =
             new MatchTriggeredGiftDamagePreventionExecutionService(
                 jdbcTemplate,
@@ -42,8 +43,8 @@ public class MatchTriggeredCombatEffectService {
                 objectMapper,
                 effectTextParser,
                 matchEffectService::extractAttachedSupportRawText,
-                matchEffectService::inferBloomEffectTypes,
-                matchEffectService::inferBloomTargetType,
+                effectTypeInferenceService::inferEffectTypes,
+                effectTypeInferenceService::inferTargetType,
                 matchEffectService::applySupportEffect
             );
     }
