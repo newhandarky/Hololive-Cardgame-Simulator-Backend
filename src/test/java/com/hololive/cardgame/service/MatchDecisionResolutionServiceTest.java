@@ -34,6 +34,9 @@ class MatchDecisionResolutionServiceTest {
     private final MatchRepository matchRepository = mock(MatchRepository.class);
     private final MatchActionRepository matchActionRepository = mock(MatchActionRepository.class);
     private final MatchTurnLifecycleService matchTurnLifecycleService = mock(MatchTurnLifecycleService.class);
+    private final MatchTurnStartCollabReturnService matchTurnStartCollabReturnService = mock(
+        MatchTurnStartCollabReturnService.class
+    );
     private final MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender = mock(
         MainStepGiftFollowupPayloadAppender.class
     );
@@ -47,6 +50,7 @@ class MatchDecisionResolutionServiceTest {
         new InteractionConfirmedPayloadBuilder(),
         new MatchTimestampService(),
         matchTurnLifecycleService,
+        matchTurnStartCollabReturnService,
         mainStepGiftFollowupPayloadAppender,
         gameActionExecutor,
         new SendCheerInteractionPayloadBuilder(),
@@ -227,6 +231,21 @@ class MatchDecisionResolutionServiceTest {
         assertThat(handled).isTrue();
         verify(pendingDecisionStore).markResolved(300L);
         verify(matchTurnLifecycleService).confirmLiveStartDecision(match, 10L, 1, 300L);
+        verify(matchActionRepository, never()).save(any());
+    }
+
+    @Test
+    void resolveLowCouplingDecisionShouldResolveTurnStartThroughLifecycleService() {
+        MatchEntity match = new MatchEntity();
+        match.setId(100L);
+        PendingDecision pending = pending("TURN_START", "TURN_START", List.of(), 0);
+
+        boolean handled = service.resolveLowCouplingDecision(100L, 10L, 2, match, pending, new ResolveDecisionRequest());
+
+        assertThat(handled).isTrue();
+        verify(pendingDecisionStore).markResolved(300L);
+        verify(matchTurnStartCollabReturnService).returnCollabToBackAsRested(100L, 10L);
+        verify(matchTurnLifecycleService).confirmTurnStartDecision(match, 10L, 2, 300L);
         verify(matchActionRepository, never()).save(any());
     }
 

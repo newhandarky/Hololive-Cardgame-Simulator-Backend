@@ -100,7 +100,8 @@
 - AAA-236 已搬 `LIVE_START` decision handler，保留 pending resolved 與 `MatchTurnLifecycleService.confirmLiveStartDecision(...)` lifecycle 委派。
 - AAA-237 已抽出 `SelectedCardValidationService`，集中 selected-card sanitize、min/max 與 candidate validation，讓 `SEND_CHEER`、`TRIGGER_EFFECT_CONFIRM`、`CARD_SELECTION` 共用既有驗證語意。
 - AAA-238 已抽出 `MatchTurnStartCollabReturnService`，集中 `TURN_START` 前 COLLAB 回 BACK rested 與 HBP03-039 / フワワ中心特例。
-- 下一批可開始搬移 `TURN_START` decision resolution；`TRIGGER_EFFECT_CONFIRM`、`CARD_SELECTION` 仍保留後續獨立處理。
+- AAA-239 已搬 `TURN_START` decision handler，保留 pending resolved、collab return helper 與 `MatchTurnLifecycleService.confirmTurnStartDecision(...)` lifecycle 委派。
+- 下一批可評估 `CARD_SELECTION` resolution 的 focused test / helper boundary；`TRIGGER_EFFECT_CONFIRM` 仍保留後續獨立處理。
 
 ## Phase A2：抽出 Decision Resolution Service
 

@@ -23,6 +23,7 @@ import org.springframework.util.StringUtils;
 class MatchDecisionResolutionService {
 
     private static final String ACTION_TYPE_TURN_CHEER = "TURN_CHEER";
+    private static final String DECISION_TYPE_TURN_START = "TURN_START";
     private static final String DECISION_TYPE_LIVE_START = "LIVE_START";
     private static final String DECISION_TYPE_DRAW_REVEAL = "DRAW_REVEAL";
     private static final String DECISION_TYPE_SEND_CHEER = "SEND_CHEER";
@@ -39,6 +40,7 @@ class MatchDecisionResolutionService {
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
     private final MatchTimestampService matchTimestampService;
     private final MatchTurnLifecycleService matchTurnLifecycleService;
+    private final MatchTurnStartCollabReturnService matchTurnStartCollabReturnService;
     private final MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender;
     private final GameActionExecutor gameActionExecutor;
     private final SendCheerInteractionPayloadBuilder sendCheerInteractionPayloadBuilder;
@@ -53,6 +55,7 @@ class MatchDecisionResolutionService {
         InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder,
         MatchTimestampService matchTimestampService,
         MatchTurnLifecycleService matchTurnLifecycleService,
+        MatchTurnStartCollabReturnService matchTurnStartCollabReturnService,
         MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender,
         GameActionExecutor gameActionExecutor,
         SendCheerInteractionPayloadBuilder sendCheerInteractionPayloadBuilder,
@@ -66,6 +69,7 @@ class MatchDecisionResolutionService {
         this.interactionConfirmedPayloadBuilder = interactionConfirmedPayloadBuilder;
         this.matchTimestampService = matchTimestampService;
         this.matchTurnLifecycleService = matchTurnLifecycleService;
+        this.matchTurnStartCollabReturnService = matchTurnStartCollabReturnService;
         this.mainStepGiftFollowupPayloadAppender = mainStepGiftFollowupPayloadAppender;
         this.gameActionExecutor = gameActionExecutor;
         this.sendCheerInteractionPayloadBuilder = sendCheerInteractionPayloadBuilder;
@@ -81,6 +85,10 @@ class MatchDecisionResolutionService {
         ResolveDecisionRequest request
     ) {
         String decisionType = MatchEffectValueHelper.normalize(pending == null ? null : pending.decisionType());
+        if (DECISION_TYPE_TURN_START.equals(decisionType)) {
+            resolveTurnStartDecision(matchId, userId, turnNumber, match, pending);
+            return true;
+        }
         if (DECISION_TYPE_LIVE_START.equals(decisionType)) {
             resolveLiveStartDecision(userId, turnNumber, match, pending);
             return true;
@@ -106,6 +114,23 @@ class MatchDecisionResolutionService {
             return true;
         }
         return false;
+    }
+
+    private void resolveTurnStartDecision(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        MatchEntity match,
+        PendingDecision pending
+    ) {
+        pendingDecisionStore.markResolved(pending.decisionId());
+        matchTurnStartCollabReturnService.returnCollabToBackAsRested(matchId, userId);
+        matchTurnLifecycleService.confirmTurnStartDecision(
+            match,
+            userId,
+            turnNumber,
+            pending.decisionId()
+        );
     }
 
     private void resolveLiveStartDecision(

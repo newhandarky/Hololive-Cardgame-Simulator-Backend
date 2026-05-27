@@ -47,7 +47,6 @@ public class MatchActionService {
 
     private static final Set<String> CHEER_SOURCE_ZONES = Set.of("HAND", "CHEER_DECK");
     private static final String SUPPORT_DECISION_TYPE_CARD_SELECTION = "CARD_SELECTION";
-    private static final String INTERACTION_TYPE_TURN_START = "TURN_START";
     private static final String INTERACTION_TYPE_SEND_CHEER = "SEND_CHEER";
     private static final String INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM = "TRIGGER_EFFECT_CONFIRM";
     private static final String ACTION_TYPE_DRAW_TURN = "DRAW_TURN";
@@ -250,6 +249,7 @@ public class MatchActionService {
             new InteractionConfirmedPayloadBuilder(),
             new MatchTimestampService(),
             matchTurnLifecycleService,
+            matchTurnStartCollabReturnService,
             mainStepGiftFollowupPayloadAppender,
             gameActionExecutor,
             new SendCheerInteractionPayloadBuilder(),
@@ -777,10 +777,6 @@ public class MatchActionService {
             throw new IllegalArgumentException("找不到待處理的決策");
         }
         String decisionType = normalizeZone(pending.decisionType());
-        if (INTERACTION_TYPE_TURN_START.equals(decisionType)) {
-            resolveTurnStartDecision(context, matchId, userId, pending);
-            return;
-        }
         if (INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM.equals(decisionType)) {
             resolveTriggerEffectConfirmDecision(context, matchId, userId, pending, request);
             return;
@@ -955,22 +951,6 @@ public class MatchActionService {
             matchRepository.saveAndFlush(context.match);
         }
         enqueueLifeLossSendCheerInteractions(context.match, matchId, effectSummary, context.turnNumber);
-    }
-
-    private void resolveTurnStartDecision(
-        ActionContext context,
-        Long matchId,
-        Long userId,
-        PendingDecision pending
-    ) {
-        pendingDecisionStore.markResolved(pending.decisionId());
-        matchTurnStartCollabReturnService.returnCollabToBackAsRested(matchId, userId);
-        matchTurnLifecycleService.confirmTurnStartDecision(
-            context.match,
-            userId,
-            context.turnNumber,
-            pending.decisionId()
-        );
     }
 
     /**
