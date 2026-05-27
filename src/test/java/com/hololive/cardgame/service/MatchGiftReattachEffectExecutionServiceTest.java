@@ -28,6 +28,8 @@ class MatchGiftReattachEffectExecutionServiceTest {
         effectTextParser
     );
     private final JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
+    private final MatchAddCheerTargetResolverService addCheerTargetResolverService =
+        mock(MatchAddCheerTargetResolverService.class);
     private final MatchCheerCandidateQueryService cheerCandidateQueryService =
         mock(MatchCheerCandidateQueryService.class);
 
@@ -157,6 +159,15 @@ class MatchGiftReattachEffectExecutionServiceTest {
     }
 
     private MatchGiftReattachEffectExecutionService newService(boolean diceHit) {
+        when(addCheerTargetResolverService.resolvePreferredAddCheerTargetHolomemId(
+            any(),
+            any(),
+            any(),
+            any(),
+            any(),
+            any(Boolean.class),
+            any()
+        )).thenReturn(22L);
         when(cheerCandidateQueryService.findCheerCardFromZone(any(), any(), eq("ARCHIVE")))
             .thenReturn(cheerFromZone("ARCHIVE"));
         when(cheerCandidateQueryService.findCheerCardFromZone(any(), any(), eq("CHEER_DECK")))
@@ -169,7 +180,7 @@ class MatchGiftReattachEffectExecutionServiceTest {
             this::noOpSummary,
             (matchId, userId) -> 20L,
             (matchId, ownerUserId, holderCardInstanceId, effectNode) -> 11L,
-            (matchId, userId, targetType, targetHolomemCardInstanceId, rawText, preferSelfBackTarget, excludedHolomemId) -> 22L,
+            addCheerTargetResolverService,
             (matchId, holomemId) -> 10L,
             (matchId, userId, targetHolomemCardInstanceId) -> 33L,
             cheerCandidateQueryService,

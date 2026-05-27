@@ -353,7 +353,7 @@ public class MatchEffectService {
             this::executeNoOpEffect,
             this::resolveOpponentUserId,
             this::resolveGiftEffectHolderHolomemId,
-            addCheerTargetResolverService::resolvePreferredAddCheerTargetHolomemId,
+            addCheerTargetResolverService,
             this::resolveHolomemOwner,
             this::resolveTargetHolomemId,
             cheerCandidateQueryService,

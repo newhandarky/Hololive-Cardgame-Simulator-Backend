@@ -18,7 +18,7 @@ final class MatchGiftReattachEffectExecutionService {
     private final NoOpEffectExecutor noOpEffectExecutor;
     private final OpponentUserResolver opponentUserResolver;
     private final GiftHolderHolomemResolver giftHolderHolomemResolver;
-    private final PreferredAddCheerTargetResolver preferredAddCheerTargetResolver;
+    private final MatchAddCheerTargetResolverService addCheerTargetResolverService;
     private final HolomemOwnerResolver holomemOwnerResolver;
     private final TargetHolomemResolver targetHolomemResolver;
     private final MatchCheerCandidateQueryService cheerCandidateQueryService;
@@ -32,7 +32,7 @@ final class MatchGiftReattachEffectExecutionService {
         NoOpEffectExecutor noOpEffectExecutor,
         OpponentUserResolver opponentUserResolver,
         GiftHolderHolomemResolver giftHolderHolomemResolver,
-        PreferredAddCheerTargetResolver preferredAddCheerTargetResolver,
+        MatchAddCheerTargetResolverService addCheerTargetResolverService,
         HolomemOwnerResolver holomemOwnerResolver,
         TargetHolomemResolver targetHolomemResolver,
         MatchCheerCandidateQueryService cheerCandidateQueryService,
@@ -45,7 +45,7 @@ final class MatchGiftReattachEffectExecutionService {
         this.noOpEffectExecutor = noOpEffectExecutor;
         this.opponentUserResolver = opponentUserResolver;
         this.giftHolderHolomemResolver = giftHolderHolomemResolver;
-        this.preferredAddCheerTargetResolver = preferredAddCheerTargetResolver;
+        this.addCheerTargetResolverService = addCheerTargetResolverService;
         this.holomemOwnerResolver = holomemOwnerResolver;
         this.targetHolomemResolver = targetHolomemResolver;
         this.cheerCandidateQueryService = cheerCandidateQueryService;
@@ -85,7 +85,7 @@ final class MatchGiftReattachEffectExecutionService {
             targetHolomemCardInstanceId,
             effectNode
         );
-        Long targetHolomemId = preferredAddCheerTargetResolver.resolve(
+        Long targetHolomemId = addCheerTargetResolverService.resolvePreferredAddCheerTargetHolomemId(
             matchId,
             sourceOwnerUserId,
             effectiveTargetType,
@@ -544,19 +544,6 @@ final class MatchGiftReattachEffectExecutionService {
     @FunctionalInterface
     interface GiftHolderHolomemResolver {
         Long resolve(Long matchId, Long ownerUserId, Long holderCardInstanceId, JsonNode effectNode);
-    }
-
-    @FunctionalInterface
-    interface PreferredAddCheerTargetResolver {
-        Long resolve(
-            Long matchId,
-            Long userId,
-            String targetType,
-            Long targetHolomemCardInstanceId,
-            String rawText,
-            boolean preferSelfBackTarget,
-            Long excludedHolomemId
-        );
     }
 
     @FunctionalInterface
