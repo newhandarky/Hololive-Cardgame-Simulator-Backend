@@ -9,7 +9,6 @@ import com.hololive.cardgame.game.action.EffectContext;
 import com.hololive.cardgame.game.action.EffectResolver;
 import com.hololive.cardgame.game.action.GameActionExecutor;
 import com.hololive.cardgame.game.action.ReduceLifeAction;
-import com.hololive.cardgame.game.action.SendCheerAction;
 import com.hololive.cardgame.service.effect.EffectTextParser;
 import com.hololive.cardgame.service.effect.GiftExecutionSummary;
 import com.hololive.cardgame.service.effect.GiftTriggerMatcher;
@@ -93,6 +92,9 @@ public class MatchEffectService {
     private final MatchDamageEffectExecutionService damageEffectExecutionService;
     private final MatchGiftArchiveReturnEffectExecutionService giftArchiveReturnEffectExecutionService;
     private final MatchGiftReattachEffectExecutionService giftReattachEffectExecutionService;
+    private final MatchAddCheerTargetResolverService addCheerTargetResolverService;
+    private final MatchAddCheerSourceResolverService addCheerSourceResolverService;
+    private final MatchGiftAddCheerEffectExecutionService giftAddCheerEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
     private final MatchGiftEffectDispatcher giftEffectDispatcher;
@@ -332,6 +334,16 @@ public class MatchEffectService {
             jdbcTemplate,
             effectTextParser
         );
+        this.addCheerTargetResolverService = new MatchAddCheerTargetResolverService(
+            jdbcTemplate,
+            searchCriteriaParser,
+            this::resolveEffectTargetHolomemId
+        );
+        this.addCheerSourceResolverService = new MatchAddCheerSourceResolverService(
+            jdbcTemplate,
+            searchCriteriaParser,
+            this::findCheerCardFromZone
+        );
         this.giftReattachEffectExecutionService = new MatchGiftReattachEffectExecutionService(
             jdbcTemplate,
             effectTextParser,
@@ -340,10 +352,20 @@ public class MatchEffectService {
             this::executeNoOpEffect,
             this::resolveOpponentUserId,
             this::resolveGiftEffectHolderHolomemId,
-            this::resolvePreferredAddCheerTargetHolomemId,
+            addCheerTargetResolverService::resolvePreferredAddCheerTargetHolomemId,
             this::resolveHolomemOwner,
             this::resolveTargetHolomemId,
             this::findCheerCardFromZone,
+            this::resolveHolomemCardInstanceId
+        );
+        this.giftAddCheerEffectExecutionService = new MatchGiftAddCheerEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            gameActionExecutor,
+            this::resolveCurrentTurnNumber,
+            this::resolveCheerCount,
+            addCheerTargetResolverService,
+            addCheerSourceResolverService,
             this::resolveHolomemCardInstanceId
         );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
@@ -368,6 +390,7 @@ public class MatchEffectService {
             moveZoneEffectExecutionService,
             cheerRemovalEffectExecutionService,
             giftReattachEffectExecutionService,
+            giftAddCheerEffectExecutionService,
             effectTypeInferenceService,
             this
         );
@@ -393,6 +416,7 @@ public class MatchEffectService {
             moveZoneEffectExecutionService,
             cheerRemovalEffectExecutionService,
             giftReattachEffectExecutionService,
+            giftAddCheerEffectExecutionService,
             effectTypeInferenceService,
             this
         );
@@ -416,7 +440,12 @@ public class MatchEffectService {
             downEffectExecutionService,
             healEffectExecutionService,
             effectTypeInferenceService,
-            new MatchGiftEffectServiceHandlers(this, giftArchiveReturnEffectExecutionService, giftReattachEffectExecutionService)
+            new MatchGiftEffectServiceHandlers(
+                this,
+                giftArchiveReturnEffectExecutionService,
+                giftReattachEffectExecutionService,
+                giftAddCheerEffectExecutionService
+            )
         );
     }
 
@@ -478,7 +507,7 @@ public class MatchEffectService {
                         cardSelectionExecutionService.executeReturnToDeckTopEffect(matchId, userId, type, effectNode, selectedCardInstanceIds)
                     );
                     case "ADD_CHEER" -> executed.add(
-                        executeAddCheerEffect(
+                        giftAddCheerEffectExecutionService.executeAddCheerEffect(
                             matchId,
                             userId,
                             type,
@@ -1237,243 +1266,6 @@ public class MatchEffectService {
         return count != null && count > 0;
     }
 
-    /**
-     * 執行附加 cheer 效果，包含目標解析與來源區挑選。
-     */
-    Map<String, Object> executeAddCheerEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode,
-        String targetType,
-        Long targetHolomemCardInstanceId
-    ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        String addCheerEffectClause = extractResolvedEffectClause(rawText);
-        boolean preferSelfBackTarget =
-            !isOpponentTargetType(normalize(targetType))
-                && StringUtils.hasText(addCheerEffectClause)
-                && addCheerEffectClause.contains("バックホロメン");
-
-        Long targetHolomemId = resolvePreferredAddCheerTargetHolomemId(
-            matchId,
-            userId,
-            targetType,
-            targetHolomemCardInstanceId,
-            addCheerEffectClause,
-            preferSelfBackTarget,
-            null
-        );
-        if (targetHolomemId == null) {
-            throw new IllegalStateException("ADD_CHEER 需要指定可用的我方 Holomen");
-        }
-        int requestedCount = resolveCheerCount(effectNode, 1);
-        int attachCount = Math.max(requestedCount, 1);
-
-        List<Long> attachedCardInstanceIds = new ArrayList<>();
-        List<String> sourceZones = new ArrayList<>();
-        for (int i = 0; i < attachCount; i++) {
-            Map<String, Object> source = resolvePreferredAddCheerSource(matchId, userId, addCheerEffectClause);
-            if (source == null) {
-                break;
-            }
-            Long cardInstanceId = asLong(source.get("id"));
-            String sourceZone = normalize(source.get("zone"));
-            String cardId = asText(source.get("card_id"));
-            if (cardInstanceId == null || !StringUtils.hasText(cardId)) {
-                continue;
-            }
-            EffectContext actionContext = new EffectContext(
-                matchId,
-                userId,
-                resolveCurrentTurnNumber(matchId),
-                effectType,
-                cardInstanceId,
-                cardId
-            );
-            SendCheerAction sendCheerAction = new SendCheerAction(cardInstanceId, targetHolomemId, effectType);
-            List<ActionResult> actionResults = gameActionExecutor.execute(actionContext, List.of(sendCheerAction));
-            if (!actionResults.isEmpty() && actionResults.get(0).success()) {
-                attachedCardInstanceIds.add(cardInstanceId);
-                sourceZones.add(sourceZone);
-                continue;
-            }
-
-            // fallback: preserve previous behavior when pipeline fails unexpectedly
-            int moved = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'STAGE',
-                    order_index = NULL,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone IN ('CHEER_DECK','ARCHIVE','HAND')
-                """,
-                cardInstanceId,
-                matchId,
-                userId
-            );
-            if (moved == 1) {
-                jdbcTemplate.update(
-                    """
-                    INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
-                    VALUES (?, ?, ?, FALSE)
-                    """,
-                    targetHolomemId,
-                    cardInstanceId,
-                    cardId
-                );
-                attachedCardInstanceIds.add(cardInstanceId);
-                sourceZones.add(sourceZone);
-            }
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("attachRequested", attachCount);
-        summary.put("attachApplied", attachedCardInstanceIds.size());
-        summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
-        summary.put("attachedCheerCardInstanceIds", attachedCardInstanceIds);
-        summary.put("sourceZones", sourceZones);
-        return summary;
-    }
-
-    /**
-     * ADD_CHEER 會混到兩種不同需求：
-     * 1. 純粹把某張可用 Cheer 貼到預設目標。
-     * 2. 文案明確限制「只能從 Archive」或「只能貼到帶指定 tag 的 Holomem」。
-     *
-     * 這裡先把「不需要額外互動、可由文案穩定推斷」的條件集中處理，
-     * 讓 Gift / Bloom / Collab 共用同一套 deterministic 選目標規則。
-     */
-    private Long resolvePreferredAddCheerTargetHolomemId(
-        Long matchId,
-        Long userId,
-        String targetType,
-        Long targetHolomemCardInstanceId,
-        String rawText,
-        boolean preferSelfBackTarget,
-        Long excludedHolomemId
-    ) {
-        String targetClause = extractAddCheerTargetClause(rawText);
-        boolean explicitAnyOwnHolomemTarget = targetClause.contains("自分のホロメン");
-        boolean excludeCurrentHolder = targetClause.contains("他の") || targetClause.contains("以外");
-        String requiredTag = searchCriteriaParser.resolveTagFromKnownTags(targetClause);
-        String requiredZone = resolveRequiredAddCheerTargetZone(targetClause, preferSelfBackTarget);
-        String requiredLevelType = resolveRequiredAddCheerTargetLevelType(targetClause);
-        String requiredNameContains = resolveTargetNameContains(targetClause);
-
-        // 只要文案沒有額外限制，就維持既有 targetType 解析邏輯，避免改動面過大。
-        if (
-            !excludeCurrentHolder &&
-            !StringUtils.hasText(requiredTag) &&
-            !StringUtils.hasText(requiredZone) &&
-            !StringUtils.hasText(requiredLevelType) &&
-            !StringUtils.hasText(requiredNameContains)
-        ) {
-            Long resolvedTarget = resolveEffectTargetHolomemId(
-                matchId,
-                userId,
-                targetType,
-                targetHolomemCardInstanceId,
-                false
-            );
-            if (resolvedTarget != null) {
-                return resolvedTarget;
-            }
-            if (explicitAnyOwnHolomemTarget) {
-                return findPreferredOwnedStageHolomemId(matchId, userId, "", "", "", "", null);
-            }
-            return null;
-        }
-
-        Long restrictedTarget = findPreferredOwnedStageHolomemId(
-            matchId,
-            userId,
-            requiredZone,
-            requiredLevelType,
-            requiredNameContains,
-            requiredTag,
-            excludeCurrentHolder ? excludedHolomemId : null
-        );
-        if (restrictedTarget != null) {
-            return restrictedTarget;
-        }
-
-        // 有些效果文案同時帶 tag/zone 條件，找不到符合者時應視為不能執行，
-        // 不能回退成隨便貼到中心，否則會把「限定目標」做成「任意目標」。
-        return null;
-    }
-
-    /**
-     * 依文案限制選出優先的自家場上 Holomem。
-     *
-     * <p>排序固定為 `CENTER -> COLLAB -> BACK`，讓沒有互動 UI 的自動結算仍保持 deterministic。
-     */
-    private Long findPreferredOwnedStageHolomemId(
-        Long matchId,
-        Long userId,
-        String requiredZone,
-        String requiredLevelType,
-        String requiredNameContains,
-        String requiredTag,
-        Long excludedHolomemId
-    ) {
-        List<Object> args = new ArrayList<>();
-        StringBuilder sql = new StringBuilder(
-            """
-            SELECT h.id
-            FROM match_holomems h
-            JOIN cards c ON c.card_id = h.card_id
-            JOIN member_cards m ON m.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-            """
-        );
-        args.add(matchId);
-        args.add(userId);
-
-        if (StringUtils.hasText(requiredZone)) {
-            sql.append("\n  AND h.zone = ?");
-            args.add(requiredZone);
-        }
-        if (StringUtils.hasText(requiredLevelType)) {
-            sql.append("\n  AND m.level_type = ?");
-            args.add(requiredLevelType);
-        }
-        if (StringUtils.hasText(requiredNameContains)) {
-            sql.append("\n  AND c.name ILIKE '%' || ? || '%'");
-            args.add(requiredNameContains);
-        }
-        if (StringUtils.hasText(requiredTag)) {
-            sql.append("\n  AND c.tags_json @> to_jsonb(ARRAY[?]::text[])");
-            args.add(requiredTag);
-        }
-        if (excludedHolomemId != null && excludedHolomemId > 0) {
-            sql.append("\n  AND h.id <> ?");
-            args.add(excludedHolomemId);
-        }
-
-        sql.append(
-            """
-
-            ORDER BY CASE h.zone
-                        WHEN 'CENTER' THEN 1
-                        WHEN 'COLLAB' THEN 2
-                        WHEN 'BACK' THEN 3
-                        ELSE 9
-                     END,
-                     h.id
-            LIMIT 1
-            """
-        );
-
-        return jdbcTemplate.query(sql.toString(), rs -> rs.next() ? rs.getLong("id") : null, args.toArray());
-    }
-
     private Long resolveGiftEffectHolderHolomemId(
         Long matchId,
         Long ownerUserId,
@@ -1497,69 +1289,6 @@ public class MatchEffectService {
 
     private List<String> toTextList(Object value) {
         return MatchEffectValueHelper.toTextList(value);
-    }
-
-    /**
-     * 從文案推斷 ADD_CHEER 的來源區。
-     *
-     * 目前先補齊專案裡最常見且已經有官方卡需求的兩種來源：
-     * - アーカイブのエール
-     * - エールデッキの上から
-     *
-     * 若文案沒有明示，仍保留原本的 CHEER_DECK > ARCHIVE > HAND fallback。
-     */
-    private Map<String, Object> resolvePreferredAddCheerSource(Long matchId, Long userId, String rawText) {
-        String sourceClause = extractAddCheerSourceClause(rawText);
-        SearchCriteria sourceCriteria = resolveSearchCriteriaFromRawText(sourceClause);
-
-        if (StringUtils.hasText(sourceClause) && sourceClause.contains("アーカイブの")) {
-            return findCheerCardFromZone(matchId, userId, "ARCHIVE", sourceCriteria);
-        }
-        if (StringUtils.hasText(sourceClause) && sourceClause.contains("エールデッキ")) {
-            return findCheerCardFromZone(matchId, userId, "CHEER_DECK", sourceCriteria);
-        }
-        return findAttachableCheerCard(matchId, userId);
-    }
-
-    /**
-     * 由文案判斷 ADD_CHEER 的目標區位限制。
-     */
-    private String resolveRequiredAddCheerTargetZone(String rawText, boolean preferSelfBackTarget) {
-        if (!StringUtils.hasText(rawText)) {
-            return preferSelfBackTarget ? "BACK" : "";
-        }
-        if (rawText.contains("バックホロメン")) {
-            return "BACK";
-        }
-        if (rawText.contains("コラボホロメン")) {
-            return "COLLAB";
-        }
-        if (rawText.contains("センターホロメン")) {
-            return "CENTER";
-        }
-        return preferSelfBackTarget ? "BACK" : "";
-    }
-
-    /**
-     * 由文案判斷 ADD_CHEER 的目標等級限制。
-     */
-    private String resolveRequiredAddCheerTargetLevelType(String rawText) {
-        if (!StringUtils.hasText(rawText)) {
-            return "";
-        }
-        if (rawText.contains("2ndホロメン")) {
-            return "SECOND";
-        }
-        if (rawText.contains("1stホロメン")) {
-            return "FIRST";
-        }
-        if (rawText.contains("Debutホロメン")) {
-            return "DEBUT";
-        }
-        if (rawText.contains("Spotホロメン")) {
-            return "SPOT";
-        }
-        return "";
     }
 
     /**
@@ -1590,7 +1319,7 @@ public class MatchEffectService {
         String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
         String requiredLevelType = normalizeLevelType(effectTextParser.extractText(effectNode, "stackCostLevelType", "costLevelType"));
         if (!StringUtils.hasText(requiredLevelType)) {
-            requiredLevelType = resolveRequiredAddCheerTargetLevelType(rawText);
+            requiredLevelType = addCheerTargetResolverService.resolveRequiredAddCheerTargetLevelType(rawText);
         }
 
         Long topCardInstanceId = selfHolomemCardInstanceId != null
@@ -4025,58 +3754,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 從送 Cheer 效果段中擷取來源描述。
-     *
-     * <p>例如：
-     * - `自分のアーカイブの黄エール1枚を自分の〈虎金妃笑虎〉に送る`
-     * 這裡真正決定來源的是前半句 `自分のアーカイブの黄エール1枚`。
-     */
-    private String extractAddCheerSourceClause(String rawText) {
-        if (!StringUtils.hasText(rawText)) {
-            return "";
-        }
-        String clause = rawText;
-        int sourceStart = -1;
-        String[] markers = {
-            "自分のエールデッキ",
-            "相手のエールデッキ",
-            "エールデッキ",
-            "自分のアーカイブの",
-            "相手のアーカイブの",
-            "アーカイブの"
-        };
-        for (String marker : markers) {
-            int index = rawText.lastIndexOf(marker);
-            if (index > sourceStart) {
-                sourceStart = index;
-            }
-        }
-        if (sourceStart >= 0) {
-            clause = rawText.substring(sourceStart);
-        }
-        int splitIndex = clause.indexOf('を');
-        return splitIndex < 0 ? clause.trim() : clause.substring(0, splitIndex).trim();
-    }
-
-    /**
-     * 從送 Cheer 效果段中擷取目標描述。
-     *
-     * <p>例如：
-     * - `自分のアーカイブの黄エール1枚を自分の〈虎金妃笑虎〉に送る`
-     * 這裡真正決定貼到誰的是中段 `自分の〈虎金妃笑虎〉`。
-     */
-    private String extractAddCheerTargetClause(String rawText) {
-        if (!StringUtils.hasText(rawText)) {
-            return "";
-        }
-        Matcher matcher = Pattern.compile("を(.+?)に送る").matcher(rawText);
-        if (matcher.find()) {
-            return matcher.group(1).trim();
-        }
-        return rawText;
-    }
-
-    /**
      * 直接把一小段 raw text 轉成 SearchCriteria。
      *
      * <p>這個 helper 的重點是降低 execution 層建立暫時 JSON probe 的重覆樣板，
@@ -4089,15 +3766,6 @@ public class MatchEffectService {
         ObjectNode probe = objectMapper.createObjectNode();
         probe.put("rawText", rawText);
         return searchCriteriaParser.resolveSearchCriteria(probe);
-    }
-
-    /**
-     * 從目標子句推斷名稱限制。
-     *
-     * <p>這裡只看 `送 Cheer` 的目標段，避免把來源描述裡的卡名誤當成目標名稱。
-     */
-    private String resolveTargetNameContains(String targetClause) {
-        return resolveSearchCriteriaFromRawText(targetClause).nameContains();
     }
 
     /**
@@ -4719,37 +4387,6 @@ public class MatchEffectService {
      */
     boolean isGiftAlreadyUsedThisTurn(Long matchId, Long userId, int turnNumber, Long holderHolomemId) {
         return giftTurnUsageReader.isGiftAlreadyUsedThisTurn(matchId, userId, turnNumber, holderHolomemId);
-    }
-
-    /**
-     * 取得可附加的 cheer 卡候選，依 CHEER_DECK > ARCHIVE > HAND 優先。
-     */
-    private Map<String, Object> findAttachableCheerCard(Long matchId, Long userId) {
-        return jdbcTemplate.query(
-            """
-            SELECT mc.id, mc.card_id, mc.zone
-            FROM match_cards mc
-            JOIN cheer_cards cc ON cc.card_id = mc.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.zone IN ('CHEER_DECK','ARCHIVE','HAND')
-            ORDER BY CASE mc.zone WHEN 'CHEER_DECK' THEN 1 WHEN 'ARCHIVE' THEN 2 WHEN 'HAND' THEN 3 ELSE 9 END,
-                     mc.order_index NULLS LAST, mc.id
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", rs.getLong("id"));
-                row.put("card_id", rs.getString("card_id"));
-                row.put("zone", rs.getString("zone"));
-                return row;
-            },
-            matchId,
-            userId
-        );
     }
 
     /**

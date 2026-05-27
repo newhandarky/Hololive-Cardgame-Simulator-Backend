@@ -8,15 +8,18 @@ final class MatchGiftEffectServiceHandlers implements MatchGiftEffectDispatcher.
     private final MatchEffectService effectService;
     private final MatchGiftArchiveReturnEffectExecutionService archiveReturnEffectExecutionService;
     private final MatchGiftReattachEffectExecutionService reattachEffectExecutionService;
+    private final MatchGiftAddCheerEffectExecutionService addCheerEffectExecutionService;
 
     MatchGiftEffectServiceHandlers(
         MatchEffectService effectService,
         MatchGiftArchiveReturnEffectExecutionService archiveReturnEffectExecutionService,
-        MatchGiftReattachEffectExecutionService reattachEffectExecutionService
+        MatchGiftReattachEffectExecutionService reattachEffectExecutionService,
+        MatchGiftAddCheerEffectExecutionService addCheerEffectExecutionService
     ) {
         this.effectService = effectService;
         this.archiveReturnEffectExecutionService = archiveReturnEffectExecutionService;
         this.reattachEffectExecutionService = reattachEffectExecutionService;
+        this.addCheerEffectExecutionService = addCheerEffectExecutionService;
     }
 
     @Override
@@ -45,7 +48,7 @@ final class MatchGiftEffectServiceHandlers implements MatchGiftEffectDispatcher.
         String targetType,
         Long targetHolomemCardInstanceId
     ) {
-        return effectService.executeAddCheerEffect(
+        return addCheerEffectExecutionService.executeAddCheerEffect(
             matchId,
             userId,
             effectType,

@@ -34,6 +34,7 @@ class MatchBloomEffectDispatcher {
     private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
     private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
     private final MatchGiftReattachEffectExecutionService reattachEffectExecutionService;
+    private final MatchGiftAddCheerEffectExecutionService addCheerEffectExecutionService;
     private final MatchEffectTypeInferenceService effectTypeInferenceService;
     private final MatchEffectService effectService;
 
@@ -59,6 +60,7 @@ class MatchBloomEffectDispatcher {
         MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService,
         MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService,
         MatchGiftReattachEffectExecutionService reattachEffectExecutionService,
+        MatchGiftAddCheerEffectExecutionService addCheerEffectExecutionService,
         MatchEffectTypeInferenceService effectTypeInferenceService,
         MatchEffectService effectService
     ) {
@@ -83,6 +85,7 @@ class MatchBloomEffectDispatcher {
         this.moveZoneEffectExecutionService = moveZoneEffectExecutionService;
         this.cheerRemovalEffectExecutionService = cheerRemovalEffectExecutionService;
         this.reattachEffectExecutionService = reattachEffectExecutionService;
+        this.addCheerEffectExecutionService = addCheerEffectExecutionService;
         this.effectTypeInferenceService = effectTypeInferenceService;
         this.effectService = effectService;
     }
@@ -117,7 +120,7 @@ class MatchBloomEffectDispatcher {
                         cardSelectionExecutionService.executeReturnToDeckTopEffect(matchId, userId, effectType, bloomEffectNode, null)
                     );
                     case "ADD_CHEER" -> executed.add(
-                        effectService.executeAddCheerEffect(
+                        addCheerEffectExecutionService.executeAddCheerEffect(
                             matchId,
                             userId,
                             effectType,
