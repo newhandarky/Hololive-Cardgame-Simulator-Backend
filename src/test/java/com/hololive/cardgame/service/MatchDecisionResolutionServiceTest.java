@@ -2,6 +2,7 @@ package com.hololive.cardgame.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -13,12 +14,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hololive.cardgame.dto.ResolveDecisionRequest;
 import com.hololive.cardgame.entity.MatchActionEntity;
 import com.hololive.cardgame.entity.MatchEntity;
+import com.hololive.cardgame.game.action.ActionResult;
+import com.hololive.cardgame.game.action.EffectContext;
+import com.hololive.cardgame.game.action.GameActionExecutor;
 import com.hololive.cardgame.model.MatchPhase;
 import com.hololive.cardgame.repository.MatchActionRepository;
 import com.hololive.cardgame.repository.MatchRepository;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 class MatchDecisionResolutionServiceTest {
@@ -31,6 +37,7 @@ class MatchDecisionResolutionServiceTest {
     private final MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender = mock(
         MainStepGiftFollowupPayloadAppender.class
     );
+    private final GameActionExecutor gameActionExecutor = mock(GameActionExecutor.class);
     private final MatchDecisionResolutionService service = new MatchDecisionResolutionService(
         jdbcTemplate,
         pendingDecisionStore,
@@ -40,7 +47,9 @@ class MatchDecisionResolutionServiceTest {
         new InteractionConfirmedPayloadBuilder(),
         new MatchTimestampService(),
         matchTurnLifecycleService,
-        mainStepGiftFollowupPayloadAppender
+        mainStepGiftFollowupPayloadAppender,
+        gameActionExecutor,
+        new SendCheerInteractionPayloadBuilder()
     );
 
     @Test
@@ -84,7 +93,7 @@ class MatchDecisionResolutionServiceTest {
     void resolveLowCouplingDecisionShouldReturnFalseForUnsupportedDecisionType() {
         MatchEntity match = new MatchEntity();
         match.setId(100L);
-        PendingDecision pending = pending("SEND_CHEER", List.of(500L), 1);
+        PendingDecision pending = pending("TRIGGER_EFFECT_CONFIRM", List.of(500L), 1);
 
         boolean handled = service.resolveLowCouplingDecision(100L, 10L, 2, match, pending, new ResolveDecisionRequest());
 
@@ -157,11 +166,62 @@ class MatchDecisionResolutionServiceTest {
         );
     }
 
+    @Test
+    void resolveLowCouplingDecisionShouldResolveTurnSendCheerAndWriteTurnCheerAction() {
+        MatchEntity match = new MatchEntity();
+        match.setId(100L);
+        match.setCurrentPhase(MatchPhase.CHEER.name());
+        PendingDecision pending = pending("SEND_CHEER", "TURN_CHEER", List.of(800L), 1);
+        ResolveDecisionRequest request = new ResolveDecisionRequest();
+        request.setSelectedCardInstanceIds(List.of(800L));
+        when(jdbcTemplate.query(
+            contains("FROM match_holomems"),
+            any(ResultSetExtractor.class),
+            eq(100L),
+            eq(10L),
+            eq(800L)
+        )).thenReturn(900L);
+        when(jdbcTemplate.queryForList(
+            contains("FROM match_cards"),
+            eq(400L),
+            eq(100L),
+            eq(10L)
+        )).thenReturn(List.of(Map.of("id", 400L, "card_id", "hY01-001", "zone", "CHEER_DECK")));
+        when(jdbcTemplate.queryForObject(
+            contains("FROM cheer_cards"),
+            eq(Integer.class),
+            eq("hY01-001")
+        )).thenReturn(1);
+        when(gameActionExecutor.execute(any(EffectContext.class), anyList()))
+            .thenReturn(List.of(ActionResult.success("SEND_CHEER", Map.of())));
+        when(matchActionRepository.findMaxActionOrderByTurn(100L, 2)).thenReturn(3);
+        ArgumentCaptor<MatchActionEntity> actionCaptor = ArgumentCaptor.forClass(MatchActionEntity.class);
+        when(matchActionRepository.save(actionCaptor.capture())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        boolean handled = service.resolveLowCouplingDecision(100L, 10L, 2, match, pending, request);
+
+        assertThat(handled).isTrue();
+        verify(gameActionExecutor).execute(any(EffectContext.class), anyList());
+        verify(pendingDecisionStore).markResolved(300L);
+        verify(matchRepository).saveAndFlush(match);
+        assertThat(match.getCurrentPhase()).isEqualTo(MatchPhase.MAIN.name());
+        verify(mainStepGiftFollowupPayloadAppender).append(any(), eq(100L), eq(10L), eq(2));
+        assertThat(actionCaptor.getAllValues())
+            .extracting(MatchActionEntity::getActionType)
+            .containsExactly("INTERACTION_CONFIRMED", "TURN_CHEER");
+        assertThat(actionCaptor.getAllValues().get(0).getPayload()).contains("\"interactionType\":\"SEND_CHEER\"");
+        assertThat(actionCaptor.getAllValues().get(1).getPayload()).contains("\"targetHolomemCardInstanceId\":800");
+    }
+
     private PendingDecision pending(String decisionType, List<Long> candidates, int maxSelect) {
+        return pending(decisionType, "PLAY_SUPPORT", candidates, maxSelect);
+    }
+
+    private PendingDecision pending(String decisionType, String sourceActionType, List<Long> candidates, int maxSelect) {
         return new PendingDecision(
             300L,
             decisionType,
-            "PLAY_SUPPORT",
+            sourceActionType,
             400L,
             "hBP01-001",
             decisionType,

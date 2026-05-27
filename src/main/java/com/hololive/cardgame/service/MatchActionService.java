@@ -22,7 +22,6 @@ import com.hololive.cardgame.game.action.EffectContext;
 import com.hololive.cardgame.game.action.GameActionExecutor;
 import com.hololive.cardgame.game.action.MoveZoneAction;
 import com.hololive.cardgame.game.action.ReduceLifeAction;
-import com.hololive.cardgame.game.action.SendCheerAction;
 import com.hololive.cardgame.model.LobbyMatchStatus;
 import com.hololive.cardgame.model.MatchPhase;
 import com.hololive.cardgame.repository.MatchActionRepository;
@@ -95,7 +94,6 @@ public class MatchActionService {
     private final SupportOshiEffectPayloadBuilder supportOshiEffectPayloadBuilder;
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
     private final TriggerEffectConfirmPayloadBuilder triggerEffectConfirmPayloadBuilder;
-    private final SendCheerInteractionPayloadBuilder sendCheerInteractionPayloadBuilder;
     private final PlayCardActionLogWriter playCardActionLogWriter;
     private final PlayCardMatchPhaseFinalizer playCardMatchPhaseFinalizer;
     private final MatchEffectService matchEffectService;
@@ -250,7 +248,9 @@ public class MatchActionService {
             new InteractionConfirmedPayloadBuilder(),
             new MatchTimestampService(),
             matchTurnLifecycleService,
-            mainStepGiftFollowupPayloadAppender
+            mainStepGiftFollowupPayloadAppender,
+            gameActionExecutor,
+            new SendCheerInteractionPayloadBuilder()
         );
         this.advancePhasePayloadBuilder = new AdvancePhasePayloadBuilder(
             matchPhaseAdvanceGiftTransitionService,
@@ -260,7 +260,6 @@ public class MatchActionService {
         this.supportOshiEffectPayloadBuilder = new SupportOshiEffectPayloadBuilder();
         this.interactionConfirmedPayloadBuilder = new InteractionConfirmedPayloadBuilder();
         this.triggerEffectConfirmPayloadBuilder = new TriggerEffectConfirmPayloadBuilder();
-        this.sendCheerInteractionPayloadBuilder = new SendCheerInteractionPayloadBuilder();
         this.playCardActionLogWriter = new PlayCardActionLogWriter(
             matchActionRepository,
             matchPayloadJsonService,
@@ -787,10 +786,6 @@ public class MatchActionService {
             resolveTriggerEffectConfirmDecision(context, matchId, userId, pending, request);
             return;
         }
-        if (INTERACTION_TYPE_SEND_CHEER.equals(decisionType)) {
-            resolveSendCheerDecision(context, matchId, userId, pending, request);
-            return;
-        }
         if (matchDecisionResolutionService.resolveLowCouplingDecision(
             matchId,
             userId,
@@ -996,117 +991,6 @@ public class MatchActionService {
             userId,
             context.turnNumber,
             pending.decisionId()
-        );
-    }
-
-    private void resolveSendCheerDecision(
-        ActionContext context,
-        Long matchId,
-        Long userId,
-        PendingDecision pending,
-        ResolveDecisionRequest request
-    ) {
-        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
-            request == null ? null : request.getSelectedCardInstanceIds()
-        );
-        if (selectedCardInstanceIds.size() < pending.minSelect()) {
-            throw new IllegalArgumentException("選擇卡片數量不足，至少需要 " + pending.minSelect() + " 張");
-        }
-        if (selectedCardInstanceIds.size() > pending.maxSelect()) {
-            throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
-        }
-        validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
-        Long targetHolomemCardInstanceId = selectedCardInstanceIds.get(0);
-        Long targetHolomemId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND match_card_id = ?
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            targetHolomemCardInstanceId
-        );
-        if (targetHolomemId == null) {
-            throw new IllegalStateException("指定的 Holomem 不存在或已離場");
-        }
-        Long sourceCardInstanceId = pending.sourceCardInstanceId();
-        if (sourceCardInstanceId == null || sourceCardInstanceId <= 0) {
-            throw new IllegalStateException("待處理吶喊互動缺少來源卡");
-        }
-        Map<String, Object> sourceCard = loadOwnedCardInstance(matchId, userId, sourceCardInstanceId);
-        String sourceZone = normalizeZone(sourceCard.get("zone"));
-        if (!Set.of("CHEER_DECK", "ARCHIVE", "HAND").contains(sourceZone)) {
-            throw new IllegalStateException("來源 Cheer 已失效，請重新整理狀態");
-        }
-        String cheerCardId = asString(sourceCard.get("card_id"));
-        Integer cheerCount = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM cheer_cards WHERE card_id = ?",
-            Integer.class,
-            cheerCardId
-        );
-        if (cheerCount == null || cheerCount <= 0) {
-            throw new IllegalStateException("來源卡不是 Cheer 卡");
-        }
-        EffectContext effectContext = new EffectContext(
-            matchId,
-            userId,
-            context.turnNumber,
-            pending.sourceActionType(),
-            sourceCardInstanceId,
-            cheerCardId
-        );
-        SendCheerAction sendCheerAction = new SendCheerAction(
-            sourceCardInstanceId,
-            targetHolomemId,
-            pending.sourceActionType()
-        );
-        List<ActionResult> actionResults = gameActionExecutor.execute(effectContext, List.of(sendCheerAction));
-        if (actionResults.isEmpty() || !actionResults.get(0).success()) {
-            String reason = actionResults.isEmpty() ? "UNKNOWN" : asString(actionResults.get(0).details().get("reason"));
-            throw new IllegalStateException("發送吶喊失敗：" + reason);
-        }
-        pendingDecisionStore.markResolved(pending.decisionId());
-
-        context.match.setCurrentPhase(resolvePhaseAfterSendCheer(context.phase, pending.sourceActionType()).name());
-        touchUpdatedAt(context.match);
-        matchRepository.saveAndFlush(context.match);
-
-        Map<String, Object> payload = sendCheerInteractionPayloadBuilder.buildInteractionConfirmedPayload(
-            pending.decisionId(),
-            pending.sourceActionType(),
-            sourceCardInstanceId,
-            cheerCardId,
-            targetHolomemCardInstanceId
-        );
-        if (ACTION_TYPE_TURN_CHEER.equals(pending.sourceActionType())) {
-            mainStepGiftFollowupPayloadAppender.append(payload, matchId, userId, context.turnNumber);
-        }
-        appendAction(
-            context.match,
-            userId,
-            "INTERACTION_CONFIRMED",
-            toJson(payload),
-            context.turnNumber
-        );
-        if (!ACTION_TYPE_TURN_CHEER.equals(pending.sourceActionType())) {
-            return;
-        }
-        Map<String, Object> turnCheerPayload = sendCheerInteractionPayloadBuilder.buildTurnCheerActionPayload(
-            sourceCardInstanceId,
-            cheerCardId,
-            targetHolomemCardInstanceId
-        );
-        appendAction(
-            context.match,
-            userId,
-            ACTION_TYPE_TURN_CHEER,
-            toJson(turnCheerPayload),
-            context.turnNumber
         );
     }
 
@@ -3030,17 +2914,6 @@ public class MatchActionService {
             ACTION_TYPE_TURN_CHEER
         );
         return count != null && count > 0;
-    }
-
-    /**
-     * SEND_CHEER 決策結束後的 phase 推導。
-     * 回合 Cheer 完成後回到 MAIN；其餘來源維持原 phase。
-     */
-    private MatchPhase resolvePhaseAfterSendCheer(MatchPhase currentPhase, String sourceActionType) {
-        if (ACTION_TYPE_TURN_CHEER.equals(normalizeZone(sourceActionType))) {
-            return MatchPhase.MAIN;
-        }
-        return currentPhase == null ? MatchPhase.MAIN : currentPhase;
     }
 
     /**

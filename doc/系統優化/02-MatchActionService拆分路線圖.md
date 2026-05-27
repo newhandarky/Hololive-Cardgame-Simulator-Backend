@@ -96,7 +96,8 @@
 - AAA-232 已抽出 `PendingDecisionCreationService`，集中 `TURN_START`、`LIVE_START`、`DRAW_REVEAL`、`SEND_CHEER`、`CARD_SELECTION` 建立流程，作為 A2 之前的第二個地基。
 - AAA-233 已開始 A2，新增 `MatchDecisionResolutionService`，第一刀只搬低耦合 look / reorder decision handler，避免把 trigger confirm、support selection、send cheer 與 turn lifecycle 一次混進 service extraction。
 - AAA-234 已搬 `DRAW_REVEAL` decision handler，保留 turn cheer 可用性判斷、main step gift follow-up 與 `MatchTurnLifecycleService.confirmDrawRevealDecision(...)`。
-- 下一批建議搬 `SEND_CHEER` decision handler；`TRIGGER_EFFECT_CONFIRM`、`CARD_SELECTION` 仍保留後續獨立處理。
+- AAA-235 已搬 `SEND_CHEER` decision handler，保留 selected target validation、來源 Cheer 驗證、`SendCheerAction` execution、phase update、`INTERACTION_CONFIRMED` / `TURN_CHEER` action log。
+- 下一批建議先處理 lifecycle decision 或共用 selection validation；`TRIGGER_EFFECT_CONFIRM`、`CARD_SELECTION` 仍保留後續獨立處理。
 
 ## Phase A2：抽出 Decision Resolution Service
 
