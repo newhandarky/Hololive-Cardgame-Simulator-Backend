@@ -50,7 +50,6 @@ public class MatchActionService {
     private static final Set<String> CHEER_SOURCE_ZONES = Set.of("HAND", "CHEER_DECK");
     private static final String SUPPORT_DECISION_TYPE_CARD_SELECTION = "CARD_SELECTION";
     private static final String INTERACTION_TYPE_TURN_START = "TURN_START";
-    private static final String INTERACTION_TYPE_DRAW_REVEAL = "DRAW_REVEAL";
     private static final String INTERACTION_TYPE_SEND_CHEER = "SEND_CHEER";
     private static final String INTERACTION_TYPE_LIVE_START = "LIVE_START";
     private static final String INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM = "TRIGGER_EFFECT_CONFIRM";
@@ -190,15 +189,6 @@ public class MatchActionService {
             matchPayloadJsonService,
             pendingDecisionReader
         );
-        this.matchDecisionResolutionService = new MatchDecisionResolutionService(
-            jdbcTemplate,
-            pendingDecisionStore,
-            matchRepository,
-            matchActionRepository,
-            matchPayloadJsonService,
-            new InteractionConfirmedPayloadBuilder(),
-            new MatchTimestampService()
-        );
         this.giftTriggerActionPayloadExtractor = new GiftTriggerActionPayloadExtractor();
         this.giftTriggerActionWriter = new GiftTriggerActionWriter(matchActionRepository, matchPayloadJsonService);
         this.pendingGiftTriggerContextExtractor = new PendingGiftTriggerContextExtractor();
@@ -250,6 +240,17 @@ public class MatchActionService {
             giftTriggeredEffectDeferredSummaryBuilder,
             sourcelessGiftPendingDecisionCreator,
             followupDecisionPayloadAppender
+        );
+        this.matchDecisionResolutionService = new MatchDecisionResolutionService(
+            jdbcTemplate,
+            pendingDecisionStore,
+            matchRepository,
+            matchActionRepository,
+            matchPayloadJsonService,
+            new InteractionConfirmedPayloadBuilder(),
+            new MatchTimestampService(),
+            matchTurnLifecycleService,
+            mainStepGiftFollowupPayloadAppender
         );
         this.advancePhasePayloadBuilder = new AdvancePhasePayloadBuilder(
             matchPhaseAdvanceGiftTransitionService,
@@ -782,10 +783,6 @@ public class MatchActionService {
             resolveLiveStartDecision(context, matchId, userId, pending);
             return;
         }
-        if (INTERACTION_TYPE_DRAW_REVEAL.equals(decisionType)) {
-            resolveDrawRevealDecision(context, matchId, userId, pending);
-            return;
-        }
         if (INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM.equals(decisionType)) {
             resolveTriggerEffectConfirmDecision(context, matchId, userId, pending, request);
             return;
@@ -999,30 +996,6 @@ public class MatchActionService {
             userId,
             context.turnNumber,
             pending.decisionId()
-        );
-    }
-
-    private void resolveDrawRevealDecision(
-        ActionContext context,
-        Long matchId,
-        Long userId,
-        PendingDecision pending
-    ) {
-        pendingDecisionStore.markResolved(pending.decisionId());
-        boolean requiresTurnCheer = canPerformTurnCheerAction(matchId, userId);
-        Map<String, Object> payload = new LinkedHashMap<>();
-        if (!requiresTurnCheer) {
-            mainStepGiftFollowupPayloadAppender.append(payload, matchId, userId, context.turnNumber);
-        }
-        matchTurnLifecycleService.confirmDrawRevealDecision(
-            context.match,
-            userId,
-            context.turnNumber,
-            pending.decisionId(),
-            requiresTurnCheer ? MatchPhase.CHEER : MatchPhase.MAIN,
-            pending.sourceCardInstanceId(),
-            pending.sourceCardId(),
-            payload
         );
     }
 

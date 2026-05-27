@@ -8,6 +8,7 @@ import com.hololive.cardgame.repository.MatchActionRepository;
 import com.hololive.cardgame.repository.MatchRepository;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -18,6 +19,7 @@ import org.springframework.util.StringUtils;
 
 class MatchDecisionResolutionService {
 
+    private static final String DECISION_TYPE_DRAW_REVEAL = "DRAW_REVEAL";
     private static final String DECISION_TYPE_LOOK_TOP_DECK = "LOOK_TOP_DECK";
     private static final String DECISION_TYPE_LOOK_OPPONENT_HAND = "LOOK_OPPONENT_HAND";
     private static final String DECISION_TYPE_LOOK_HOLOPOWER = "LOOK_HOLOPOWER";
@@ -30,6 +32,8 @@ class MatchDecisionResolutionService {
     private final MatchPayloadJsonService matchPayloadJsonService;
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
     private final MatchTimestampService matchTimestampService;
+    private final MatchTurnLifecycleService matchTurnLifecycleService;
+    private final MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender;
 
     MatchDecisionResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -38,7 +42,9 @@ class MatchDecisionResolutionService {
         MatchActionRepository matchActionRepository,
         MatchPayloadJsonService matchPayloadJsonService,
         InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder,
-        MatchTimestampService matchTimestampService
+        MatchTimestampService matchTimestampService,
+        MatchTurnLifecycleService matchTurnLifecycleService,
+        MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender
     ) {
         this.jdbcTemplate = jdbcTemplate;
         this.pendingDecisionStore = pendingDecisionStore;
@@ -47,6 +53,8 @@ class MatchDecisionResolutionService {
         this.matchPayloadJsonService = matchPayloadJsonService;
         this.interactionConfirmedPayloadBuilder = interactionConfirmedPayloadBuilder;
         this.matchTimestampService = matchTimestampService;
+        this.matchTurnLifecycleService = matchTurnLifecycleService;
+        this.mainStepGiftFollowupPayloadAppender = mainStepGiftFollowupPayloadAppender;
     }
 
     boolean resolveLowCouplingDecision(
@@ -58,6 +66,10 @@ class MatchDecisionResolutionService {
         ResolveDecisionRequest request
     ) {
         String decisionType = MatchEffectValueHelper.normalize(pending == null ? null : pending.decisionType());
+        if (DECISION_TYPE_DRAW_REVEAL.equals(decisionType)) {
+            resolveDrawRevealDecision(matchId, userId, turnNumber, match, pending);
+            return true;
+        }
         if (DECISION_TYPE_LOOK_TOP_DECK.equals(decisionType)) {
             resolveLookTopDeckDecision(matchId, userId, turnNumber, match, pending, request);
             return true;
@@ -71,6 +83,31 @@ class MatchDecisionResolutionService {
             return true;
         }
         return false;
+    }
+
+    private void resolveDrawRevealDecision(
+        Long matchId,
+        Long userId,
+        int turnNumber,
+        MatchEntity match,
+        PendingDecision pending
+    ) {
+        pendingDecisionStore.markResolved(pending.decisionId());
+        boolean requiresTurnCheer = canPerformTurnCheerAction(matchId, userId);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        if (!requiresTurnCheer) {
+            mainStepGiftFollowupPayloadAppender.append(payload, matchId, userId, turnNumber);
+        }
+        matchTurnLifecycleService.confirmDrawRevealDecision(
+            match,
+            userId,
+            turnNumber,
+            pending.decisionId(),
+            requiresTurnCheer ? MatchPhase.CHEER : MatchPhase.MAIN,
+            pending.sourceCardInstanceId(),
+            pending.sourceCardId(),
+            payload
+        );
     }
 
     private void resolveLookTopDeckDecision(
@@ -174,6 +211,40 @@ class MatchDecisionResolutionService {
             orderedCardInstanceIds
         );
         appendAction(match, userId, "INTERACTION_CONFIRMED", toJson(payload), turnNumber);
+    }
+
+    private boolean canPerformTurnCheerAction(Long matchId, Long userId) {
+        if (matchId == null || userId == null) {
+            return false;
+        }
+        Integer cheerDeckCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_cards
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'CHEER_DECK'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        if (cheerDeckCount == null || cheerDeckCount <= 0) {
+            return false;
+        }
+        Integer stageHolomemCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone IN ('CENTER', 'COLLAB', 'BACK')
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        return stageHolomemCount != null && stageHolomemCount > 0;
     }
 
     private void moveDeckCardToBottom(Long matchId, Long userId, Long cardInstanceId) {

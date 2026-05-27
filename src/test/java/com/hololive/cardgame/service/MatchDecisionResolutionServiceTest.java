@@ -27,6 +27,10 @@ class MatchDecisionResolutionServiceTest {
     private final PendingDecisionStore pendingDecisionStore = mock(PendingDecisionStore.class);
     private final MatchRepository matchRepository = mock(MatchRepository.class);
     private final MatchActionRepository matchActionRepository = mock(MatchActionRepository.class);
+    private final MatchTurnLifecycleService matchTurnLifecycleService = mock(MatchTurnLifecycleService.class);
+    private final MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender = mock(
+        MainStepGiftFollowupPayloadAppender.class
+    );
     private final MatchDecisionResolutionService service = new MatchDecisionResolutionService(
         jdbcTemplate,
         pendingDecisionStore,
@@ -34,7 +38,9 @@ class MatchDecisionResolutionServiceTest {
         matchActionRepository,
         new MatchPayloadJsonService(new ObjectMapper()),
         new InteractionConfirmedPayloadBuilder(),
-        new MatchTimestampService()
+        new MatchTimestampService(),
+        matchTurnLifecycleService,
+        mainStepGiftFollowupPayloadAppender
     );
 
     @Test
@@ -85,6 +91,70 @@ class MatchDecisionResolutionServiceTest {
         assertThat(handled).isFalse();
         verify(pendingDecisionStore, never()).markResolved(any());
         verify(matchActionRepository, never()).save(any());
+    }
+
+    @Test
+    void resolveLowCouplingDecisionShouldResolveDrawRevealToCheerWhenTurnCheerAvailable() {
+        MatchEntity match = new MatchEntity();
+        match.setId(100L);
+        PendingDecision pending = pending("DRAW_REVEAL", List.of(), 0);
+        when(jdbcTemplate.queryForObject(
+            contains("zone = 'CHEER_DECK'"),
+            eq(Integer.class),
+            eq(100L),
+            eq(10L)
+        )).thenReturn(1);
+        when(jdbcTemplate.queryForObject(
+            contains("FROM match_holomems"),
+            eq(Integer.class),
+            eq(100L),
+            eq(10L)
+        )).thenReturn(2);
+
+        boolean handled = service.resolveLowCouplingDecision(100L, 10L, 2, match, pending, new ResolveDecisionRequest());
+
+        assertThat(handled).isTrue();
+        verify(pendingDecisionStore).markResolved(300L);
+        verify(mainStepGiftFollowupPayloadAppender, never()).append(any(), any(), any(), any(Integer.class));
+        verify(matchTurnLifecycleService).confirmDrawRevealDecision(
+            eq(match),
+            eq(10L),
+            eq(2),
+            eq(300L),
+            eq(MatchPhase.CHEER),
+            eq(400L),
+            eq("hBP01-001"),
+            any()
+        );
+    }
+
+    @Test
+    void resolveLowCouplingDecisionShouldResolveDrawRevealToMainWithMainStepGiftFollowupWhenTurnCheerUnavailable() {
+        MatchEntity match = new MatchEntity();
+        match.setId(100L);
+        PendingDecision pending = pending("DRAW_REVEAL", List.of(), 0);
+        when(jdbcTemplate.queryForObject(
+            contains("zone = 'CHEER_DECK'"),
+            eq(Integer.class),
+            eq(100L),
+            eq(10L)
+        )).thenReturn(0);
+
+        boolean handled = service.resolveLowCouplingDecision(100L, 10L, 2, match, pending, new ResolveDecisionRequest());
+
+        assertThat(handled).isTrue();
+        verify(pendingDecisionStore).markResolved(300L);
+        verify(mainStepGiftFollowupPayloadAppender).append(any(), eq(100L), eq(10L), eq(2));
+        verify(matchTurnLifecycleService).confirmDrawRevealDecision(
+            eq(match),
+            eq(10L),
+            eq(2),
+            eq(300L),
+            eq(MatchPhase.MAIN),
+            eq(400L),
+            eq("hBP01-001"),
+            any()
+        );
     }
 
     private PendingDecision pending(String decisionType, List<Long> candidates, int maxSelect) {
