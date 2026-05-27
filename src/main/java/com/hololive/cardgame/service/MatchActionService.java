@@ -50,7 +50,6 @@ public class MatchActionService {
     private static final String SUPPORT_DECISION_TYPE_CARD_SELECTION = "CARD_SELECTION";
     private static final String INTERACTION_TYPE_TURN_START = "TURN_START";
     private static final String INTERACTION_TYPE_SEND_CHEER = "SEND_CHEER";
-    private static final String INTERACTION_TYPE_LIVE_START = "LIVE_START";
     private static final String INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM = "TRIGGER_EFFECT_CONFIRM";
     private static final String ACTION_TYPE_DRAW_TURN = "DRAW_TURN";
     private static final String ACTION_TYPE_TURN_CHEER = "TURN_CHEER";
@@ -778,10 +777,6 @@ public class MatchActionService {
             resolveTurnStartDecision(context, matchId, userId, pending);
             return;
         }
-        if (INTERACTION_TYPE_LIVE_START.equals(decisionType)) {
-            resolveLiveStartDecision(context, matchId, userId, pending);
-            return;
-        }
         if (INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM.equals(decisionType)) {
             resolveTriggerEffectConfirmDecision(context, matchId, userId, pending, request);
             return;
@@ -972,21 +967,6 @@ public class MatchActionService {
         pendingDecisionStore.markResolved(pending.decisionId());
         returnCollabToBackAsRested(matchId, userId);
         matchTurnLifecycleService.confirmTurnStartDecision(
-            context.match,
-            userId,
-            context.turnNumber,
-            pending.decisionId()
-        );
-    }
-
-    private void resolveLiveStartDecision(
-        ActionContext context,
-        Long matchId,
-        Long userId,
-        PendingDecision pending
-    ) {
-        pendingDecisionStore.markResolved(pending.decisionId());
-        matchTurnLifecycleService.confirmLiveStartDecision(
             context.match,
             userId,
             context.turnNumber,

@@ -213,6 +213,22 @@ class MatchDecisionResolutionServiceTest {
         assertThat(actionCaptor.getAllValues().get(1).getPayload()).contains("\"targetHolomemCardInstanceId\":800");
     }
 
+    @Test
+    void resolveLowCouplingDecisionShouldResolveLiveStartThroughLifecycleService() {
+        MatchEntity match = new MatchEntity();
+        match.setId(100L);
+        match.setPlayerAId(10L);
+        match.setPlayerBId(20L);
+        PendingDecision pending = pending("LIVE_START", "LIVE_START", List.of(), 0);
+
+        boolean handled = service.resolveLowCouplingDecision(100L, 10L, 1, match, pending, new ResolveDecisionRequest());
+
+        assertThat(handled).isTrue();
+        verify(pendingDecisionStore).markResolved(300L);
+        verify(matchTurnLifecycleService).confirmLiveStartDecision(match, 10L, 1, 300L);
+        verify(matchActionRepository, never()).save(any());
+    }
+
     private PendingDecision pending(String decisionType, List<Long> candidates, int maxSelect) {
         return pending(decisionType, "PLAY_SUPPORT", candidates, maxSelect);
     }

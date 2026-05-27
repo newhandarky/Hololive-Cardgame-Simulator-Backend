@@ -1,6 +1,6 @@
 # MatchActionService 拆分路線圖
 
-更新日期：2026-04-24
+更新日期：2026-05-27
 定位：`MatchActionService` 專用重構規劃
 用途：將對戰指令主流程拆成可維護的 orchestration modules。
 
@@ -97,7 +97,8 @@
 - AAA-233 已開始 A2，新增 `MatchDecisionResolutionService`，第一刀只搬低耦合 look / reorder decision handler，避免把 trigger confirm、support selection、send cheer 與 turn lifecycle 一次混進 service extraction。
 - AAA-234 已搬 `DRAW_REVEAL` decision handler，保留 turn cheer 可用性判斷、main step gift follow-up 與 `MatchTurnLifecycleService.confirmDrawRevealDecision(...)`。
 - AAA-235 已搬 `SEND_CHEER` decision handler，保留 selected target validation、來源 Cheer 驗證、`SendCheerAction` execution、phase update、`INTERACTION_CONFIRMED` / `TURN_CHEER` action log。
-- 下一批建議先處理 lifecycle decision 或共用 selection validation；`TRIGGER_EFFECT_CONFIRM`、`CARD_SELECTION` 仍保留後續獨立處理。
+- AAA-236 已搬 `LIVE_START` decision handler，保留 pending resolved 與 `MatchTurnLifecycleService.confirmLiveStartDecision(...)` lifecycle 委派。
+- 下一批建議先抽共用 selected-card validation helper，或評估 `TURN_START` 搬移前是否先抽 return-collab lifecycle helper；`TRIGGER_EFFECT_CONFIRM`、`CARD_SELECTION` 仍保留後續獨立處理。
 
 ## Phase A2：抽出 Decision Resolution Service
 

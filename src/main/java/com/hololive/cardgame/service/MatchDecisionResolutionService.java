@@ -24,6 +24,7 @@ import org.springframework.util.StringUtils;
 class MatchDecisionResolutionService {
 
     private static final String ACTION_TYPE_TURN_CHEER = "TURN_CHEER";
+    private static final String DECISION_TYPE_LIVE_START = "LIVE_START";
     private static final String DECISION_TYPE_DRAW_REVEAL = "DRAW_REVEAL";
     private static final String DECISION_TYPE_SEND_CHEER = "SEND_CHEER";
     private static final String DECISION_TYPE_LOOK_TOP_DECK = "LOOK_TOP_DECK";
@@ -78,6 +79,10 @@ class MatchDecisionResolutionService {
         ResolveDecisionRequest request
     ) {
         String decisionType = MatchEffectValueHelper.normalize(pending == null ? null : pending.decisionType());
+        if (DECISION_TYPE_LIVE_START.equals(decisionType)) {
+            resolveLiveStartDecision(userId, turnNumber, match, pending);
+            return true;
+        }
         if (DECISION_TYPE_DRAW_REVEAL.equals(decisionType)) {
             resolveDrawRevealDecision(matchId, userId, turnNumber, match, pending);
             return true;
@@ -99,6 +104,21 @@ class MatchDecisionResolutionService {
             return true;
         }
         return false;
+    }
+
+    private void resolveLiveStartDecision(
+        Long userId,
+        int turnNumber,
+        MatchEntity match,
+        PendingDecision pending
+    ) {
+        pendingDecisionStore.markResolved(pending.decisionId());
+        matchTurnLifecycleService.confirmLiveStartDecision(
+            match,
+            userId,
+            turnNumber,
+            pending.decisionId()
+        );
     }
 
     private void resolveDrawRevealDecision(
