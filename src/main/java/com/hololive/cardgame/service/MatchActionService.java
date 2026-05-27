@@ -54,10 +54,6 @@ public class MatchActionService {
     private static final String INTERACTION_TYPE_SEND_CHEER = "SEND_CHEER";
     private static final String INTERACTION_TYPE_LIVE_START = "LIVE_START";
     private static final String INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM = "TRIGGER_EFFECT_CONFIRM";
-    private static final String DECISION_TYPE_LOOK_TOP_DECK = "LOOK_TOP_DECK";
-    private static final String DECISION_TYPE_LOOK_OPPONENT_HAND = "LOOK_OPPONENT_HAND";
-    private static final String DECISION_TYPE_LOOK_HOLOPOWER = "LOOK_HOLOPOWER";
-    private static final String DECISION_TYPE_REORDER_DECK_BOTTOM = "REORDER_DECK_BOTTOM";
     private static final String ACTION_TYPE_DRAW_TURN = "DRAW_TURN";
     private static final String ACTION_TYPE_TURN_CHEER = "TURN_CHEER";
     private static final String ACTION_TYPE_USE_OSHI_SKILL = "USE_OSHI_SKILL";
@@ -79,6 +75,7 @@ public class MatchActionService {
     private final PendingDecisionReader pendingDecisionReader;
     private final PendingDecisionStore pendingDecisionStore;
     private final PendingDecisionCreationService pendingDecisionCreationService;
+    private final MatchDecisionResolutionService matchDecisionResolutionService;
     private final GiftTriggerActionPayloadExtractor giftTriggerActionPayloadExtractor;
     private final GiftTriggerActionWriter giftTriggerActionWriter;
     private final PendingGiftTriggerContextExtractor pendingGiftTriggerContextExtractor;
@@ -192,6 +189,15 @@ public class MatchActionService {
             jdbcTemplate,
             matchPayloadJsonService,
             pendingDecisionReader
+        );
+        this.matchDecisionResolutionService = new MatchDecisionResolutionService(
+            jdbcTemplate,
+            pendingDecisionStore,
+            matchRepository,
+            matchActionRepository,
+            matchPayloadJsonService,
+            new InteractionConfirmedPayloadBuilder(),
+            new MatchTimestampService()
         );
         this.giftTriggerActionPayloadExtractor = new GiftTriggerActionPayloadExtractor();
         this.giftTriggerActionWriter = new GiftTriggerActionWriter(matchActionRepository, matchPayloadJsonService);
@@ -788,16 +794,14 @@ public class MatchActionService {
             resolveSendCheerDecision(context, matchId, userId, pending, request);
             return;
         }
-        if (DECISION_TYPE_LOOK_TOP_DECK.equals(decisionType)) {
-            resolveLookTopDeckDecision(context, matchId, userId, pending, request);
-            return;
-        }
-        if (DECISION_TYPE_LOOK_OPPONENT_HAND.equals(decisionType) || DECISION_TYPE_LOOK_HOLOPOWER.equals(decisionType)) {
-            resolveLookZoneDecision(context, userId, pending, decisionType);
-            return;
-        }
-        if (DECISION_TYPE_REORDER_DECK_BOTTOM.equals(decisionType)) {
-            resolveReorderDeckBottomDecision(context, matchId, userId, pending, request);
+        if (matchDecisionResolutionService.resolveLowCouplingDecision(
+            matchId,
+            userId,
+            context.turnNumber,
+            context.match,
+            pending,
+            request
+        )) {
             return;
         }
         if (!SUPPORT_DECISION_TYPE_CARD_SELECTION.equals(decisionType)) {
@@ -879,124 +883,6 @@ public class MatchActionService {
         );
         followupDecisionPayloadAppender.append(payload, followupDecision);
         finalizeResolvedEffect(context, matchId, userId, effectSummary);
-    }
-
-    private void resolveLookTopDeckDecision(
-        ActionContext context,
-        Long matchId,
-        Long userId,
-        PendingDecision pending,
-        ResolveDecisionRequest request
-    ) {
-        String requestedPlacement = normalizeDecisionPlacement(request == null ? null : request.getPlacement());
-        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
-            request == null ? null : request.getSelectedCardInstanceIds()
-        );
-        if (requestedPlacement != null) {
-            if ("TOP".equals(requestedPlacement)) {
-                Long lookedCardInstanceId = pending.candidateCardInstanceIds().isEmpty()
-                    ? null
-                    : pending.candidateCardInstanceIds().get(0);
-                selectedCardInstanceIds = lookedCardInstanceId == null
-                    ? List.of()
-                    : List.of(lookedCardInstanceId);
-            } else if ("BOTTOM".equals(requestedPlacement)) {
-                selectedCardInstanceIds = List.of();
-            } else {
-                throw new IllegalArgumentException("placement 只支援 TOP 或 BOTTOM");
-            }
-        }
-        if (selectedCardInstanceIds.size() > pending.maxSelect()) {
-            throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
-        }
-        validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
-        Long lookedCardInstanceId = pending.candidateCardInstanceIds().isEmpty()
-            ? null
-            : pending.candidateCardInstanceIds().get(0);
-        boolean keepOnTop = lookedCardInstanceId != null && selectedCardInstanceIds.contains(lookedCardInstanceId);
-        if (lookedCardInstanceId != null && !keepOnTop) {
-            moveDeckCardToBottom(matchId, userId, lookedCardInstanceId);
-        }
-        pendingDecisionStore.markResolved(pending.decisionId());
-
-        transitionMatchToMainAndSave(context.match);
-
-        Map<String, Object> payload = interactionConfirmedPayloadBuilder.buildLookTopDeckPayload(
-            pending.decisionId(),
-            DECISION_TYPE_LOOK_TOP_DECK,
-            pending.sourceActionType(),
-            lookedCardInstanceId,
-            keepOnTop
-        );
-        appendAction(
-            context.match,
-            userId,
-            "INTERACTION_CONFIRMED",
-            toJson(payload),
-            context.turnNumber
-        );
-    }
-
-    private void resolveLookZoneDecision(
-        ActionContext context,
-        Long userId,
-        PendingDecision pending,
-        String decisionType
-    ) {
-        pendingDecisionStore.markResolved(pending.decisionId());
-
-        transitionMatchToMainAndSave(context.match);
-
-        Map<String, Object> payload = interactionConfirmedPayloadBuilder.buildLookZonePayload(
-            pending.decisionId(),
-            decisionType,
-            pending.sourceActionType(),
-            pending.candidateCardInstanceIds().size()
-        );
-        appendAction(
-            context.match,
-            userId,
-            "INTERACTION_CONFIRMED",
-            toJson(payload),
-            context.turnNumber
-        );
-    }
-
-    private void resolveReorderDeckBottomDecision(
-        ActionContext context,
-        Long matchId,
-        Long userId,
-        PendingDecision pending,
-        ResolveDecisionRequest request
-    ) {
-        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
-            request == null ? null : request.getSelectedCardInstanceIds()
-        );
-        List<Long> candidateCardInstanceIds = pending.candidateCardInstanceIds();
-        List<Long> orderedCardInstanceIds = selectedCardInstanceIds.isEmpty()
-            ? candidateCardInstanceIds
-            : selectedCardInstanceIds;
-        validateDeckBottomReorderSelection(orderedCardInstanceIds, candidateCardInstanceIds);
-        for (Long cardInstanceId : orderedCardInstanceIds) {
-            moveDeckCardToBottom(matchId, userId, cardInstanceId);
-        }
-
-        pendingDecisionStore.markResolved(pending.decisionId());
-        transitionMatchToMainAndSave(context.match);
-
-        Map<String, Object> payload = interactionConfirmedPayloadBuilder.buildReorderDeckBottomPayload(
-            pending.decisionId(),
-            DECISION_TYPE_REORDER_DECK_BOTTOM,
-            pending.sourceActionType(),
-            orderedCardInstanceIds
-        );
-        appendAction(
-            context.match,
-            userId,
-            "INTERACTION_CONFIRMED",
-            toJson(payload),
-            context.turnNumber
-        );
     }
 
     private void resolveSupportCardSelectionDecision(
@@ -3281,61 +3167,6 @@ public class MatchActionService {
     }
 
     /**
-     * 將指定牌庫卡移到牌庫底部。
-     */
-    private void moveDeckCardToBottom(Long matchId, Long userId, Long cardInstanceId) {
-        if (matchId == null || userId == null || cardInstanceId == null || cardInstanceId <= 0) {
-            return;
-        }
-        Integer nextOrder = jdbcTemplate.queryForObject(
-            """
-            SELECT COALESCE(MAX(order_index), 0) + 1
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'DECK'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        jdbcTemplate.update(
-            """
-            UPDATE match_cards
-            SET order_index = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'DECK'
-            """,
-            nextOrder == null ? 1 : nextOrder,
-            cardInstanceId,
-            matchId,
-            userId
-        );
-    }
-
-    /**
-     * 驗證牌庫底排序提交內容（數量、唯一性、候選一致性）。
-     */
-    private void validateDeckBottomReorderSelection(List<Long> orderedCardInstanceIds, List<Long> candidateCardInstanceIds) {
-        List<Long> ordered = orderedCardInstanceIds == null ? List.of() : orderedCardInstanceIds;
-        List<Long> candidates = candidateCardInstanceIds == null ? List.of() : candidateCardInstanceIds;
-        if (ordered.size() != candidates.size()) {
-            throw new IllegalArgumentException("排序卡片數量不符，需包含全部候選卡");
-        }
-        Set<Long> candidateSet = new LinkedHashSet<>(candidates);
-        Set<Long> orderedSet = new LinkedHashSet<>(ordered);
-        if (orderedSet.size() != ordered.size()) {
-            throw new IllegalArgumentException("排序卡片包含重複 cardInstanceId");
-        }
-        if (!orderedSet.equals(candidateSet)) {
-            throw new IllegalArgumentException("排序卡片必須完整且僅包含候選卡");
-        }
-    }
-
-    /**
      * 將牌庫頂卡移到 HOLOPOWER。
      */
     private Long moveTopDeckCardToHolopower(Long matchId, Long userId) {
@@ -4738,16 +4569,6 @@ public class MatchActionService {
                 officialCardArtExtraSummary
             );
         }
-    }
-
-    /**
-     * 正規化決策中的 placement 欄位（例如 TOP/BOTTOM）。
-     */
-    private String normalizeDecisionPlacement(String placement) {
-        if (!StringUtils.hasText(placement)) {
-            return null;
-        }
-        return placement.trim().toUpperCase(Locale.ROOT);
     }
 
     /**
