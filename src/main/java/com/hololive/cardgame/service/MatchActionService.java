@@ -91,6 +91,7 @@ public class MatchActionService {
     private final MatchTurnStartCollabReturnService matchTurnStartCollabReturnService;
     private final AdvancePhasePayloadBuilder advancePhasePayloadBuilder;
     private final SupportOshiEffectPayloadBuilder supportOshiEffectPayloadBuilder;
+    private final MatchSupportCardSelectionResolutionService matchSupportCardSelectionResolutionService;
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
     private final TriggerEffectConfirmPayloadBuilder triggerEffectConfirmPayloadBuilder;
     private final PlayCardActionLogWriter playCardActionLogWriter;
@@ -261,6 +262,33 @@ public class MatchActionService {
             followupDecisionPayloadAppender
         );
         this.supportOshiEffectPayloadBuilder = new SupportOshiEffectPayloadBuilder();
+        this.matchSupportCardSelectionResolutionService = new MatchSupportCardSelectionResolutionService(
+            pendingDecisionStore,
+            matchRepository,
+            matchActionRepository,
+            matchPayloadJsonService,
+            new MatchTimestampService(),
+            selectedCardValidationService,
+            supportOshiEffectPayloadBuilder,
+            effectFollowupDecisionResolver,
+            followupDecisionPayloadAppender,
+            (effectMatchId, effectUserId, pending, selectedCardInstanceIds) -> matchEffectService.applySupportEffect(
+                effectMatchId,
+                effectUserId,
+                pending.effectType(),
+                pending.effectJson(),
+                pending.targetType(),
+                selectedCardInstanceIds,
+                pending.targetHolomemCardInstanceId(),
+                true
+            ),
+            (match, effectMatchId, effectUserId, turnNumber, effectSummary) -> finalizeResolvedEffect(
+                new ActionContext(match, null, turnNumber, null, false),
+                effectMatchId,
+                effectUserId,
+                effectSummary
+            )
+        );
         this.interactionConfirmedPayloadBuilder = new InteractionConfirmedPayloadBuilder();
         this.triggerEffectConfirmPayloadBuilder = new TriggerEffectConfirmPayloadBuilder();
         this.playCardActionLogWriter = new PlayCardActionLogWriter(
@@ -794,7 +822,14 @@ public class MatchActionService {
         if (!SUPPORT_DECISION_TYPE_CARD_SELECTION.equals(decisionType)) {
             throw new IllegalStateException("目前不支援此類型決策: " + decisionType);
         }
-        resolveSupportCardSelectionDecision(context, matchId, userId, pending, request);
+        matchSupportCardSelectionResolutionService.resolve(
+            matchId,
+            userId,
+            context.turnNumber,
+            context.match,
+            pending,
+            request
+        );
     }
 
     private void resolveTriggerEffectConfirmDecision(
@@ -868,69 +903,6 @@ public class MatchActionService {
             effectSummary
         );
         followupDecisionPayloadAppender.append(payload, followupDecision);
-        finalizeResolvedEffect(context, matchId, userId, effectSummary);
-    }
-
-    private void resolveSupportCardSelectionDecision(
-        ActionContext context,
-        Long matchId,
-        Long userId,
-        PendingDecision pending,
-        ResolveDecisionRequest request
-    ) {
-        List<Long> selectedCardInstanceIds = selectedCardValidationService.validate(
-            request == null ? null : request.getSelectedCardInstanceIds(),
-            pending.minSelect(),
-            pending.maxSelect(),
-            pending.candidateCardInstanceIds()
-        );
-
-        Map<String, Object> effectSummary = matchEffectService.applySupportEffect(
-            matchId,
-            userId,
-            pending.effectType(),
-            pending.effectJson(),
-            pending.targetType(),
-            selectedCardInstanceIds,
-            pending.targetHolomemCardInstanceId(),
-            true
-        );
-        pendingDecisionStore.markResolved(pending.decisionId());
-
-        transitionMatchToMainAndSave(context.match);
-
-        String sourceActionType = normalizeZone(pending.sourceActionType());
-        String resolvedActionType = ACTION_TYPE_USE_OSHI_SKILL.equals(sourceActionType)
-            ? ACTION_TYPE_USE_OSHI_SKILL
-            : "PLAY_SUPPORT";
-        Map<String, Object> payload = supportOshiEffectPayloadBuilder.buildResolvedSelectionEffectPayload(
-            pending.decisionId(),
-            sourceActionType,
-            pending.sourceCardInstanceId(),
-            pending.sourceCardId(),
-            pending.limited(),
-            pending.targetHolomemCardInstanceId(),
-            selectedCardInstanceIds,
-            effectSummary
-        );
-        FollowupInteractionDecision followupDecision = effectFollowupDecisionResolver.resolvePostTriggerOrInteraction(
-            matchId,
-            userId,
-            sourceActionType,
-            pending.sourceCardInstanceId(),
-            pending.sourceCardId(),
-            pending.effectType(),
-            effectSummary,
-            context.turnNumber
-        );
-        followupDecisionPayloadAppender.append(payload, followupDecision);
-        appendAction(
-            context.match,
-            userId,
-            resolvedActionType,
-            toJson(payload),
-            context.turnNumber
-        );
         finalizeResolvedEffect(context, matchId, userId, effectSummary);
     }
 
