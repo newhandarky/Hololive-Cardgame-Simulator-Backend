@@ -28,6 +28,8 @@ class MatchGiftReattachEffectExecutionServiceTest {
         effectTextParser
     );
     private final JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
+    private final MatchCheerCandidateQueryService cheerCandidateQueryService =
+        mock(MatchCheerCandidateQueryService.class);
 
     @Test
     void executeShouldReturnNoOpWhenDiceConditionMisses() {
@@ -155,6 +157,10 @@ class MatchGiftReattachEffectExecutionServiceTest {
     }
 
     private MatchGiftReattachEffectExecutionService newService(boolean diceHit) {
+        when(cheerCandidateQueryService.findCheerCardFromZone(any(), any(), eq("ARCHIVE")))
+            .thenReturn(cheerFromZone("ARCHIVE"));
+        when(cheerCandidateQueryService.findCheerCardFromZone(any(), any(), eq("CHEER_DECK")))
+            .thenReturn(cheerFromZone("CHEER_DECK"));
         return new MatchGiftReattachEffectExecutionService(
             jdbcTemplate,
             effectTextParser,
@@ -166,7 +172,7 @@ class MatchGiftReattachEffectExecutionServiceTest {
             (matchId, userId, targetType, targetHolomemCardInstanceId, rawText, preferSelfBackTarget, excludedHolomemId) -> 22L,
             (matchId, holomemId) -> 10L,
             (matchId, userId, targetHolomemCardInstanceId) -> 33L,
-            this::cheerFromZone,
+            cheerCandidateQueryService,
             matchHolomemId -> matchHolomemId == null ? null : matchHolomemId * 100L
         );
     }
@@ -179,10 +185,7 @@ class MatchGiftReattachEffectExecutionServiceTest {
         return summary;
     }
 
-    private Map<String, Object> cheerFromZone(Long matchId, Long userId, String zone) {
-        if (!"ARCHIVE".equals(zone) && !"CHEER_DECK".equals(zone)) {
-            return null;
-        }
+    private Map<String, Object> cheerFromZone(String zone) {
         return Map.of(
             "id", 501L,
             "card_id", "CHEER-ZONE",

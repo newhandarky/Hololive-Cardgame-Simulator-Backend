@@ -2,7 +2,7 @@ package com.hololive.cardgame.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -16,7 +16,6 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.ResultSetExtractor;
 
 class MatchAddCheerSourceResolverServiceTest {
 
@@ -24,17 +23,21 @@ class MatchAddCheerSourceResolverServiceTest {
     private final JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
     private final EffectTextParser effectTextParser = new EffectTextParser(objectMapper);
     private final SearchCriteriaParser searchCriteriaParser = new SearchCriteriaParser(jdbcTemplate, effectTextParser);
+    private final MatchCheerCandidateQueryService cheerCandidateQueryService =
+        mock(MatchCheerCandidateQueryService.class);
 
     @Test
     void resolveShouldUseArchiveWhenTextMentionsArchiveCheer() {
         List<String> requestedZones = new ArrayList<>();
-        MatchAddCheerSourceResolverService service = newService(
-            (matchId, userId, zone, criteria) -> {
+        MatchAddCheerSourceResolverService service = newService();
+        when(cheerCandidateQueryService.findCheerCardFromZone(eq(1L), eq(10L), eq("ARCHIVE"), any(SearchCriteria.class)))
+            .thenAnswer(invocation -> {
+                SearchCriteria criteria = invocation.getArgument(3);
+                String zone = invocation.getArgument(2);
                 requestedZones.add(zone);
                 assertThat(criteria.color()).isEqualTo("YELLOW");
                 return Map.of("id", 501L, "card_id", "CHEER-Y", "zone", zone);
-            }
-        );
+            });
 
         Map<String, Object> source = service.resolvePreferredAddCheerSource(
             1L,
@@ -49,12 +52,13 @@ class MatchAddCheerSourceResolverServiceTest {
     @Test
     void resolveShouldUseCheerDeckWhenTextMentionsCheerDeck() {
         List<String> requestedZones = new ArrayList<>();
-        MatchAddCheerSourceResolverService service = newService(
-            (matchId, userId, zone, criteria) -> {
+        MatchAddCheerSourceResolverService service = newService();
+        when(cheerCandidateQueryService.findCheerCardFromZone(eq(1L), eq(10L), eq("CHEER_DECK"), any(SearchCriteria.class)))
+            .thenAnswer(invocation -> {
+                String zone = invocation.getArgument(2);
                 requestedZones.add(zone);
                 return Map.of("id", 502L, "card_id", "CHEER-D", "zone", zone);
-            }
-        );
+            });
 
         Map<String, Object> source = service.resolvePreferredAddCheerSource(
             1L,
@@ -68,16 +72,12 @@ class MatchAddCheerSourceResolverServiceTest {
 
     @Test
     void resolveShouldFallbackWhenTextDoesNotMentionKnownSourceZone() {
-        MatchAddCheerSourceResolverService service = newService(
-            (matchId, userId, zone, criteria) -> {
-                throw new AssertionError("zone finder should not be used");
-            }
-        );
+        MatchAddCheerSourceResolverService service = newService();
         Map<String, Object> fallbackSource = new LinkedHashMap<>();
         fallbackSource.put("id", 503L);
         fallbackSource.put("card_id", "CHEER-F");
         fallbackSource.put("zone", "HAND");
-        when(jdbcTemplate.query(anyString(), any(ResultSetExtractor.class), any(), any())).thenReturn(fallbackSource);
+        when(cheerCandidateQueryService.findAttachableCheerCard(1L, 10L)).thenReturn(fallbackSource);
 
         Map<String, Object> source = service.resolvePreferredAddCheerSource(
             1L,
@@ -88,9 +88,7 @@ class MatchAddCheerSourceResolverServiceTest {
         assertThat(source).containsEntry("id", 503L).containsEntry("zone", "HAND");
     }
 
-    private MatchAddCheerSourceResolverService newService(
-        MatchAddCheerSourceResolverService.CheerZoneFinder cheerZoneFinder
-    ) {
-        return new MatchAddCheerSourceResolverService(jdbcTemplate, searchCriteriaParser, cheerZoneFinder);
+    private MatchAddCheerSourceResolverService newService() {
+        return new MatchAddCheerSourceResolverService(searchCriteriaParser, cheerCandidateQueryService);
     }
 }

@@ -61,6 +61,7 @@ public class MatchEffectService {
     private final GiftTriggerMatcher giftTriggerMatcher;
     private final SearchCriteriaParser searchCriteriaParser;
     private final MatchEffectSearchService searchService;
+    private final MatchCheerCandidateQueryService cheerCandidateQueryService;
     private final MatchGiftTriggerConditionService giftTriggerConditionService;
     private final MatchGiftTriggerContextService giftTriggerContextService;
     private final GiftTurnUsageReader giftTurnUsageReader;
@@ -122,6 +123,7 @@ public class MatchEffectService {
         this.giftTriggerMatcher = new GiftTriggerMatcher();
         this.searchCriteriaParser = new SearchCriteriaParser(jdbcTemplate, effectTextParser);
         this.searchService = new MatchEffectSearchService(jdbcTemplate, effectTextParser);
+        this.cheerCandidateQueryService = new MatchCheerCandidateQueryService(jdbcTemplate, searchService);
         this.giftTriggerConditionService = new MatchGiftTriggerConditionService(
             jdbcTemplate,
             effectTextParser,
@@ -340,9 +342,8 @@ public class MatchEffectService {
             this::resolveEffectTargetHolomemId
         );
         this.addCheerSourceResolverService = new MatchAddCheerSourceResolverService(
-            jdbcTemplate,
             searchCriteriaParser,
-            this::findCheerCardFromZone
+            cheerCandidateQueryService
         );
         this.giftReattachEffectExecutionService = new MatchGiftReattachEffectExecutionService(
             jdbcTemplate,
@@ -355,7 +356,7 @@ public class MatchEffectService {
             addCheerTargetResolverService::resolvePreferredAddCheerTargetHolomemId,
             this::resolveHolomemOwner,
             this::resolveTargetHolomemId,
-            this::findCheerCardFromZone,
+            cheerCandidateQueryService,
             this::resolveHolomemCardInstanceId
         );
         this.giftAddCheerEffectExecutionService = new MatchGiftAddCheerEffectExecutionService(
@@ -4387,36 +4388,6 @@ public class MatchEffectService {
      */
     boolean isGiftAlreadyUsedThisTurn(Long matchId, Long userId, int turnNumber, Long holderHolomemId) {
         return giftTurnUsageReader.isGiftAlreadyUsedThisTurn(matchId, userId, turnNumber, holderHolomemId);
-    }
-
-    /**
-     * 從指定區域挑選一張 cheer 卡候選。
-     */
-    private Map<String, Object> findCheerCardFromZone(Long matchId, Long userId, String zone) {
-        return findCheerCardFromZone(matchId, userId, zone, SearchCriteria.empty());
-    }
-
-    /**
-     * 從指定區域挑選一張符合條件的 Cheer。
-     *
-     * <p>這裡保留舊的 zone-only 版本，同時新增可帶 SearchCriteria 的 overload，
-     * 讓 `黄エール`、`赤エール` 這類官方文案能沿用同一套過濾能力，而不是另外寫成特例 SQL。
-     */
-    private Map<String, Object> findCheerCardFromZone(Long matchId, Long userId, String zone, SearchCriteria criteria) {
-        String normalizedZone = normalize(zone);
-        if (!"CHEER_DECK".equals(normalizedZone) && !"ARCHIVE".equals(normalizedZone) && !"STAGE".equals(normalizedZone)) {
-            return null;
-        }
-        List<Map<String, Object>> candidates = loadCandidatesFromZone(matchId, userId, normalizedZone, criteria, false);
-        if (candidates.isEmpty()) {
-            return null;
-        }
-        Map<String, Object> candidate = candidates.get(0);
-        Map<String, Object> row = new LinkedHashMap<>();
-        row.put("id", candidate.get("id"));
-        row.put("card_id", candidate.get("card_id"));
-        row.put("zone", normalizedZone);
-        return row;
     }
 
     /**

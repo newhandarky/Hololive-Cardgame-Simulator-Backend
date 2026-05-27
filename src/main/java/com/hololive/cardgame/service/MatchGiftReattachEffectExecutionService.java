@@ -21,7 +21,7 @@ final class MatchGiftReattachEffectExecutionService {
     private final PreferredAddCheerTargetResolver preferredAddCheerTargetResolver;
     private final HolomemOwnerResolver holomemOwnerResolver;
     private final TargetHolomemResolver targetHolomemResolver;
-    private final CheerCardFromZoneResolver cheerCardFromZoneResolver;
+    private final MatchCheerCandidateQueryService cheerCandidateQueryService;
     private final HolomemCardInstanceResolver holomemCardInstanceResolver;
 
     MatchGiftReattachEffectExecutionService(
@@ -35,7 +35,7 @@ final class MatchGiftReattachEffectExecutionService {
         PreferredAddCheerTargetResolver preferredAddCheerTargetResolver,
         HolomemOwnerResolver holomemOwnerResolver,
         TargetHolomemResolver targetHolomemResolver,
-        CheerCardFromZoneResolver cheerCardFromZoneResolver,
+        MatchCheerCandidateQueryService cheerCandidateQueryService,
         HolomemCardInstanceResolver holomemCardInstanceResolver
     ) {
         this.jdbcTemplate = jdbcTemplate;
@@ -48,7 +48,7 @@ final class MatchGiftReattachEffectExecutionService {
         this.preferredAddCheerTargetResolver = preferredAddCheerTargetResolver;
         this.holomemOwnerResolver = holomemOwnerResolver;
         this.targetHolomemResolver = targetHolomemResolver;
-        this.cheerCardFromZoneResolver = cheerCardFromZoneResolver;
+        this.cheerCandidateQueryService = cheerCandidateQueryService;
         this.holomemCardInstanceResolver = holomemCardInstanceResolver;
     }
 
@@ -118,7 +118,11 @@ final class MatchGiftReattachEffectExecutionService {
         if (rawText.contains("アーカイブ")) {
             sourceMode = "ARCHIVE";
             for (int i = 0; i < moveCount; i++) {
-                Map<String, Object> archivedCheer = cheerCardFromZoneResolver.find(matchId, sourceOwnerUserId, "ARCHIVE");
+                Map<String, Object> archivedCheer = cheerCandidateQueryService.findCheerCardFromZone(
+                    matchId,
+                    sourceOwnerUserId,
+                    "ARCHIVE"
+                );
                 if (archivedCheer == null) {
                     break;
                 }
@@ -251,7 +255,11 @@ final class MatchGiftReattachEffectExecutionService {
             if (movedCheerCardIds.isEmpty() && rawText.contains("エールデッキ")) {
                 sourceMode = "CHEER_DECK";
                 for (int i = 0; i < moveCount; i++) {
-                    Map<String, Object> cheerDeckTop = cheerCardFromZoneResolver.find(matchId, sourceOwnerUserId, "CHEER_DECK");
+                    Map<String, Object> cheerDeckTop = cheerCandidateQueryService.findCheerCardFromZone(
+                        matchId,
+                        sourceOwnerUserId,
+                        "CHEER_DECK"
+                    );
                     if (cheerDeckTop == null) {
                         break;
                     }
@@ -559,11 +567,6 @@ final class MatchGiftReattachEffectExecutionService {
     @FunctionalInterface
     interface TargetHolomemResolver {
         Long resolve(Long matchId, Long userId, Long targetHolomemCardInstanceId);
-    }
-
-    @FunctionalInterface
-    interface CheerCardFromZoneResolver {
-        Map<String, Object> find(Long matchId, Long userId, String zone);
     }
 
     @FunctionalInterface

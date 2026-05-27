@@ -4,25 +4,20 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hololive.cardgame.service.effect.SearchCriteria;
 import com.hololive.cardgame.service.effect.SearchCriteriaParser;
-import java.util.LinkedHashMap;
 import java.util.Map;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.util.StringUtils;
 
 class MatchAddCheerSourceResolverService {
 
-    private final JdbcTemplate jdbcTemplate;
     private final SearchCriteriaParser searchCriteriaParser;
-    private final CheerZoneFinder cheerZoneFinder;
+    private final MatchCheerCandidateQueryService cheerCandidateQueryService;
 
     MatchAddCheerSourceResolverService(
-        JdbcTemplate jdbcTemplate,
         SearchCriteriaParser searchCriteriaParser,
-        CheerZoneFinder cheerZoneFinder
+        MatchCheerCandidateQueryService cheerCandidateQueryService
     ) {
-        this.jdbcTemplate = jdbcTemplate;
         this.searchCriteriaParser = searchCriteriaParser;
-        this.cheerZoneFinder = cheerZoneFinder;
+        this.cheerCandidateQueryService = cheerCandidateQueryService;
     }
 
     /**
@@ -39,12 +34,12 @@ class MatchAddCheerSourceResolverService {
         SearchCriteria sourceCriteria = resolveSearchCriteriaFromRawText(sourceClause);
 
         if (StringUtils.hasText(sourceClause) && sourceClause.contains("アーカイブの")) {
-            return cheerZoneFinder.find(matchId, userId, "ARCHIVE", sourceCriteria);
+            return cheerCandidateQueryService.findCheerCardFromZone(matchId, userId, "ARCHIVE", sourceCriteria);
         }
         if (StringUtils.hasText(sourceClause) && sourceClause.contains("エールデッキ")) {
-            return cheerZoneFinder.find(matchId, userId, "CHEER_DECK", sourceCriteria);
+            return cheerCandidateQueryService.findCheerCardFromZone(matchId, userId, "CHEER_DECK", sourceCriteria);
         }
-        return findAttachableCheerCard(matchId, userId);
+        return cheerCandidateQueryService.findAttachableCheerCard(matchId, userId);
     }
 
     /**
@@ -82,37 +77,6 @@ class MatchAddCheerSourceResolverService {
     }
 
     /**
-     * 取得可附加的 cheer 卡候選，依 CHEER_DECK > ARCHIVE > HAND 優先。
-     */
-    private Map<String, Object> findAttachableCheerCard(Long matchId, Long userId) {
-        return jdbcTemplate.query(
-            """
-            SELECT mc.id, mc.card_id, mc.zone
-            FROM match_cards mc
-            JOIN cheer_cards cc ON cc.card_id = mc.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.zone IN ('CHEER_DECK','ARCHIVE','HAND')
-            ORDER BY CASE mc.zone WHEN 'CHEER_DECK' THEN 1 WHEN 'ARCHIVE' THEN 2 WHEN 'HAND' THEN 3 ELSE 9 END,
-                     mc.order_index NULLS LAST, mc.id
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id", rs.getLong("id"));
-                row.put("card_id", rs.getString("card_id"));
-                row.put("zone", rs.getString("zone"));
-                return row;
-            },
-            matchId,
-            userId
-        );
-    }
-
-    /**
      * 直接把一小段 raw text 轉成 SearchCriteria。
      */
     private SearchCriteria resolveSearchCriteriaFromRawText(String rawText) {
@@ -124,8 +88,4 @@ class MatchAddCheerSourceResolverService {
         return searchCriteriaParser.resolveSearchCriteria(probe);
     }
 
-    @FunctionalInterface
-    interface CheerZoneFinder {
-        Map<String, Object> find(Long matchId, Long userId, String zone, SearchCriteria criteria);
-    }
 }
