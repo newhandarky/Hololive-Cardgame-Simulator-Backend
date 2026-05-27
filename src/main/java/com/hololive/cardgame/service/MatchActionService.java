@@ -36,7 +36,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -90,6 +89,7 @@ public class MatchActionService {
     private final FollowupDecisionPayloadAppender followupDecisionPayloadAppender;
     private final MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender;
     private final SelectedCardValidationService selectedCardValidationService;
+    private final MatchTurnStartCollabReturnService matchTurnStartCollabReturnService;
     private final AdvancePhasePayloadBuilder advancePhasePayloadBuilder;
     private final SupportOshiEffectPayloadBuilder supportOshiEffectPayloadBuilder;
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
@@ -234,6 +234,7 @@ public class MatchActionService {
         );
         this.followupDecisionPayloadAppender = new FollowupDecisionPayloadAppender();
         this.selectedCardValidationService = new SelectedCardValidationService();
+        this.matchTurnStartCollabReturnService = new MatchTurnStartCollabReturnService(jdbcTemplate);
         this.mainStepGiftFollowupPayloadAppender = new MainStepGiftFollowupPayloadAppender(
             matchGiftTriggerService,
             giftTriggeredEffectDeferredSummaryBuilder,
@@ -963,7 +964,7 @@ public class MatchActionService {
         PendingDecision pending
     ) {
         pendingDecisionStore.markResolved(pending.decisionId());
-        returnCollabToBackAsRested(matchId, userId);
+        matchTurnStartCollabReturnService.returnCollabToBackAsRested(matchId, userId);
         matchTurnLifecycleService.confirmTurnStartDecision(
             context.match,
             userId,
@@ -3203,92 +3204,6 @@ public class MatchActionService {
         summary.put("archivedCardInstanceIds", archivedCardInstanceIds);
         summary.put("archivedCardIds", archivedCardIds);
         return summary;
-    }
-
-    /**
-     * 將 COLLAB Holomem 退回 BACK 並設為休息。
-     */
-    private void returnCollabToBackAsRested(Long matchId, Long userId) {
-        if (matchId == null || userId == null) {
-            return;
-        }
-        List<Map<String, Object>> collabRows = jdbcTemplate.queryForList(
-            """
-            SELECT id, card_id
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'COLLAB'
-            """,
-            matchId,
-            userId
-        );
-        if (collabRows.isEmpty()) {
-            return;
-        }
-        jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET zone = 'BACK',
-                is_rested = TRUE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'COLLAB'
-            """,
-            matchId,
-            userId
-        );
-        boolean shouldKeepHbp03039Unrested = isOwnCenterHolomemNameContains(matchId, userId, "フワワ・アビスガード");
-        if (!shouldKeepHbp03039Unrested) {
-            return;
-        }
-        List<Long> movedCollabIds = collabRows.stream()
-            .map(row -> asLong(row.get("id")))
-            .filter(Objects::nonNull)
-            .toList();
-        if (movedCollabIds.isEmpty()) {
-            return;
-        }
-        jdbcTemplate.update(
-            """
-            UPDATE match_holomems
-            SET is_rested = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'BACK'
-              AND card_id = 'HBP03-039'
-              AND id = ANY (?::bigint[])
-            """,
-            ps -> {
-                ps.setLong(1, matchId);
-                ps.setLong(2, userId);
-                ps.setArray(3, ps.getConnection().createArrayOf("bigint", movedCollabIds.toArray()));
-            }
-        );
-    }
-
-    private boolean isOwnCenterHolomemNameContains(Long matchId, Long userId, String requiredNamePart) {
-        if (matchId == null || userId == null || !StringUtils.hasText(requiredNamePart)) {
-            return false;
-        }
-        String centerName = jdbcTemplate.query(
-            """
-            SELECT c.name
-            FROM match_holomems h
-            JOIN cards c ON c.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.zone = 'CENTER'
-            ORDER BY h.id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getString("name") : null,
-            matchId,
-            userId
-        );
-        return StringUtils.hasText(centerName) && centerName.contains(requiredNamePart);
     }
 
     /**
