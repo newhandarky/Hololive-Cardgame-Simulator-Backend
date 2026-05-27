@@ -91,6 +91,7 @@ public class MatchEffectService {
     private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
     private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
     private final MatchDamageEffectExecutionService damageEffectExecutionService;
+    private final MatchGiftArchiveReturnEffectExecutionService giftArchiveReturnEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
     private final MatchGiftEffectDispatcher giftEffectDispatcher;
@@ -326,6 +327,10 @@ public class MatchEffectService {
             this::executeDownEvent,
             this::extractLostLifeCardInstanceIds
         );
+        this.giftArchiveReturnEffectExecutionService = new MatchGiftArchiveReturnEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -394,7 +399,7 @@ public class MatchEffectService {
             downEffectExecutionService,
             healEffectExecutionService,
             effectTypeInferenceService,
-            new MatchGiftEffectServiceHandlers(this)
+            new MatchGiftEffectServiceHandlers(this, giftArchiveReturnEffectExecutionService)
         );
     }
 
@@ -1384,118 +1389,6 @@ public class MatchEffectService {
     }
 
     /**
-     * 執行「將已公開且本來要進 Archive 的支援卡改為回手」效果。
-     *
-     * <p>目前用於 `HBP02-039`。公開本體在 `ATTACK_ART` 的 `holoxReveal` payload，這裡只負責把
-     * 本次公開進 Archive 的支援卡 1 張改到手牌。
-     */
-    Map<String, Object> executeReplaceArchiveWithHandEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode,
-        Long holderCardInstanceId
-    ) {
-        List<Long> archivedSupportCardInstanceIds = loadLatestHoloxArchivedSupportCardInstanceIds(
-            matchId,
-            userId,
-            holderCardInstanceId
-        );
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("candidateCardInstanceIds", archivedSupportCardInstanceIds);
-        if (archivedSupportCardInstanceIds.isEmpty()) {
-            summary.put("applied", false);
-            summary.put("reason", "本次公開沒有支援卡可改為回手");
-            return summary;
-        }
-
-        Long movedCardInstanceId = null;
-        String movedCardId = null;
-        int nextHandOrder = nextZoneOrder(matchId, userId, "HAND");
-        for (Long candidateCardInstanceId : archivedSupportCardInstanceIds) {
-            if (candidateCardInstanceId == null || candidateCardInstanceId <= 0) {
-                continue;
-            }
-            int updated = jdbcTemplate.update(
-                """
-                UPDATE match_cards
-                SET zone = 'HAND',
-                    order_index = ?,
-                    is_face_down = FALSE,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND match_id = ?
-                  AND owner_user_id = ?
-                  AND zone = 'ARCHIVE'
-                """,
-                nextHandOrder++,
-                candidateCardInstanceId,
-                matchId,
-                userId
-            );
-            if (updated != 1) {
-                continue;
-            }
-            movedCardInstanceId = candidateCardInstanceId;
-            movedCardId = jdbcTemplate.query(
-                "SELECT card_id FROM match_cards WHERE id = ?",
-                rs -> rs.next() ? rs.getString("card_id") : null,
-                candidateCardInstanceId
-            );
-            break;
-        }
-
-        if (movedCardInstanceId == null) {
-            summary.put("applied", false);
-            summary.put("reason", "找不到可從 Archive 改為回手的支援卡");
-            return summary;
-        }
-
-        summary.put("applied", true);
-        summary.put("movedCardInstanceId", movedCardInstanceId);
-        summary.put("movedCardId", movedCardId);
-        summary.put("movedCount", 1);
-        return summary;
-    }
-
-    private List<Long> loadLatestHoloxArchivedSupportCardInstanceIds(
-        Long matchId,
-        Long userId,
-        Long holderCardInstanceId
-    ) {
-        if (matchId == null || userId == null || holderCardInstanceId == null || holderCardInstanceId <= 0) {
-            return List.of();
-        }
-        String payloadText = jdbcTemplate.query(
-            """
-            SELECT payload::text
-            FROM match_actions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND action_type = 'ATTACK_ART'
-              AND payload ->> 'attackerCardInstanceId' = ?
-              AND payload ->> 'artName' = 'ホロックスロット'
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getString("payload") : null,
-            matchId,
-            userId,
-            holderCardInstanceId.toString()
-        );
-        JsonNode payloadNode = effectTextParser.parseEffectJson(payloadText);
-        if (payloadNode == null || payloadNode.isNull()) {
-            return List.of();
-        }
-        JsonNode holoxRevealNode = payloadNode.get("holoxReveal");
-        if (holoxRevealNode == null || holoxRevealNode.isNull()) {
-            return List.of();
-        }
-        return toLongList(holoxRevealNode.get("archivedSupportCardInstanceIds"));
-    }
-
-    /**
      * 套用バトンタッチ費用修正，寫入當回合效果表供後續行為讀取。
      */
     Map<String, Object> executeBatonTouchCostModifierEffect(
@@ -2028,10 +1921,6 @@ public class MatchEffectService {
 
     private List<Long> extractEffectNodeLongList(JsonNode effectNode, String fieldName) {
         return MatchEffectValueHelper.extractEffectNodeLongList(effectNode, fieldName);
-    }
-
-    private List<Long> toLongList(Object value) {
-        return MatchEffectValueHelper.toLongList(value);
     }
 
     private List<String> toTextList(Object value) {

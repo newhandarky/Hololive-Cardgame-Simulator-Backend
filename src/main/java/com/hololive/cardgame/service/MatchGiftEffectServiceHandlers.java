@@ -6,9 +6,14 @@ import java.util.Map;
 final class MatchGiftEffectServiceHandlers implements MatchGiftEffectDispatcher.GiftEffectHandlers {
 
     private final MatchEffectService effectService;
+    private final MatchGiftArchiveReturnEffectExecutionService archiveReturnEffectExecutionService;
 
-    MatchGiftEffectServiceHandlers(MatchEffectService effectService) {
+    MatchGiftEffectServiceHandlers(
+        MatchEffectService effectService,
+        MatchGiftArchiveReturnEffectExecutionService archiveReturnEffectExecutionService
+    ) {
         this.effectService = effectService;
+        this.archiveReturnEffectExecutionService = archiveReturnEffectExecutionService;
     }
 
     @Override
@@ -19,7 +24,7 @@ final class MatchGiftEffectServiceHandlers implements MatchGiftEffectDispatcher.
         JsonNode effectNode,
         Long holderCardInstanceId
     ) {
-        return effectService.executeReplaceArchiveWithHandEffect(
+        return archiveReturnEffectExecutionService.executeReplaceArchiveWithHandEffect(
             matchId,
             userId,
             effectType,
