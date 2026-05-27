@@ -7,13 +7,16 @@ final class MatchGiftEffectServiceHandlers implements MatchGiftEffectDispatcher.
 
     private final MatchEffectService effectService;
     private final MatchGiftArchiveReturnEffectExecutionService archiveReturnEffectExecutionService;
+    private final MatchGiftReattachEffectExecutionService reattachEffectExecutionService;
 
     MatchGiftEffectServiceHandlers(
         MatchEffectService effectService,
-        MatchGiftArchiveReturnEffectExecutionService archiveReturnEffectExecutionService
+        MatchGiftArchiveReturnEffectExecutionService archiveReturnEffectExecutionService,
+        MatchGiftReattachEffectExecutionService reattachEffectExecutionService
     ) {
         this.effectService = effectService;
         this.archiveReturnEffectExecutionService = archiveReturnEffectExecutionService;
+        this.reattachEffectExecutionService = reattachEffectExecutionService;
     }
 
     @Override
@@ -80,7 +83,7 @@ final class MatchGiftEffectServiceHandlers implements MatchGiftEffectDispatcher.
         String targetType,
         Long sourceHolomemCardInstanceId
     ) {
-        return effectService.executeReattachEffect(
+        return reattachEffectExecutionService.executeReattachEffect(
             matchId,
             userId,
             effectType,

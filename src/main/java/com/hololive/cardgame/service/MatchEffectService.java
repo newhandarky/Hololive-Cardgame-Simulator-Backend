@@ -92,6 +92,7 @@ public class MatchEffectService {
     private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
     private final MatchDamageEffectExecutionService damageEffectExecutionService;
     private final MatchGiftArchiveReturnEffectExecutionService giftArchiveReturnEffectExecutionService;
+    private final MatchGiftReattachEffectExecutionService giftReattachEffectExecutionService;
     private final MatchBloomEffectDispatcher bloomEffectDispatcher;
     private final MatchCollabEffectDispatcher collabEffectDispatcher;
     private final MatchGiftEffectDispatcher giftEffectDispatcher;
@@ -331,6 +332,20 @@ public class MatchEffectService {
             jdbcTemplate,
             effectTextParser
         );
+        this.giftReattachEffectExecutionService = new MatchGiftReattachEffectExecutionService(
+            jdbcTemplate,
+            effectTextParser,
+            cardSelectionRequestResolver,
+            this::shouldApplyByDice,
+            this::executeNoOpEffect,
+            this::resolveOpponentUserId,
+            this::resolveGiftEffectHolderHolomemId,
+            this::resolvePreferredAddCheerTargetHolomemId,
+            this::resolveHolomemOwner,
+            this::resolveTargetHolomemId,
+            this::findCheerCardFromZone,
+            this::resolveHolomemCardInstanceId
+        );
         this.bloomEffectDispatcher = new MatchBloomEffectDispatcher(
             cardSelectionExecutionService,
             lookEffectExecutionService,
@@ -399,7 +414,7 @@ public class MatchEffectService {
             downEffectExecutionService,
             healEffectExecutionService,
             effectTypeInferenceService,
-            new MatchGiftEffectServiceHandlers(this, giftArchiveReturnEffectExecutionService)
+            new MatchGiftEffectServiceHandlers(this, giftArchiveReturnEffectExecutionService, giftReattachEffectExecutionService)
         );
     }
 
@@ -501,7 +516,7 @@ public class MatchEffectService {
                         )
                     );
                     case "REATTACH" -> executed.add(
-                        executeReattachEffect(
+                        giftReattachEffectExecutionService.executeReattachEffect(
                             matchId,
                             userId,
                             type,
@@ -1125,9 +1140,6 @@ public class MatchEffectService {
         return null;
     }
 
-    /**
-     * 執行重新附加效果（將符合條件卡移到目標 Holomem 下方）。
-     */
     Map<String, Object> executeReattachEffect(
         Long matchId,
         Long userId,
@@ -1136,256 +1148,14 @@ public class MatchEffectService {
         String targetType,
         Long targetHolomemCardInstanceId
     ) {
-        String rawText = effectTextParser.normalizeDigits(effectTextParser.extractText(effectNode, "rawText", "rawEffect"));
-        if (!shouldApplyByDice(rawText, effectNode, effectType)) {
-            return executeNoOpEffect(effectType, effectNode, "骰子條件未命中");
-        }
-        if (!rawText.contains("エール")) {
-            return executeNoOpEffect(effectType, effectNode, "目前僅支援 Cheer 的付け/付け替え");
-        }
-
-        String normalizedTargetType = normalize(targetType);
-        boolean opponentContext =
-            isOpponentTargetType(normalizedTargetType)
-                || rawText.contains("相手のステージ")
-                || rawText.contains("相手のアーカイブ")
-                || rawText.contains("相手のエールデッキ");
-        Long sourceOwnerUserId = opponentContext ? resolveOpponentUserId(matchId, userId) : userId;
-        if (sourceOwnerUserId == null) {
-            return executeNoOpEffect(effectType, effectNode, "找不到可操作的玩家");
-        }
-        String effectiveTargetType = opponentContext ? "ENEMY" : targetType;
-        Long holderHolomemId = resolveGiftEffectHolderHolomemId(
+        return giftReattachEffectExecutionService.executeReattachEffect(
             matchId,
-            sourceOwnerUserId,
-            targetHolomemCardInstanceId,
-            effectNode
+            userId,
+            effectType,
+            effectNode,
+            targetType,
+            targetHolomemCardInstanceId
         );
-        Long targetHolomemId = resolvePreferredAddCheerTargetHolomemId(
-            matchId,
-            sourceOwnerUserId,
-            effectiveTargetType,
-            targetHolomemCardInstanceId,
-            rawText,
-            false,
-            holderHolomemId
-        );
-        if (targetHolomemId == null) {
-            throw new IllegalStateException("REATTACH 找不到目標 Holomen");
-        }
-        Long targetOwnerUserId = resolveHolomemOwner(matchId, targetHolomemId);
-        if (targetOwnerUserId == null) {
-            throw new IllegalStateException("REATTACH 結算失敗：找不到目標擁有者");
-        }
-        if (!targetOwnerUserId.equals(sourceOwnerUserId)) {
-            targetHolomemId = resolveTargetHolomemId(matchId, sourceOwnerUserId, null);
-            if (targetHolomemId == null) {
-                throw new IllegalStateException("REATTACH 結算失敗：找不到可附加的目標 Holomen");
-            }
-            targetOwnerUserId = sourceOwnerUserId;
-        }
-
-        int requestedCount = cardSelectionRequestResolver.resolveActionCount(effectNode, "付け", 1);
-        int moveCount = Math.max(requestedCount, 1);
-
-        List<String> movedCheerCardIds = new ArrayList<>();
-        List<Long> movedCheerRowIds = new ArrayList<>();
-        String sourceMode;
-        if (rawText.contains("アーカイブ")) {
-            sourceMode = "ARCHIVE";
-            for (int i = 0; i < moveCount; i++) {
-                Map<String, Object> archivedCheer = findCheerCardFromZone(matchId, sourceOwnerUserId, "ARCHIVE");
-                if (archivedCheer == null) {
-                    break;
-                }
-                Long cardInstanceId = asLong(archivedCheer.get("id"));
-                String cheerCardId = asText(archivedCheer.get("card_id"));
-                if (cardInstanceId == null || !StringUtils.hasText(cheerCardId)) {
-                    continue;
-                }
-                int moved = jdbcTemplate.update(
-                    """
-                    UPDATE match_cards
-                    SET zone = 'STAGE',
-                        order_index = NULL,
-                        is_face_down = FALSE,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                      AND match_id = ?
-                      AND owner_user_id = ?
-                      AND zone = 'ARCHIVE'
-                    """,
-                    cardInstanceId,
-                    matchId,
-                    sourceOwnerUserId
-                );
-                if (moved != 1) {
-                    continue;
-                }
-                Long cheerRowId = jdbcTemplate.query(
-                    """
-                    INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
-                    VALUES (?, ?, ?, FALSE)
-                    RETURNING id
-                    """,
-                    rs -> rs.next() ? rs.getLong("id") : null,
-                    targetHolomemId,
-                    cardInstanceId,
-                    cheerCardId
-                );
-                movedCheerCardIds.add(cheerCardId);
-                if (cheerRowId != null) {
-                    movedCheerRowIds.add(cheerRowId);
-                }
-            }
-        } else {
-            sourceMode = "STAGE";
-            boolean restrictToHolderCheer = rawText.contains("このホロメンのエール");
-            if (restrictToHolderCheer) {
-                List<Map<String, Object>> holderCheerRows = resolvePreferredReattachSourceRows(
-                    matchId,
-                    sourceOwnerUserId,
-                    holderHolomemId,
-                    effectNode
-                );
-                String holderCheerSourceMode = moveSpecificCheerRowsToHolomem(
-                    matchId,
-                    sourceOwnerUserId,
-                    targetHolomemId,
-                    holderCheerRows,
-                    moveCount,
-                    movedCheerCardIds,
-                    movedCheerRowIds
-                );
-                if (StringUtils.hasText(holderCheerSourceMode)) {
-                    sourceMode = holderCheerSourceMode;
-                }
-                Map<String, Object> summary = new LinkedHashMap<>();
-                summary.put("effectType", effectType);
-                summary.put("moveRequested", moveCount);
-                summary.put("moveApplied", movedCheerCardIds.size());
-                summary.put("targetHolomemId", targetHolomemId);
-                summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
-                summary.put("movedCheerCardIds", movedCheerCardIds);
-                summary.put("movedCheerRowIds", movedCheerRowIds);
-                summary.put("sourceMode", StringUtils.hasText(sourceMode) ? sourceMode : "HOLDER_CHEER");
-                return summary;
-            }
-            List<Map<String, Object>> attachedRows = jdbcTemplate.queryForList(
-                """
-                SELECT c.id AS cheer_row_id,
-                       c.match_card_id,
-                       c.cheer_card_id,
-                       c.match_holomem_id
-                FROM match_holomem_cheers c
-                JOIN match_holomems h ON h.id = c.match_holomem_id
-                WHERE h.match_id = ?
-                  AND h.owner_user_id = ?
-                ORDER BY CASE WHEN c.match_holomem_id = ? THEN 1 ELSE 0 END, c.id
-                LIMIT ?
-                """,
-                matchId,
-                sourceOwnerUserId,
-                targetHolomemId,
-                moveCount * 2
-            );
-            for (Map<String, Object> row : attachedRows) {
-                if (movedCheerCardIds.size() >= moveCount) {
-                    break;
-                }
-                Long cheerRowId = asLong(row.get("cheer_row_id"));
-                Long cheerCardInstanceId = asLong(row.get("match_card_id"));
-                Long fromHolomemId = asLong(row.get("match_holomem_id"));
-                String cheerCardId = asText(row.get("cheer_card_id"));
-                if (cheerRowId == null || !StringUtils.hasText(cheerCardId)) {
-                    continue;
-                }
-                if (targetHolomemId.equals(fromHolomemId)) {
-                    continue;
-                }
-                int deleted = jdbcTemplate.update(
-                    "DELETE FROM match_holomem_cheers WHERE id = ?",
-                    cheerRowId
-                );
-                if (deleted != 1) {
-                    continue;
-                }
-                Long newCheerRowId = jdbcTemplate.query(
-                    """
-                    INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
-                    VALUES (?, ?, ?, FALSE)
-                    RETURNING id
-                    """,
-                    rs -> rs.next() ? rs.getLong("id") : null,
-                    targetHolomemId,
-                    cheerCardInstanceId,
-                    cheerCardId
-                );
-                movedCheerCardIds.add(cheerCardId);
-                if (newCheerRowId != null) {
-                    movedCheerRowIds.add(newCheerRowId);
-                }
-            }
-            if (movedCheerCardIds.isEmpty() && rawText.contains("エールデッキ")) {
-                sourceMode = "CHEER_DECK";
-                for (int i = 0; i < moveCount; i++) {
-                    Map<String, Object> cheerDeckTop = findCheerCardFromZone(matchId, sourceOwnerUserId, "CHEER_DECK");
-                    if (cheerDeckTop == null) {
-                        break;
-                    }
-                    Long cardInstanceId = asLong(cheerDeckTop.get("id"));
-                    String cheerCardId = asText(cheerDeckTop.get("card_id"));
-                    if (cardInstanceId == null || !StringUtils.hasText(cheerCardId)) {
-                        continue;
-                    }
-                    int moved = jdbcTemplate.update(
-                        """
-                        UPDATE match_cards
-                        SET zone = 'STAGE',
-                            order_index = NULL,
-                            is_face_down = FALSE,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                          AND match_id = ?
-                          AND owner_user_id = ?
-                          AND zone = 'CHEER_DECK'
-                        """,
-                        cardInstanceId,
-                        matchId,
-                        sourceOwnerUserId
-                    );
-                    if (moved != 1) {
-                        continue;
-                    }
-                    Long newCheerRowId = jdbcTemplate.query(
-                        """
-                        INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
-                        VALUES (?, ?, ?, FALSE)
-                        RETURNING id
-                        """,
-                        rs -> rs.next() ? rs.getLong("id") : null,
-                        targetHolomemId,
-                        cardInstanceId,
-                        cheerCardId
-                    );
-                    movedCheerCardIds.add(cheerCardId);
-                    if (newCheerRowId != null) {
-                        movedCheerRowIds.add(newCheerRowId);
-                    }
-                }
-            }
-        }
-
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("effectType", effectType);
-        summary.put("moveRequested", moveCount);
-        summary.put("moveApplied", movedCheerCardIds.size());
-        summary.put("targetHolomemId", targetHolomemId);
-        summary.put("targetHolomemCardInstanceId", resolveHolomemCardInstanceId(targetHolomemId));
-        summary.put("movedCheerCardIds", movedCheerCardIds);
-        summary.put("movedCheerRowIds", movedCheerRowIds);
-        summary.put("sourceMode", sourceMode);
-        return summary;
     }
 
     /**
@@ -1739,188 +1509,6 @@ public class MatchEffectService {
             return storedHolomemId;
         }
         return resolveTargetHolomemId(matchId, ownerUserId, holderCardInstanceId);
-    }
-
-    private List<Map<String, Object>> resolvePreferredReattachSourceRows(
-        Long matchId,
-        Long ownerUserId,
-        Long holderHolomemId,
-        JsonNode effectNode
-    ) {
-        List<Long> storedCheerCardInstanceIds = extractEffectNodeLongList(effectNode, "giftHolderAttachedCheerCardInstanceIds");
-        if (!storedCheerCardInstanceIds.isEmpty()) {
-            List<Map<String, Object>> rows = new ArrayList<>();
-            for (Long storedCheerCardInstanceId : storedCheerCardInstanceIds) {
-                if (storedCheerCardInstanceId == null || storedCheerCardInstanceId <= 0) {
-                    continue;
-                }
-                Map<String, Object> row = jdbcTemplate.query(
-                    """
-                    SELECT c.id AS cheer_row_id,
-                           mc.id AS match_card_id,
-                           mc.card_id AS cheer_card_id,
-                           c.match_holomem_id,
-                           mc.zone
-                    FROM match_cards mc
-                    LEFT JOIN match_holomem_cheers c ON c.match_card_id = mc.id
-                    WHERE mc.match_id = ?
-                      AND mc.owner_user_id = ?
-                      AND mc.id = ?
-                    LIMIT 1
-                    """,
-                    rs -> {
-                        if (!rs.next()) {
-                            return null;
-                        }
-                        Map<String, Object> result = new LinkedHashMap<>();
-                        result.put("cheer_row_id", asLong(rs.getObject("cheer_row_id")));
-                        result.put("match_card_id", asLong(rs.getObject("match_card_id")));
-                        result.put("cheer_card_id", rs.getString("cheer_card_id"));
-                        result.put("match_holomem_id", asLong(rs.getObject("match_holomem_id")));
-                        result.put("zone", rs.getString("zone"));
-                        return result;
-                    },
-                    matchId,
-                    ownerUserId,
-                    storedCheerCardInstanceId
-                );
-                if (row != null && !row.isEmpty()) {
-                    rows.add(row);
-                }
-            }
-            return rows;
-        }
-        if (holderHolomemId == null || holderHolomemId <= 0) {
-            return List.of();
-        }
-        return jdbcTemplate.queryForList(
-            """
-            SELECT c.id AS cheer_row_id,
-                   mc.id AS match_card_id,
-                   mc.card_id AS cheer_card_id,
-                   c.match_holomem_id,
-                   mc.zone
-            FROM match_holomem_cheers c
-            JOIN match_cards mc ON mc.id = c.match_card_id
-            WHERE c.match_holomem_id = ?
-            ORDER BY c.id
-            """,
-            holderHolomemId
-        );
-    }
-
-    private String moveSpecificCheerRowsToHolomem(
-        Long matchId,
-        Long ownerUserId,
-        Long targetHolomemId,
-        List<Map<String, Object>> candidateRows,
-        int moveCount,
-        List<String> movedCheerCardIds,
-        List<Long> movedCheerRowIds
-    ) {
-        String sourceMode = null;
-        if (candidateRows == null || candidateRows.isEmpty()) {
-            return sourceMode;
-        }
-        for (Map<String, Object> row : candidateRows) {
-            if (movedCheerCardIds.size() >= moveCount) {
-                break;
-            }
-            Long cheerCardInstanceId = asLong(row.get("match_card_id"));
-            String cheerCardId = asText(row.get("cheer_card_id"));
-            String currentZone = normalize(asText(row.get("zone")));
-            if (cheerCardInstanceId == null || cheerCardInstanceId <= 0 || !StringUtils.hasText(cheerCardId)) {
-                continue;
-            }
-            if ("ARCHIVE".equals(currentZone)) {
-                int moved = jdbcTemplate.update(
-                    """
-                    UPDATE match_cards
-                    SET zone = 'STAGE',
-                        order_index = NULL,
-                        is_face_down = FALSE,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                      AND match_id = ?
-                      AND owner_user_id = ?
-                      AND zone = 'ARCHIVE'
-                    """,
-                    cheerCardInstanceId,
-                    matchId,
-                    ownerUserId
-                );
-                if (moved != 1) {
-                    continue;
-                }
-                Long newCheerRowId = jdbcTemplate.query(
-                    """
-                    INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
-                    VALUES (?, ?, ?, FALSE)
-                    RETURNING id
-                    """,
-                    rs -> rs.next() ? rs.getLong("id") : null,
-                    targetHolomemId,
-                    cheerCardInstanceId,
-                    cheerCardId
-                );
-                movedCheerCardIds.add(cheerCardId);
-                if (newCheerRowId != null) {
-                    movedCheerRowIds.add(newCheerRowId);
-                }
-                sourceMode = mergeSourceMode(sourceMode, "ARCHIVE");
-                continue;
-            }
-            if (!"STAGE".equals(currentZone)) {
-                continue;
-            }
-            jdbcTemplate.update(
-                """
-                DELETE FROM match_holomem_cheers c
-                USING match_holomems h
-                WHERE c.match_holomem_id = h.id
-                  AND c.match_card_id = ?
-                  AND h.match_id = ?
-                  AND h.owner_user_id = ?
-                """,
-                cheerCardInstanceId,
-                matchId,
-                ownerUserId
-            );
-            Long newCheerRowId = jdbcTemplate.query(
-                """
-                INSERT INTO match_holomem_cheers (match_holomem_id, match_card_id, cheer_card_id, is_face_down)
-                VALUES (?, ?, ?, FALSE)
-                RETURNING id
-                """,
-                rs -> rs.next() ? rs.getLong("id") : null,
-                targetHolomemId,
-                cheerCardInstanceId,
-                cheerCardId
-            );
-            movedCheerCardIds.add(cheerCardId);
-            if (newCheerRowId != null) {
-                movedCheerRowIds.add(newCheerRowId);
-            }
-            sourceMode = mergeSourceMode(sourceMode, "STAGE");
-        }
-        return sourceMode;
-    }
-
-    private String mergeSourceMode(String current, String next) {
-        if (!StringUtils.hasText(next)) {
-            return current;
-        }
-        if (!StringUtils.hasText(current)) {
-            return next;
-        }
-        if (current.equals(next)) {
-            return current;
-        }
-        return "MIXED";
-    }
-
-    private List<Long> extractEffectNodeLongList(JsonNode effectNode, String fieldName) {
-        return MatchEffectValueHelper.extractEffectNodeLongList(effectNode, fieldName);
     }
 
     private List<String> toTextList(Object value) {
