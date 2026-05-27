@@ -49,7 +49,8 @@ class MatchDecisionResolutionServiceTest {
         matchTurnLifecycleService,
         mainStepGiftFollowupPayloadAppender,
         gameActionExecutor,
-        new SendCheerInteractionPayloadBuilder()
+        new SendCheerInteractionPayloadBuilder(),
+        new SelectedCardValidationService()
     );
 
     @Test

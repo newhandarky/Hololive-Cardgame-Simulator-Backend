@@ -89,6 +89,7 @@ public class MatchActionService {
     private final EffectFollowupDecisionResolver effectFollowupDecisionResolver;
     private final FollowupDecisionPayloadAppender followupDecisionPayloadAppender;
     private final MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender;
+    private final SelectedCardValidationService selectedCardValidationService;
     private final AdvancePhasePayloadBuilder advancePhasePayloadBuilder;
     private final SupportOshiEffectPayloadBuilder supportOshiEffectPayloadBuilder;
     private final InteractionConfirmedPayloadBuilder interactionConfirmedPayloadBuilder;
@@ -232,6 +233,7 @@ public class MatchActionService {
             followupInteractionPendingDecisionWriter
         );
         this.followupDecisionPayloadAppender = new FollowupDecisionPayloadAppender();
+        this.selectedCardValidationService = new SelectedCardValidationService();
         this.mainStepGiftFollowupPayloadAppender = new MainStepGiftFollowupPayloadAppender(
             matchGiftTriggerService,
             giftTriggeredEffectDeferredSummaryBuilder,
@@ -249,7 +251,8 @@ public class MatchActionService {
             matchTurnLifecycleService,
             mainStepGiftFollowupPayloadAppender,
             gameActionExecutor,
-            new SendCheerInteractionPayloadBuilder()
+            new SendCheerInteractionPayloadBuilder(),
+            selectedCardValidationService
         );
         this.advancePhasePayloadBuilder = new AdvancePhasePayloadBuilder(
             matchPhaseAdvanceGiftTransitionService,
@@ -837,17 +840,16 @@ public class MatchActionService {
         ResolveDecisionRequest request,
         Map<String, Object> payload
     ) {
-        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
+        List<Long> selectedCardInstanceIds = selectedCardValidationService.sanitize(
             request == null ? null : request.getSelectedCardInstanceIds()
         );
         if (pending.maxSelect() > 0) {
-            if (selectedCardInstanceIds.size() < pending.minSelect()) {
-                throw new IllegalArgumentException("選擇卡片數量不足，至少需要 " + pending.minSelect() + " 張");
-            }
-            if (selectedCardInstanceIds.size() > pending.maxSelect()) {
-                throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
-            }
-            validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
+            selectedCardInstanceIds = selectedCardValidationService.validate(
+                selectedCardInstanceIds,
+                pending.minSelect(),
+                pending.maxSelect(),
+                pending.candidateCardInstanceIds()
+            );
             payload.put("selectedCardInstanceIds", selectedCardInstanceIds);
         }
         Map<String, Object> effectSummary = applyTriggeredEffectAfterConfirm(
@@ -879,16 +881,12 @@ public class MatchActionService {
         PendingDecision pending,
         ResolveDecisionRequest request
     ) {
-        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
-            request == null ? null : request.getSelectedCardInstanceIds()
+        List<Long> selectedCardInstanceIds = selectedCardValidationService.validate(
+            request == null ? null : request.getSelectedCardInstanceIds(),
+            pending.minSelect(),
+            pending.maxSelect(),
+            pending.candidateCardInstanceIds()
         );
-        if (selectedCardInstanceIds.size() < pending.minSelect()) {
-            throw new IllegalArgumentException("選擇卡片數量不足，至少需要 " + pending.minSelect() + " 張");
-        }
-        if (selectedCardInstanceIds.size() > pending.maxSelect()) {
-            throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
-        }
-        validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
 
         Map<String, Object> effectSummary = matchEffectService.applySupportEffect(
             matchId,
@@ -4394,38 +4392,6 @@ public class MatchActionService {
                 context.artSummary(),
                 officialCardArtExtraSummary
             );
-        }
-    }
-
-    /**
-     * 清洗選牌輸入：去重、過濾無效 id（null/<=0）。
-     */
-    private List<Long> sanitizeSelectedCardInstanceIds(List<Long> selectedCardInstanceIds) {
-        if (selectedCardInstanceIds == null || selectedCardInstanceIds.isEmpty()) {
-            return List.of();
-        }
-        List<Long> normalized = new ArrayList<>();
-        for (Long value : selectedCardInstanceIds) {
-            if (value == null || value <= 0 || normalized.contains(value)) {
-                continue;
-            }
-            normalized.add(value);
-        }
-        return normalized;
-    }
-
-    /**
-     * 驗證選牌結果是否完全落在候選集合中。
-     */
-    private void validateSelectedCardsWithinCandidates(List<Long> selected, List<Long> candidates) {
-        if (selected == null || selected.isEmpty() || candidates == null || candidates.isEmpty()) {
-            return;
-        }
-        Set<Long> candidateSet = Set.copyOf(candidates);
-        for (Long selectedId : selected) {
-            if (!candidateSet.contains(selectedId)) {
-                throw new IllegalArgumentException("選擇的卡片不在候選清單內: " + selectedId);
-            }
         }
     }
 

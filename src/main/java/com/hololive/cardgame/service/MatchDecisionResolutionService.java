@@ -11,7 +11,6 @@ import com.hololive.cardgame.model.MatchPhase;
 import com.hololive.cardgame.repository.MatchActionRepository;
 import com.hololive.cardgame.repository.MatchRepository;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -43,6 +42,7 @@ class MatchDecisionResolutionService {
     private final MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender;
     private final GameActionExecutor gameActionExecutor;
     private final SendCheerInteractionPayloadBuilder sendCheerInteractionPayloadBuilder;
+    private final SelectedCardValidationService selectedCardValidationService;
 
     MatchDecisionResolutionService(
         JdbcTemplate jdbcTemplate,
@@ -55,7 +55,8 @@ class MatchDecisionResolutionService {
         MatchTurnLifecycleService matchTurnLifecycleService,
         MainStepGiftFollowupPayloadAppender mainStepGiftFollowupPayloadAppender,
         GameActionExecutor gameActionExecutor,
-        SendCheerInteractionPayloadBuilder sendCheerInteractionPayloadBuilder
+        SendCheerInteractionPayloadBuilder sendCheerInteractionPayloadBuilder,
+        SelectedCardValidationService selectedCardValidationService
     ) {
         this.jdbcTemplate = jdbcTemplate;
         this.pendingDecisionStore = pendingDecisionStore;
@@ -68,6 +69,7 @@ class MatchDecisionResolutionService {
         this.mainStepGiftFollowupPayloadAppender = mainStepGiftFollowupPayloadAppender;
         this.gameActionExecutor = gameActionExecutor;
         this.sendCheerInteractionPayloadBuilder = sendCheerInteractionPayloadBuilder;
+        this.selectedCardValidationService = selectedCardValidationService;
     }
 
     boolean resolveLowCouplingDecision(
@@ -154,16 +156,12 @@ class MatchDecisionResolutionService {
         PendingDecision pending,
         ResolveDecisionRequest request
     ) {
-        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
-            request == null ? null : request.getSelectedCardInstanceIds()
+        List<Long> selectedCardInstanceIds = selectedCardValidationService.validate(
+            request == null ? null : request.getSelectedCardInstanceIds(),
+            pending.minSelect(),
+            pending.maxSelect(),
+            pending.candidateCardInstanceIds()
         );
-        if (selectedCardInstanceIds.size() < pending.minSelect()) {
-            throw new IllegalArgumentException("選擇卡片數量不足，至少需要 " + pending.minSelect() + " 張");
-        }
-        if (selectedCardInstanceIds.size() > pending.maxSelect()) {
-            throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
-        }
-        validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
         Long targetHolomemCardInstanceId = selectedCardInstanceIds.get(0);
         Long targetHolomemId = jdbcTemplate.query(
             """
@@ -257,7 +255,7 @@ class MatchDecisionResolutionService {
         ResolveDecisionRequest request
     ) {
         String requestedPlacement = normalizeDecisionPlacement(request == null ? null : request.getPlacement());
-        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
+        List<Long> selectedCardInstanceIds = selectedCardValidationService.sanitize(
             request == null ? null : request.getSelectedCardInstanceIds()
         );
         if (requestedPlacement != null) {
@@ -274,10 +272,12 @@ class MatchDecisionResolutionService {
                 throw new IllegalArgumentException("placement 只支援 TOP 或 BOTTOM");
             }
         }
-        if (selectedCardInstanceIds.size() > pending.maxSelect()) {
-            throw new IllegalArgumentException("選擇卡片數量超過上限，最多只能選 " + pending.maxSelect() + " 張");
-        }
-        validateSelectedCardsWithinCandidates(selectedCardInstanceIds, pending.candidateCardInstanceIds());
+        selectedCardInstanceIds = selectedCardValidationService.validate(
+            selectedCardInstanceIds,
+            0,
+            pending.maxSelect(),
+            pending.candidateCardInstanceIds()
+        );
         Long lookedCardInstanceId = pending.candidateCardInstanceIds().isEmpty()
             ? null
             : pending.candidateCardInstanceIds().get(0);
@@ -327,7 +327,7 @@ class MatchDecisionResolutionService {
         PendingDecision pending,
         ResolveDecisionRequest request
     ) {
-        List<Long> selectedCardInstanceIds = sanitizeSelectedCardInstanceIds(
+        List<Long> selectedCardInstanceIds = selectedCardValidationService.sanitize(
             request == null ? null : request.getSelectedCardInstanceIds()
         );
         List<Long> candidateCardInstanceIds = pending.candidateCardInstanceIds();
@@ -477,32 +477,6 @@ class MatchDecisionResolutionService {
             return null;
         }
         return placement.trim().toUpperCase(Locale.ROOT);
-    }
-
-    private List<Long> sanitizeSelectedCardInstanceIds(List<Long> selectedCardInstanceIds) {
-        if (selectedCardInstanceIds == null || selectedCardInstanceIds.isEmpty()) {
-            return List.of();
-        }
-        List<Long> normalized = new ArrayList<>();
-        for (Long value : selectedCardInstanceIds) {
-            if (value == null || value <= 0 || normalized.contains(value)) {
-                continue;
-            }
-            normalized.add(value);
-        }
-        return normalized;
-    }
-
-    private void validateSelectedCardsWithinCandidates(List<Long> selected, List<Long> candidates) {
-        if (selected == null || selected.isEmpty() || candidates == null || candidates.isEmpty()) {
-            return;
-        }
-        Set<Long> candidateSet = Set.copyOf(candidates);
-        for (Long selectedId : selected) {
-            if (!candidateSet.contains(selectedId)) {
-                throw new IllegalArgumentException("選擇的卡片不在候選清單內: " + selectedId);
-            }
-        }
     }
 
     private MatchActionEntity appendAction(
