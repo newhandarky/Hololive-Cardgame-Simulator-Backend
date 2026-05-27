@@ -78,6 +78,7 @@ public class MatchActionService {
     private final ObjectMapper objectMapper;
     private final MatchPayloadJsonService matchPayloadJsonService;
     private final PendingDecisionReader pendingDecisionReader;
+    private final PendingDecisionStore pendingDecisionStore;
     private final GiftTriggerActionPayloadExtractor giftTriggerActionPayloadExtractor;
     private final GiftTriggerActionWriter giftTriggerActionWriter;
     private final PendingGiftTriggerContextExtractor pendingGiftTriggerContextExtractor;
@@ -186,6 +187,7 @@ public class MatchActionService {
         this.objectMapper = objectMapper;
         this.matchPayloadJsonService = new MatchPayloadJsonService(objectMapper);
         this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
+        this.pendingDecisionStore = new PendingDecisionStore(jdbcTemplate, objectMapper);
         this.giftTriggerActionPayloadExtractor = new GiftTriggerActionPayloadExtractor();
         this.giftTriggerActionWriter = new GiftTriggerActionWriter(matchActionRepository, matchPayloadJsonService);
         this.pendingGiftTriggerContextExtractor = new PendingGiftTriggerContextExtractor();
@@ -756,7 +758,7 @@ public class MatchActionService {
             true
         );
         Long decisionId = requirePositiveId(request == null ? null : request.getDecisionId(), "decisionId");
-        PendingDecision pending = loadPendingDecisionForUpdate(matchId, userId, decisionId);
+        PendingDecision pending = pendingDecisionStore.loadForUpdate(matchId, userId, decisionId);
         if (pending == null) {
             throw new IllegalArgumentException("找不到待處理的決策");
         }
@@ -807,7 +809,7 @@ public class MatchActionService {
         ResolveDecisionRequest request
     ) {
         boolean confirmed = request == null || request.getConfirmed() == null || request.getConfirmed();
-        markDecisionResolved(pending.decisionId());
+        pendingDecisionStore.markResolved(pending.decisionId());
 
         touchUpdatedAt(context.match);
         matchRepository.saveAndFlush(context.match);
@@ -910,7 +912,7 @@ public class MatchActionService {
         if (lookedCardInstanceId != null && !keepOnTop) {
             moveDeckCardToBottom(matchId, userId, lookedCardInstanceId);
         }
-        markDecisionResolved(pending.decisionId());
+        pendingDecisionStore.markResolved(pending.decisionId());
 
         transitionMatchToMainAndSave(context.match);
 
@@ -936,7 +938,7 @@ public class MatchActionService {
         PendingDecision pending,
         String decisionType
     ) {
-        markDecisionResolved(pending.decisionId());
+        pendingDecisionStore.markResolved(pending.decisionId());
 
         transitionMatchToMainAndSave(context.match);
 
@@ -974,7 +976,7 @@ public class MatchActionService {
             moveDeckCardToBottom(matchId, userId, cardInstanceId);
         }
 
-        markDecisionResolved(pending.decisionId());
+        pendingDecisionStore.markResolved(pending.decisionId());
         transitionMatchToMainAndSave(context.match);
 
         Map<String, Object> payload = interactionConfirmedPayloadBuilder.buildReorderDeckBottomPayload(
@@ -1020,7 +1022,7 @@ public class MatchActionService {
             pending.targetHolomemCardInstanceId(),
             true
         );
-        markDecisionResolved(pending.decisionId());
+        pendingDecisionStore.markResolved(pending.decisionId());
 
         transitionMatchToMainAndSave(context.match);
 
@@ -1084,7 +1086,7 @@ public class MatchActionService {
         Long userId,
         PendingDecision pending
     ) {
-        markDecisionResolved(pending.decisionId());
+        pendingDecisionStore.markResolved(pending.decisionId());
         returnCollabToBackAsRested(matchId, userId);
         matchTurnLifecycleService.confirmTurnStartDecision(
             context.match,
@@ -1100,7 +1102,7 @@ public class MatchActionService {
         Long userId,
         PendingDecision pending
     ) {
-        markDecisionResolved(pending.decisionId());
+        pendingDecisionStore.markResolved(pending.decisionId());
         matchTurnLifecycleService.confirmLiveStartDecision(
             context.match,
             userId,
@@ -1115,7 +1117,7 @@ public class MatchActionService {
         Long userId,
         PendingDecision pending
     ) {
-        markDecisionResolved(pending.decisionId());
+        pendingDecisionStore.markResolved(pending.decisionId());
         boolean requiresTurnCheer = canPerformTurnCheerAction(matchId, userId);
         Map<String, Object> payload = new LinkedHashMap<>();
         if (!requiresTurnCheer) {
@@ -1204,7 +1206,7 @@ public class MatchActionService {
             String reason = actionResults.isEmpty() ? "UNKNOWN" : asString(actionResults.get(0).details().get("reason"));
             throw new IllegalStateException("發送吶喊失敗：" + reason);
         }
-        markDecisionResolved(pending.decisionId());
+        pendingDecisionStore.markResolved(pending.decisionId());
 
         context.match.setCurrentPhase(resolvePhaseAfterSendCheer(context.phase, pending.sourceActionType()).name());
         touchUpdatedAt(context.match);
@@ -5124,80 +5126,6 @@ public class MatchActionService {
     }
 
     /**
-     * 載入並鎖定 pending decision，避免同一決策被重複處理。
-     */
-    private PendingDecision loadPendingDecisionForUpdate(Long matchId, Long userId, Long decisionId) {
-        return jdbcTemplate.query(
-            """
-            SELECT id,
-                   decision_type,
-                   source_action_type,
-                   source_card_instance_id,
-                   source_card_id,
-                   effect_type,
-                   min_select,
-                   max_select,
-                   context_json::text AS context_text
-            FROM match_pending_decisions
-            WHERE id = ?
-              AND match_id = ?
-              AND user_id = ?
-              AND status = ?
-            FOR UPDATE
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                String contextText = rs.getString("context_text");
-                JsonNode contextNode = parseJson(contextText);
-                int minSelect = Math.max(rs.getInt("min_select"), 0);
-                int maxSelect = Math.max(rs.getInt("max_select"), minSelect);
-                return new PendingDecision(
-                    rs.getLong("id"),
-                    normalizeZone(rs.getString("decision_type")),
-                    normalizeZone(rs.getString("source_action_type")),
-                    rs.getLong("source_card_instance_id"),
-                    rs.getString("source_card_id"),
-                    normalizeZone(rs.getString("effect_type")),
-                    minSelect,
-                    maxSelect,
-                    extractJsonLong(contextNode, "targetHolomemCardInstanceId"),
-                    extractJsonText(contextNode, "targetType"),
-                    extractJsonText(contextNode, "effectJson"),
-                    extractJsonLongList(contextNode, "candidateCardInstanceIds"),
-                    extractJsonBoolean(contextNode, "limited"),
-                    contextNode
-                );
-            },
-            decisionId,
-            matchId,
-            userId,
-            PENDING_STATUS
-        );
-    }
-
-    /**
-     * 將 pending decision 標記為 RESOLVED。
-     */
-    private void markDecisionResolved(Long decisionId) {
-        int updated = jdbcTemplate.update(
-            """
-            UPDATE match_pending_decisions
-            SET status = 'RESOLVED',
-                resolved_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND status = ?
-            """,
-            decisionId,
-            PENDING_STATUS
-        );
-        if (updated != 1) {
-            throw new IllegalStateException("決策已失效，請重新整理對戰狀態");
-        }
-    }
-
-    /**
      * 清洗選牌輸入：去重、過濾無效 id（null/<=0）。
      */
     private List<Long> sanitizeSelectedCardInstanceIds(List<Long> selectedCardInstanceIds) {
@@ -5280,57 +5208,6 @@ public class MatchActionService {
         }
         String text = value.asText().trim();
         return text.isEmpty() ? null : text;
-    }
-
-    /**
-     * 從 JsonNode 取布林欄位。
-     */
-    private boolean extractJsonBoolean(JsonNode node, String fieldName) {
-        if (node == null || node.isNull() || !StringUtils.hasText(fieldName)) {
-            return false;
-        }
-        JsonNode value = node.get(fieldName);
-        if (value == null || value.isNull()) {
-            return false;
-        }
-        if (value.isBoolean()) {
-            return value.asBoolean();
-        }
-        if (value.isTextual()) {
-            return Boolean.parseBoolean(value.asText());
-        }
-        return false;
-    }
-
-    /**
-     * 從 JsonNode 取 Long 列表欄位。
-     */
-    private List<Long> extractJsonLongList(JsonNode node, String fieldName) {
-        if (node == null || node.isNull() || !StringUtils.hasText(fieldName)) {
-            return List.of();
-        }
-        JsonNode value = node.get(fieldName);
-        if (value == null || value.isNull() || !value.isArray()) {
-            return List.of();
-        }
-        List<Long> result = new ArrayList<>();
-        for (JsonNode item : value) {
-            Long id = null;
-            if (item != null && item.isNumber()) {
-                id = item.longValue();
-            } else if (item != null && item.isTextual()) {
-                try {
-                    id = Long.parseLong(item.asText().trim());
-                } catch (NumberFormatException ignored) {
-                    id = null;
-                }
-            }
-            if (id == null || id <= 0 || result.contains(id)) {
-                continue;
-            }
-            result.add(id);
-        }
-        return result;
     }
 
     /**
@@ -6069,24 +5946,6 @@ public class MatchActionService {
         private static DrawTurnResult deckedOut() {
             return new DrawTurnResult(null, null, true);
         }
-    }
-
-    private record PendingDecision(
-        Long decisionId,
-        String decisionType,
-        String sourceActionType,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        String effectType,
-        int minSelect,
-        int maxSelect,
-        Long targetHolomemCardInstanceId,
-        String targetType,
-        String effectJson,
-        List<Long> candidateCardInstanceIds,
-        boolean limited,
-        JsonNode contextNode
-    ) {
     }
 
     private record MulliganResolution(
