@@ -367,6 +367,7 @@ public class MatchEffectService {
             healEffectExecutionService,
             moveZoneEffectExecutionService,
             cheerRemovalEffectExecutionService,
+            giftReattachEffectExecutionService,
             effectTypeInferenceService,
             this
         );
@@ -391,6 +392,7 @@ public class MatchEffectService {
             healEffectExecutionService,
             moveZoneEffectExecutionService,
             cheerRemovalEffectExecutionService,
+            giftReattachEffectExecutionService,
             effectTypeInferenceService,
             this
         );
@@ -1138,24 +1140,6 @@ public class MatchEffectService {
             return fallbackSelfCardInstanceId;
         }
         return null;
-    }
-
-    Map<String, Object> executeReattachEffect(
-        Long matchId,
-        Long userId,
-        String effectType,
-        JsonNode effectNode,
-        String targetType,
-        Long targetHolomemCardInstanceId
-    ) {
-        return giftReattachEffectExecutionService.executeReattachEffect(
-            matchId,
-            userId,
-            effectType,
-            effectNode,
-            targetType,
-            targetHolomemCardInstanceId
-        );
     }
 
     /**

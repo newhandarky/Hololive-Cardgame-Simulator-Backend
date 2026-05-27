@@ -33,6 +33,7 @@ class MatchCollabEffectDispatcher {
     private final MatchHealEffectExecutionService healEffectExecutionService;
     private final MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService;
     private final MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService;
+    private final MatchGiftReattachEffectExecutionService reattachEffectExecutionService;
     private final MatchEffectTypeInferenceService effectTypeInferenceService;
     private final MatchEffectService effectService;
 
@@ -57,6 +58,7 @@ class MatchCollabEffectDispatcher {
         MatchHealEffectExecutionService healEffectExecutionService,
         MatchMoveZoneEffectExecutionService moveZoneEffectExecutionService,
         MatchCheerRemovalEffectExecutionService cheerRemovalEffectExecutionService,
+        MatchGiftReattachEffectExecutionService reattachEffectExecutionService,
         MatchEffectTypeInferenceService effectTypeInferenceService,
         MatchEffectService effectService
     ) {
@@ -80,6 +82,7 @@ class MatchCollabEffectDispatcher {
         this.healEffectExecutionService = healEffectExecutionService;
         this.moveZoneEffectExecutionService = moveZoneEffectExecutionService;
         this.cheerRemovalEffectExecutionService = cheerRemovalEffectExecutionService;
+        this.reattachEffectExecutionService = reattachEffectExecutionService;
         this.effectTypeInferenceService = effectTypeInferenceService;
         this.effectService = effectService;
     }
@@ -159,7 +162,7 @@ class MatchCollabEffectDispatcher {
                         )
                     );
                     case "REATTACH" -> executed.add(
-                        effectService.executeReattachEffect(
+                        reattachEffectExecutionService.executeReattachEffect(
                             matchId,
                             userId,
                             effectType,
