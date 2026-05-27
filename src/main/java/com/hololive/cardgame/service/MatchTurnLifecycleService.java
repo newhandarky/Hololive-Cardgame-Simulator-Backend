@@ -28,13 +28,13 @@ public class MatchTurnLifecycleService {
     private static final String INTERACTION_TYPE_LIVE_START = "LIVE_START";
     private static final String INTERACTION_TYPE_SEND_CHEER = "SEND_CHEER";
     private static final String INTERACTION_TYPE_TURN_START = "TURN_START";
-    private static final String PENDING_STATUS = "PENDING";
 
     private final MatchRepository matchRepository;
     private final MatchActionRepository matchActionRepository;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final PendingDecisionReader pendingDecisionReader;
+    private final PendingDecisionCreationService pendingDecisionCreationService;
 
     public MatchTurnLifecycleService(
         MatchRepository matchRepository,
@@ -47,6 +47,11 @@ public class MatchTurnLifecycleService {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
+        this.pendingDecisionCreationService = new PendingDecisionCreationService(
+            jdbcTemplate,
+            new MatchPayloadJsonService(objectMapper),
+            pendingDecisionReader
+        );
     }
 
     public void completeEndTurn(
@@ -493,45 +498,7 @@ public class MatchTurnLifecycleService {
     }
 
     public Long createTurnStartPendingInteraction(Long matchId, Long userId, int turnNumber) {
-        if (matchId == null || userId == null || userId <= 0) {
-            return null;
-        }
-        if (hasAnyPendingDecision(matchId, userId)) {
-            return null;
-        }
-
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("interactionType", INTERACTION_TYPE_TURN_START);
-        context.put("title", "回合開始");
-        context.put("message", "現在是你的回合。請先確認，接著依序進入抽牌與吶喊階段。");
-        context.put("turnNumber", turnNumber);
-
-        return jdbcTemplate.query(
-            """
-            INSERT INTO match_pending_decisions (
-                match_id,
-                user_id,
-                decision_type,
-                source_action_type,
-                source_card_instance_id,
-                source_card_id,
-                effect_type,
-                min_select,
-                max_select,
-                status,
-                context_json
-            ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 1, 1, ?, CAST(? AS jsonb))
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            INTERACTION_TYPE_TURN_START,
-            INTERACTION_TYPE_TURN_START,
-            INTERACTION_TYPE_TURN_START,
-            PENDING_STATUS,
-            toJson(context)
-        );
+        return pendingDecisionCreationService.createTurnStartPendingInteraction(matchId, userId, turnNumber);
     }
 
     private void appendLiveStartPendingInteraction(MatchEntity match, Long userId, int turnNumber) {
@@ -553,47 +520,7 @@ public class MatchTurnLifecycleService {
     }
 
     private Long createLiveStartPendingInteraction(Long matchId, Long userId, int turnNumber) {
-        if (matchId == null || userId == null || userId <= 0) {
-            return null;
-        }
-        if (hasAnyPendingDecision(matchId, userId)) {
-            return null;
-        }
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("interactionType", INTERACTION_TYPE_LIVE_START);
-        context.put("title", "LIVE START!!");
-        context.put("message", "雙方開場舞台已設置完成，確認後翻開 CENTER 與 BACK 並開始對戰。");
-        context.put("turnNumber", turnNumber);
-        return jdbcTemplate.query(
-            """
-            INSERT INTO match_pending_decisions (
-                match_id,
-                user_id,
-                decision_type,
-                source_action_type,
-                source_card_instance_id,
-                source_card_id,
-                effect_type,
-                min_select,
-                max_select,
-                status,
-                context_json
-            ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 1, 1, ?, CAST(? AS jsonb))
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            INTERACTION_TYPE_LIVE_START,
-            INTERACTION_TYPE_LIVE_START,
-            INTERACTION_TYPE_LIVE_START,
-            PENDING_STATUS,
-            toJson(context)
-        );
-    }
-
-    private boolean hasAnyPendingDecision(Long matchId, Long userId) {
-        return pendingDecisionReader.hasAnyPendingDecision(matchId, userId);
+        return pendingDecisionCreationService.createLiveStartPendingInteraction(matchId, userId, turnNumber);
     }
 
     private boolean isStageActionLocked(

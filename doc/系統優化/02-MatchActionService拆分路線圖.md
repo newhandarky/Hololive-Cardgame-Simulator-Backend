@@ -93,7 +93,8 @@
 進度：
 
 - AAA-231 已先抽出 `PendingDecisionStore` 與 top-level `PendingDecision`，將 `resolveDecision(...)` 的 pending `FOR UPDATE` 載入、context JSON 映射與 resolved 更新移出 `MatchActionService`。
-- 尚未搬移 pending interaction 建立器；下一批建議集中 `TURN_START`、`DRAW_REVEAL`、`SEND_CHEER`、`CARD_SELECTION` 建立流程，作為 A2 之前的第二個地基。
+- AAA-232 已抽出 `PendingDecisionCreationService`，集中 `TURN_START`、`LIVE_START`、`DRAW_REVEAL`、`SEND_CHEER`、`CARD_SELECTION` 建立流程，作為 A2 之前的第二個地基。
+- 下一批可開始 A2，但第一刀建議只搬低耦合 look / reorder decision handler，避免把 trigger confirm、support selection、send cheer 與 turn lifecycle 一次混進 service extraction。
 
 ## Phase A2：抽出 Decision Resolution Service
 

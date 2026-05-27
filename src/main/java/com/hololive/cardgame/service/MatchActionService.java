@@ -64,7 +64,6 @@ public class MatchActionService {
     private static final String ACTION_TYPE_EFFECT_POST_TRIGGER = "EFFECT_POST_TRIGGER";
     private static final String ACTION_TYPE_BATON_TOUCH = "BATON_TOUCH";
     private static final String ACTION_TYPE_RULE_EVENT = "RULE_EVENT";
-    private static final String PENDING_STATUS = "PENDING";
     private static final String SUPPORT_TYPE_MASCOT = "MASCOT";
     private static final String SUPPORT_TYPE_TOOL = "TOOL";
     private static final String SUPPORT_TYPE_FAN = "FAN";
@@ -79,6 +78,7 @@ public class MatchActionService {
     private final MatchPayloadJsonService matchPayloadJsonService;
     private final PendingDecisionReader pendingDecisionReader;
     private final PendingDecisionStore pendingDecisionStore;
+    private final PendingDecisionCreationService pendingDecisionCreationService;
     private final GiftTriggerActionPayloadExtractor giftTriggerActionPayloadExtractor;
     private final GiftTriggerActionWriter giftTriggerActionWriter;
     private final PendingGiftTriggerContextExtractor pendingGiftTriggerContextExtractor;
@@ -188,6 +188,11 @@ public class MatchActionService {
         this.matchPayloadJsonService = new MatchPayloadJsonService(objectMapper);
         this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
         this.pendingDecisionStore = new PendingDecisionStore(jdbcTemplate, objectMapper);
+        this.pendingDecisionCreationService = new PendingDecisionCreationService(
+            jdbcTemplate,
+            matchPayloadJsonService,
+            pendingDecisionReader
+        );
         this.giftTriggerActionPayloadExtractor = new GiftTriggerActionPayloadExtractor();
         this.giftTriggerActionWriter = new GiftTriggerActionWriter(matchActionRepository, matchPayloadJsonService);
         this.pendingGiftTriggerContextExtractor = new PendingGiftTriggerContextExtractor();
@@ -668,7 +673,7 @@ public class MatchActionService {
         }
 
         if (decisionPlan != null) {
-            Long decisionId = createCardSelectionPendingDecision(
+            Long decisionId = pendingDecisionCreationService.createCardSelectionPendingDecision(
                 context.match.getId(),
                 userId,
                 "PLAY_SUPPORT",
@@ -1382,7 +1387,11 @@ public class MatchActionService {
             return DrawTurnResult.deckedOut();
         }
 
-        Long drawInteractionId = createDrawRevealPendingInteraction(matchId, userId, drawnCardInstanceId);
+        Long drawInteractionId = pendingDecisionCreationService.createDrawRevealPendingInteraction(
+            matchId,
+            userId,
+            drawnCardInstanceId
+        );
         return DrawTurnResult.drawn(drawnCardInstanceId, drawInteractionId);
     }
 
@@ -1406,7 +1415,7 @@ public class MatchActionService {
     }
 
     private Long prepareTurnCheerInteraction(Long matchId, Long userId) {
-        Long interactionId = createTurnSendCheerPendingInteraction(matchId, userId);
+        Long interactionId = pendingDecisionCreationService.createTurnSendCheerPendingInteraction(matchId, userId);
         if (interactionId == null) {
             throw new IllegalStateException("目前無法發送吶喊：請確認你有可用吶喊卡且場上有 Holomem");
         }
@@ -1742,7 +1751,7 @@ public class MatchActionService {
         String oshiCardId = asString(oshiSkill.get("oshi_card_id"));
         String skillName = asString(oshiSkill.get("skill_name"));
         if (decisionPlan != null) {
-            Long decisionId = createCardSelectionPendingDecision(
+            Long decisionId = pendingDecisionCreationService.createCardSelectionPendingDecision(
                 context.match.getId(),
                 userId,
                 ACTION_TYPE_USE_OSHI_SKILL,
@@ -4137,7 +4146,7 @@ public class MatchActionService {
             if (lifeOwnerUserId == null || lifeOwnerUserId <= 0) {
                 continue;
             }
-            Long sendCheerInteractionId = createSendCheerPendingInteraction(
+            Long sendCheerInteractionId = pendingDecisionCreationService.createSendCheerPendingInteraction(
                 matchId,
                 lifeOwnerUserId,
                 lostLifeCardInstanceId,
@@ -4462,390 +4471,6 @@ public class MatchActionService {
      */
     private boolean hasAnyPendingDecision(Long matchId) {
         return pendingDecisionReader.hasAnyPendingDecision(matchId);
-    }
-
-    /**
-     * 判斷是否存在任何 pending 決策。
-     */
-    private boolean hasAnyPendingDecision(Long matchId, Long userId) {
-        return pendingDecisionReader.hasAnyPendingDecision(matchId, userId);
-    }
-
-    /**
-     * 建立 TURN_START 互動，要求玩家確認回合開始。
-     */
-    private Long createTurnStartPendingInteraction(Long matchId, Long userId, int turnNumber) {
-        if (matchId == null || userId == null || userId <= 0) {
-            return null;
-        }
-        if (hasAnyPendingDecision(matchId, userId)) {
-            return null;
-        }
-
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("interactionType", INTERACTION_TYPE_TURN_START);
-        context.put("title", "回合開始");
-        context.put("message", "現在是你的回合。請先確認，接著依序進入抽牌與吶喊階段。");
-        context.put("turnNumber", turnNumber);
-
-        return jdbcTemplate.query(
-            """
-            INSERT INTO match_pending_decisions (
-                match_id,
-                user_id,
-                decision_type,
-                source_action_type,
-                source_card_instance_id,
-                source_card_id,
-                effect_type,
-                min_select,
-                max_select,
-                status,
-                context_json
-            ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 1, 1, ?, CAST(? AS jsonb))
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            INTERACTION_TYPE_TURN_START,
-            INTERACTION_TYPE_TURN_START,
-            INTERACTION_TYPE_TURN_START,
-            PENDING_STATUS,
-            toJson(context)
-        );
-    }
-
-    /**
-     * 建立 DRAW_REVEAL 互動，用於顯示本回合抽到的牌。
-     */
-    private Long createDrawRevealPendingInteraction(Long matchId, Long userId, Long drawnCardInstanceId) {
-        if (drawnCardInstanceId == null || drawnCardInstanceId <= 0) {
-            return null;
-        }
-        if (hasAnyPendingDecision(matchId, userId)) {
-            return null;
-        }
-
-        Map<String, Object> drawnCard = jdbcTemplate.query(
-            """
-            SELECT mc.id AS card_instance_id,
-                   mc.card_id,
-                   c.name,
-                   c.card_type,
-                   c.image_url
-            FROM match_cards mc
-            JOIN cards c ON c.card_id = mc.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("cardInstanceId", rs.getLong("card_instance_id"));
-                row.put("cardId", rs.getString("card_id"));
-                row.put("name", rs.getString("name"));
-                row.put("cardType", rs.getString("card_type"));
-                row.put("zone", "HAND");
-                row.put("imageUrl", rs.getString("image_url"));
-                return row;
-            },
-            matchId,
-            userId,
-            drawnCardInstanceId
-        );
-        if (drawnCard == null) {
-            return null;
-        }
-
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("interactionType", INTERACTION_TYPE_DRAW_REVEAL);
-        context.put("title", "回合抽牌");
-        context.put("message", "你抽到 1 張牌，確認後可繼續操作。");
-        context.put("cards", List.of(drawnCard));
-
-        return jdbcTemplate.query(
-            """
-            INSERT INTO match_pending_decisions (
-                match_id,
-                user_id,
-                decision_type,
-                source_action_type,
-                source_card_instance_id,
-                source_card_id,
-                effect_type,
-                min_select,
-                max_select,
-                status,
-                context_json
-            ) VALUES (?, ?, ?, 'DRAW_TURN', ?, ?, ?, 1, 1, ?, CAST(? AS jsonb))
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            INTERACTION_TYPE_DRAW_REVEAL,
-            drawnCardInstanceId,
-            asString(drawnCard.get("cardId")),
-            INTERACTION_TYPE_DRAW_REVEAL,
-            PENDING_STATUS,
-            toJson(context)
-        );
-    }
-
-    /**
-     * 建立回合 Cheer 互動（來源為 Cheer 牌庫頂牌）。
-     */
-    private Long createTurnSendCheerPendingInteraction(Long matchId, Long userId) {
-        if (userId == null || userId <= 0) {
-            return null;
-        }
-        Long cheerCardInstanceId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CHEER_DECK'
-            ORDER BY order_index NULLS LAST, id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId
-        );
-        if (cheerCardInstanceId == null) {
-            return null;
-        }
-        return createSendCheerPendingInteraction(
-            matchId,
-            userId,
-            cheerCardInstanceId,
-            "TURN_CHEER",
-            "回合吶喊",
-            "請從エール牌庫發送 1 張吶喊到我方 Holomem。"
-        );
-    }
-
-    /**
-     * 通用 SEND_CHEER 互動建立器，可指定來源 action 與提示文案。
-     */
-    private Long createSendCheerPendingInteraction(
-        Long matchId,
-        Long userId,
-        Long sourceCardInstanceId,
-        String sourceActionType,
-        String title,
-        String message
-    ) {
-        if (sourceCardInstanceId == null || sourceCardInstanceId <= 0 || userId == null || userId <= 0) {
-            return null;
-        }
-        Map<String, Object> sourceCard = jdbcTemplate.query(
-            """
-            SELECT mc.id AS card_instance_id,
-                   mc.card_id,
-                   mc.zone,
-                   c.name,
-                   c.card_type,
-                   c.image_url
-            FROM match_cards mc
-            JOIN cards c ON c.card_id = mc.card_id
-            WHERE mc.match_id = ?
-              AND mc.owner_user_id = ?
-              AND mc.id = ?
-            LIMIT 1
-            """,
-            rs -> {
-                if (!rs.next()) {
-                    return null;
-                }
-                Map<String, Object> row = new LinkedHashMap<>();
-                row.put("cardInstanceId", rs.getLong("card_instance_id"));
-                row.put("cardId", rs.getString("card_id"));
-                row.put("zone", rs.getString("zone"));
-                row.put("name", rs.getString("name"));
-                row.put("cardType", rs.getString("card_type"));
-                row.put("imageUrl", rs.getString("image_url"));
-                return row;
-            },
-            matchId,
-            userId,
-            sourceCardInstanceId
-        );
-        if (sourceCard == null) {
-            return null;
-        }
-        String sourceCardId = asString(sourceCard.get("cardId"));
-        Integer cheerCount = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM cheer_cards WHERE card_id = ?",
-            Integer.class,
-            sourceCardId
-        );
-        if (cheerCount == null || cheerCount <= 0) {
-            return null;
-        }
-        List<Map<String, Object>> candidateRows = jdbcTemplate.queryForList(
-            """
-            SELECT h.match_card_id AS card_instance_id,
-                   h.card_id,
-                   h.zone,
-                   c.name,
-                   c.card_type,
-                   m.level_type,
-                   c.image_url
-            FROM match_holomems h
-            JOIN cards c ON c.card_id = h.card_id
-            LEFT JOIN member_cards m ON m.card_id = h.card_id
-            WHERE h.match_id = ?
-              AND h.owner_user_id = ?
-              AND h.zone IN ('CENTER','COLLAB','BACK')
-            ORDER BY CASE h.zone WHEN 'CENTER' THEN 1 WHEN 'COLLAB' THEN 2 WHEN 'BACK' THEN 3 ELSE 9 END, h.id
-            """,
-            matchId,
-            userId
-        );
-        if (candidateRows.isEmpty()) {
-            return null;
-        }
-        List<Long> candidateCardInstanceIds = new ArrayList<>();
-        List<Map<String, Object>> candidateCards = new ArrayList<>();
-        for (Map<String, Object> row : candidateRows) {
-            Long candidateCardInstanceId = asLong(row.get("card_instance_id"));
-            if (candidateCardInstanceId == null || candidateCardInstanceId <= 0) {
-                continue;
-            }
-            candidateCardInstanceIds.add(candidateCardInstanceId);
-            Map<String, Object> candidate = new LinkedHashMap<>();
-            candidate.put("cardInstanceId", candidateCardInstanceId);
-            candidate.put("cardId", asString(row.get("card_id")));
-            candidate.put("name", asString(row.get("name")));
-            candidate.put("cardType", asString(row.get("card_type")));
-            candidate.put("levelType", asString(row.get("level_type")));
-            candidate.put("zone", asString(row.get("zone")));
-            candidate.put("imageUrl", asString(row.get("image_url")));
-            candidateCards.add(candidate);
-        }
-        if (candidateCards.isEmpty()) {
-            return null;
-        }
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("interactionType", INTERACTION_TYPE_SEND_CHEER);
-        context.put("title", title);
-        context.put("message", message);
-        context.put("sourceZone", normalizeZone(sourceCard.get("zone")));
-        context.put("cards", candidateCards);
-        context.put("candidateCardInstanceIds", candidateCardInstanceIds);
-
-        return jdbcTemplate.query(
-            """
-            INSERT INTO match_pending_decisions (
-                match_id,
-                user_id,
-                decision_type,
-                source_action_type,
-                source_card_instance_id,
-                source_card_id,
-                effect_type,
-                min_select,
-                max_select,
-                status,
-                context_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, CAST(? AS jsonb))
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            INTERACTION_TYPE_SEND_CHEER,
-            sourceActionType,
-            sourceCardInstanceId,
-            sourceCardId,
-            INTERACTION_TYPE_SEND_CHEER,
-            PENDING_STATUS,
-            toJson(context)
-        );
-    }
-
-    /**
-     * 建立通用 CARD_SELECTION 決策，供搜尋/選牌等效果共用。
-     */
-    private Long createCardSelectionPendingDecision(
-        Long matchId,
-        Long userId,
-        String sourceActionType,
-        Long sourceCardInstanceId,
-        String sourceCardId,
-        String effectType,
-        String effectJson,
-        String targetType,
-        Long targetHolomemCardInstanceId,
-        MatchEffectService.SupportDecisionPlan decisionPlan,
-        boolean limited
-    ) {
-        if (hasBlockingPendingDecision(matchId, userId)) {
-            throw new IllegalStateException("你有待處理的效果選擇，請先完成決策");
-        }
-        List<Long> candidateCardInstanceIds = new ArrayList<>();
-        List<Map<String, Object>> candidateCards = new ArrayList<>();
-        for (MatchEffectService.DecisionCandidate candidate : decisionPlan.candidates()) {
-            if (candidate == null || candidate.cardInstanceId() == null) {
-                continue;
-            }
-            candidateCardInstanceIds.add(candidate.cardInstanceId());
-            Map<String, Object> candidatePayload = new LinkedHashMap<>();
-            candidatePayload.put("cardInstanceId", candidate.cardInstanceId());
-            candidatePayload.put("cardId", candidate.cardId());
-            candidatePayload.put("name", candidate.name());
-            candidatePayload.put("cardType", candidate.cardType());
-            candidatePayload.put("levelType", candidate.levelType());
-            candidatePayload.put("zone", candidate.zone());
-            candidateCards.add(candidatePayload);
-        }
-
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("effectType", effectType);
-        context.put("effectJson", effectJson);
-        context.put("targetType", targetType);
-        context.put("targetHolomemCardInstanceId", targetHolomemCardInstanceId);
-        context.put("candidateCardInstanceIds", candidateCardInstanceIds);
-        context.put("candidateCards", candidateCards);
-        context.put("limited", limited);
-
-        return jdbcTemplate.query(
-            """
-            INSERT INTO match_pending_decisions (
-                match_id,
-                user_id,
-                decision_type,
-                source_action_type,
-                source_card_instance_id,
-                source_card_id,
-                effect_type,
-                min_select,
-                max_select,
-                status,
-                context_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb))
-            RETURNING id
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId,
-            SUPPORT_DECISION_TYPE_CARD_SELECTION,
-            sourceActionType,
-            sourceCardInstanceId,
-            sourceCardId,
-            decisionPlan.effectType(),
-            decisionPlan.minSelect(),
-            decisionPlan.maxSelect(),
-            PENDING_STATUS,
-            toJson(context)
-        );
     }
 
     private Map<String, Object> applyTriggeredEffectAfterConfirm(
