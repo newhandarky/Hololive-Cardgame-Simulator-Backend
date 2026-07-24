@@ -18,9 +18,12 @@ import com.hololive.cardgame.dto.PlayToStageActionRequest;
 import com.hololive.cardgame.dto.UseOshiSkillActionRequest;
 import com.hololive.cardgame.model.LobbyMatch;
 import com.hololive.cardgame.service.AuthUserResolver;
+import com.hololive.cardgame.service.ConcedeMatchCommand;
 import com.hololive.cardgame.service.HardNpcService;
 import com.hololive.cardgame.service.LobbyMatchService;
 import com.hololive.cardgame.service.MatchActionService;
+import com.hololive.cardgame.service.MatchCommandGateway;
+import com.hololive.cardgame.service.MatchCommandResult;
 import com.hololive.cardgame.service.MatchGameStateService;
 import com.hololive.cardgame.websocket.MatchSocketHandler;
 import org.springframework.http.HttpStatus;
@@ -40,6 +43,7 @@ public class MatchController {
     private final LobbyMatchService lobbyMatchService;
     private final HardNpcService hardNpcService;
     private final MatchActionService matchActionService;
+    private final MatchCommandGateway matchCommandGateway;
     private final MatchGameStateService matchGameStateService;
     private final MatchSocketHandler matchSocketHandler;
     private final AuthUserResolver authUserResolver;
@@ -51,6 +55,7 @@ public class MatchController {
         LobbyMatchService lobbyMatchService,
         HardNpcService hardNpcService,
         MatchActionService matchActionService,
+        MatchCommandGateway matchCommandGateway,
         MatchGameStateService matchGameStateService,
         MatchSocketHandler matchSocketHandler,
         AuthUserResolver authUserResolver
@@ -58,6 +63,7 @@ public class MatchController {
         this.lobbyMatchService = lobbyMatchService;
         this.hardNpcService = hardNpcService;
         this.matchActionService = matchActionService;
+        this.matchCommandGateway = matchCommandGateway;
         this.matchGameStateService = matchGameStateService;
         this.matchSocketHandler = matchSocketHandler;
         this.authUserResolver = authUserResolver;
@@ -430,9 +436,11 @@ public class MatchController {
      */
     public LobbyMatchResponse concede(@PathVariable Long matchId) {
         try {
-            matchActionService.concede(matchId, currentUserId());
-            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
-            publish(matchId, "CONCEDE", response);
+            MatchCommandResult result = matchCommandGateway.submit(
+                new ConcedeMatchCommand(matchId, currentUserId())
+            );
+            LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(result.matchId()));
+            publish(result.matchId(), result.eventType(), response);
             return response;
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
