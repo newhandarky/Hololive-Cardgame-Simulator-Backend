@@ -107,6 +107,25 @@ public class TurnActionRuleService {
         return stageHolomemCount != null && stageHolomemCount > 0;
     }
 
+    public boolean hasOpeningCenterPlaced(Long matchId, Long userId) {
+        if (matchId == null || userId == null) {
+            return false;
+        }
+        Integer centerCount = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_holomems
+            WHERE match_id = ?
+              AND owner_user_id = ?
+              AND zone = 'CENTER'
+            """,
+            Integer.class,
+            matchId,
+            userId
+        );
+        return centerCount != null && centerCount > 0;
+    }
+
     public boolean isFirstPlayerFirstTurn(MatchEntity match, Long userId, int turnNumber) {
         return match != null && userId != null && turnNumber == 1 && userId.equals(match.getPlayerAId());
     }

@@ -14,6 +14,7 @@ import com.hololive.cardgame.dto.ActionCapability;
 import com.hololive.cardgame.dto.ActionCapabilityCode;
 import com.hololive.cardgame.dto.ActionCapabilityReasonCode;
 import com.hololive.cardgame.dto.GameStateResponse;
+import com.hololive.cardgame.dto.MulliganActionRequest;
 import com.hololive.cardgame.dto.ResolveDecisionRequest;
 import com.hololive.cardgame.entity.User;
 import com.hololive.cardgame.error.GameErrorCode;
@@ -389,6 +390,44 @@ class MatchControllerEndTurnApiIntegrationTest extends MatchIntegrationTestSuppo
         assertThat(actionCount(matchId, hostId, "DRAW_TURN")).isEqualTo(1);
         assertThat(pendingDecisionCount(matchId, hostId, "DRAW_REVEAL")).isEqualTo(1);
         assertThat(matchGameStateService.getGameStateForUser(matchId, hostId).getPhase()).isEqualTo(MatchPhase.DRAW);
+    }
+
+    @Test
+    void openingAdvanceCapabilityShouldMatchCenterPlacementRequirement() {
+        StartedMatchContext context = createReadyMatch("opening-capability-host", "opening-capability-guest");
+        lobbyMatchService.startMatch(context.matchId(), context.hostId());
+        ensureOpeningHandContainsDebut(context.matchId(), context.hostId());
+        ensureOpeningHandContainsDebut(context.matchId(), context.guestId());
+
+        MulliganActionRequest hostMulligan = new MulliganActionRequest();
+        hostMulligan.setUseMulligan(false);
+        matchActionService.mulligan(context.matchId(), context.hostId(), hostMulligan);
+
+        MulliganActionRequest guestMulligan = new MulliganActionRequest();
+        guestMulligan.setUseMulligan(false);
+        matchActionService.mulligan(context.matchId(), context.guestId(), guestMulligan);
+
+        GameStateResponse beforeCenter = matchGameStateService.getGameStateForUser(
+            context.matchId(),
+            context.hostId()
+        );
+        assertThat(actionCapability(beforeCenter, ActionCapabilityCode.ADVANCE_PHASE))
+            .isEqualTo(ActionCapability.disabled(
+                ActionCapabilityCode.ADVANCE_PHASE,
+                ActionCapabilityReasonCode.OPENING_SETUP_INCOMPLETE
+            ));
+        assertThatThrownBy(() -> matchActionService.advancePhase(context.matchId(), context.hostId()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("CENTER");
+
+        playOpeningCenter(context.matchId(), context.hostId());
+
+        GameStateResponse afterCenter = matchGameStateService.getGameStateForUser(
+            context.matchId(),
+            context.hostId()
+        );
+        assertThat(actionCapability(afterCenter, ActionCapabilityCode.ADVANCE_PHASE))
+            .isEqualTo(ActionCapability.enabled(ActionCapabilityCode.ADVANCE_PHASE));
     }
 
     @Test

@@ -115,6 +115,27 @@ class TurnActionCapabilityServiceTest {
         );
     }
 
+    @Test
+    void getCapabilitiesShouldRequireOpeningCenterBeforeEnablingAdvancePhase() {
+        MatchEntity match = activeMainMatch();
+        match.setCurrentPhase(MatchPhase.RESET.name());
+        MatchPlayerEntity viewer = viewer();
+        stubViewer(match, viewer);
+        when(turnActionRuleService.parsePhase(MatchPhase.RESET.name())).thenReturn(MatchPhase.RESET);
+        when(turnActionRuleService.hasOpeningCenterPlaced(100L, 10L)).thenReturn(false);
+
+        assertThat(service.getCapabilities(100L, 10L))
+            .contains(ActionCapability.disabled(
+                ActionCapabilityCode.ADVANCE_PHASE,
+                ActionCapabilityReasonCode.OPENING_SETUP_INCOMPLETE
+            ));
+
+        when(turnActionRuleService.hasOpeningCenterPlaced(100L, 10L)).thenReturn(true);
+
+        assertThat(service.getCapabilities(100L, 10L))
+            .contains(ActionCapability.enabled(ActionCapabilityCode.ADVANCE_PHASE));
+    }
+
     private static Stream<Arguments> phaseCases() {
         return Stream.of(
             Arguments.of(

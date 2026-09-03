@@ -33,6 +33,7 @@ public class MatchTurnLifecycleService {
     private final MatchActionRepository matchActionRepository;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
+    private final TurnActionRuleService turnActionRuleService;
     private final PendingDecisionReader pendingDecisionReader;
     private final PendingDecisionCreationService pendingDecisionCreationService;
 
@@ -40,12 +41,14 @@ public class MatchTurnLifecycleService {
         MatchRepository matchRepository,
         MatchActionRepository matchActionRepository,
         JdbcTemplate jdbcTemplate,
-        ObjectMapper objectMapper
+        ObjectMapper objectMapper,
+        TurnActionRuleService turnActionRuleService
     ) {
         this.matchRepository = matchRepository;
         this.matchActionRepository = matchActionRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.turnActionRuleService = turnActionRuleService;
         this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
         this.pendingDecisionCreationService = new PendingDecisionCreationService(
             jdbcTemplate,
@@ -154,7 +157,7 @@ public class MatchTurnLifecycleService {
             throw new IllegalArgumentException("OPENING_SETUP_DONE 結算流程缺少必要參數");
         }
         Long matchId = match.getId();
-        if (!hasOpeningCenterPlaced(matchId, userId)) {
+        if (!turnActionRuleService.hasOpeningCenterPlaced(matchId, userId)) {
             throw new IllegalStateException("請先放置開場 CENTER Holomem");
         }
         if (hasOpeningSetupFinished(matchId, userId)) {
@@ -755,10 +758,6 @@ public class MatchTurnLifecycleService {
             userId
         );
         return centerCount != null && centerCount > 0;
-    }
-
-    private boolean hasOpeningCenterPlaced(Long matchId, Long userId) {
-        return hasCenterHolomem(matchId, userId);
     }
 
     private boolean hasOpeningSetupFinished(Long matchId, Long userId) {

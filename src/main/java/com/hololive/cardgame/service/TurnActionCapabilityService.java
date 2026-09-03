@@ -118,6 +118,7 @@ public class TurnActionCapabilityService {
     ) {
         if (phase == MatchPhase.RESET) {
             return viewer.isMulliganDone()
+                && turnActionRuleService.hasOpeningCenterPlaced(match.getId(), viewer.getUserId())
                 ? ActionCapability.enabled(ActionCapabilityCode.ADVANCE_PHASE)
                 : ActionCapability.disabled(ActionCapabilityCode.ADVANCE_PHASE, ActionCapabilityReasonCode.OPENING_SETUP_INCOMPLETE);
         }

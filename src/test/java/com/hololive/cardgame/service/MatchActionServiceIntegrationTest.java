@@ -2261,6 +2261,19 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
             String.class,
             matchId
         );
+        String ruleEventPayload = jdbcTemplate.queryForObject(
+            """
+            SELECT payload::text
+            FROM match_actions
+            WHERE match_id = ?
+              AND action_type = 'RULE_EVENT'
+              AND payload ->> 'eventType' = 'MATCH_FINISHED'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            String.class,
+            matchId
+        );
 
         assertThat(matchStatus).isEqualTo("finished");
         assertThat(winnerUserId).isEqualTo(hostId);
@@ -2268,6 +2281,9 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
         assertThat(payloadText).containsPattern("\"reason\"\\s*:\\s*\"DRAW_DECK_OUT\"");
         assertThat(payloadText).containsPattern("\"loserUserId\"\\s*:\\s*" + guestId);
         assertThat(payloadText).containsPattern("\"winnerUserId\"\\s*:\\s*" + hostId);
+        assertThat(ruleEventPayload).containsPattern("\"reasonCode\"\\s*:\\s*\"DRAW_DECK_OUT\"");
+        assertThat(ruleEventPayload).containsPattern("\"currentPhase\"\\s*:\\s*\"END\"");
+        assertThat(ruleEventPayload).containsPattern("\"draw\"\\s*:\\s*false");
     }
 
     @Test
