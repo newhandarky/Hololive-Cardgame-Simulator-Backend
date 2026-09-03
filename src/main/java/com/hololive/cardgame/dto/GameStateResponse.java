@@ -17,4 +17,5 @@ public class GameStateResponse {
     private final List<RecentMatchActionResponse> recentActions = new ArrayList<>();
     private final List<PendingDecisionResponse> pendingDecisions = new ArrayList<>();
     private final List<PendingInteractionResponse> pendingInteractions = new ArrayList<>();
+    private final List<ActionCapability> actionCapabilities = new ArrayList<>();
 }

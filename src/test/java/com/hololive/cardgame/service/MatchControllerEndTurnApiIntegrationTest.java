@@ -1,6 +1,7 @@
 package com.hololive.cardgame.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.hasItem;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -9,6 +10,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hololive.cardgame.dto.ActionCapability;
+import com.hololive.cardgame.dto.ActionCapabilityCode;
+import com.hololive.cardgame.dto.ActionCapabilityReasonCode;
+import com.hololive.cardgame.dto.GameStateResponse;
 import com.hololive.cardgame.dto.ResolveDecisionRequest;
 import com.hololive.cardgame.entity.User;
 import com.hololive.cardgame.error.GameErrorCode;
@@ -74,6 +79,14 @@ class MatchControllerEndTurnApiIntegrationTest extends MatchIntegrationTestSuppo
             }
             throw ex;
         }
+        resolveLatestSendCheerDecision(matchId, userId, sendCheerTargetCardInstanceId);
+    }
+
+    private void resolveLatestSendCheerDecision(
+        Long matchId,
+        Long userId,
+        Long sendCheerTargetCardInstanceId
+    ) {
         Long sendCheerDecisionId = jdbcTemplate.query(
             """
             SELECT id
@@ -258,6 +271,208 @@ class MatchControllerEndTurnApiIntegrationTest extends MatchIntegrationTestSuppo
             .andExpect(jsonPath("$.pendingInteractions[0].interactionType").value("TURN_START"))
             .andExpect(jsonPath("$.pendingInteractions[0].sourceActionType").value("TURN_START"))
             .andExpect(jsonPath("$.recentActions[*].actionType", hasItem("END_TURN")));
+    }
+
+    @Test
+    void gameStateShouldProjectCapabilitiesThatMatchTurnCommands() throws Exception {
+        StartedMatchContext context = createStartedMatch("capability-host", "capability-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        Long guestId = context.guestId();
+
+        GameStateResponse hostState = matchGameStateService.getGameStateForUser(matchId, hostId);
+        assertThat(actionCapability(hostState, ActionCapabilityCode.DRAW_TURN))
+            .isEqualTo(ActionCapability.disabled(
+                ActionCapabilityCode.DRAW_TURN,
+                ActionCapabilityReasonCode.TURN_DRAW_ALREADY_USED
+            ));
+        assertThat(actionCapability(hostState, ActionCapabilityCode.SEND_TURN_CHEER))
+            .isEqualTo(ActionCapability.disabled(
+                ActionCapabilityCode.SEND_TURN_CHEER,
+                ActionCapabilityReasonCode.TURN_CHEER_ALREADY_USED
+            ));
+        assertThat(actionCapability(hostState, ActionCapabilityCode.ADVANCE_PHASE))
+            .isEqualTo(ActionCapability.enabled(ActionCapabilityCode.ADVANCE_PHASE));
+
+        mockMvc.perform(
+                get("/api/matches/{matchId}/state", matchId)
+                    .header("Authorization", bearerTokenFor(hostId))
+            )
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.actionCapabilities.length()").value(4))
+            .andExpect(jsonPath("$.actionCapabilities[0].type").value("DRAW_TURN"))
+            .andExpect(jsonPath("$.actionCapabilities[0].enabled").value(false))
+            .andExpect(jsonPath("$.actionCapabilities[0].reasonCode").value("TURN_DRAW_ALREADY_USED"))
+            .andExpect(jsonPath("$.actionCapabilities[2].type").value("ADVANCE_PHASE"))
+            .andExpect(jsonPath("$.actionCapabilities[2].enabled").value(true));
+
+        GameStateResponse guestState = matchGameStateService.getGameStateForUser(matchId, guestId);
+        assertThat(guestState.getActionCapabilities())
+            .allSatisfy(capability -> {
+                assertThat(capability.enabled()).isFalse();
+                assertThat(capability.reasonCode()).isEqualTo(ActionCapabilityReasonCode.NOT_YOUR_TURN);
+            });
+
+        matchActionService.advancePhase(matchId, hostId);
+        GameStateResponse endPhaseState = matchGameStateService.getGameStateForUser(matchId, hostId);
+        assertThat(actionCapability(endPhaseState, ActionCapabilityCode.END_TURN))
+            .isEqualTo(ActionCapability.enabled(ActionCapabilityCode.END_TURN));
+
+        matchActionService.endTurn(matchId, hostId);
+        GameStateResponse pendingTurnStartState = matchGameStateService.getGameStateForUser(matchId, guestId);
+        assertThat(pendingTurnStartState.getActionCapabilities())
+            .allSatisfy(capability -> {
+                assertThat(capability.enabled()).isFalse();
+                assertThat(capability.reasonCode()).isEqualTo(ActionCapabilityReasonCode.PENDING_INTERACTION_BLOCKED);
+            });
+    }
+
+    @Test
+    void enabledDrawAndTurnCheerCapabilitiesShouldMatchSuccessfulCommands() {
+        StartedMatchContext context = createStartedMatch("capability-command-host", "capability-command-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        resetPilotTurnActions(matchId, hostId);
+
+        GameStateResponse initialState = matchGameStateService.getGameStateForUser(matchId, hostId);
+        assertThat(actionCapability(initialState, ActionCapabilityCode.DRAW_TURN))
+            .isEqualTo(ActionCapability.enabled(ActionCapabilityCode.DRAW_TURN));
+        assertThat(actionCapability(initialState, ActionCapabilityCode.SEND_TURN_CHEER))
+            .isEqualTo(ActionCapability.enabled(ActionCapabilityCode.SEND_TURN_CHEER));
+        assertThat(actionCapability(initialState, ActionCapabilityCode.ADVANCE_PHASE))
+            .isEqualTo(ActionCapability.disabled(
+                ActionCapabilityCode.ADVANCE_PHASE,
+                ActionCapabilityReasonCode.TURN_ACTIONS_INCOMPLETE
+            ));
+
+        matchActionService.drawTurn(matchId, hostId);
+
+        assertThat(actionCount(matchId, hostId, "DRAW_TURN")).isEqualTo(1);
+        assertThat(pendingDecisionCount(matchId, hostId, "DRAW_REVEAL")).isEqualTo(1);
+        resolvePendingInteractionIfExists(matchId, hostId, "DRAW_REVEAL");
+
+        GameStateResponse afterDrawState = matchGameStateService.getGameStateForUser(matchId, hostId);
+        assertThat(actionCapability(afterDrawState, ActionCapabilityCode.DRAW_TURN))
+            .isEqualTo(ActionCapability.disabled(
+                ActionCapabilityCode.DRAW_TURN,
+                ActionCapabilityReasonCode.PHASE_ACTION_NOT_ALLOWED
+            ));
+        assertThat(actionCapability(afterDrawState, ActionCapabilityCode.SEND_TURN_CHEER))
+            .isEqualTo(ActionCapability.enabled(ActionCapabilityCode.SEND_TURN_CHEER));
+
+        matchActionService.sendTurnCheer(matchId, hostId);
+
+        assertThat(actionCount(matchId, hostId, "TURN_CHEER")).isZero();
+        assertThat(pendingDecisionCount(matchId, hostId, "SEND_CHEER")).isEqualTo(1);
+
+        resolveLatestSendCheerDecision(matchId, hostId, loadFirstStageCardInstanceId(matchId, hostId));
+
+        assertThat(actionCount(matchId, hostId, "TURN_CHEER")).isEqualTo(1);
+        assertThat(pendingDecisionCount(matchId, hostId, "SEND_CHEER")).isZero();
+    }
+
+    @Test
+    void unavailableTurnCheerCapabilityShouldMatchCommandRejectionForEmptyCheerDeck() {
+        StartedMatchContext context = createStartedMatch("capability-empty-cheer-host", "capability-empty-cheer-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        resetTurnCheerAction(matchId, hostId);
+        jdbcTemplate.update(
+            "DELETE FROM match_cards WHERE match_id = ? AND owner_user_id = ? AND zone = 'CHEER_DECK'",
+            matchId,
+            hostId
+        );
+
+        GameStateResponse state = matchGameStateService.getGameStateForUser(matchId, hostId);
+
+        assertThat(actionCapability(state, ActionCapabilityCode.SEND_TURN_CHEER))
+            .isEqualTo(ActionCapability.disabled(
+                ActionCapabilityCode.SEND_TURN_CHEER,
+                ActionCapabilityReasonCode.TURN_CHEER_UNAVAILABLE
+            ));
+        assertThat(actionCapability(state, ActionCapabilityCode.ADVANCE_PHASE))
+            .isEqualTo(ActionCapability.enabled(ActionCapabilityCode.ADVANCE_PHASE));
+        assertThatThrownBy(() -> matchActionService.sendTurnCheer(matchId, hostId))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("目前無法發送吶喊");
+    }
+
+    @Test
+    void unavailableTurnCheerCapabilityShouldMatchCommandRejectionWithoutStageHolomem() {
+        StartedMatchContext context = createStartedMatch("capability-no-stage-host", "capability-no-stage-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        resetTurnCheerAction(matchId, hostId);
+        jdbcTemplate.update(
+            "DELETE FROM match_holomems WHERE match_id = ? AND owner_user_id = ?",
+            matchId,
+            hostId
+        );
+
+        GameStateResponse state = matchGameStateService.getGameStateForUser(matchId, hostId);
+
+        assertThat(actionCapability(state, ActionCapabilityCode.SEND_TURN_CHEER))
+            .isEqualTo(ActionCapability.disabled(
+                ActionCapabilityCode.SEND_TURN_CHEER,
+                ActionCapabilityReasonCode.TURN_CHEER_UNAVAILABLE
+            ));
+        assertThat(actionCapability(state, ActionCapabilityCode.ADVANCE_PHASE))
+            .isEqualTo(ActionCapability.enabled(ActionCapabilityCode.ADVANCE_PHASE));
+        assertThatThrownBy(() -> matchActionService.sendTurnCheer(matchId, hostId))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("目前無法發送吶喊");
+    }
+
+    private ActionCapability actionCapability(GameStateResponse state, ActionCapabilityCode type) {
+        return state.getActionCapabilities().stream()
+            .filter(capability -> capability.type() == type)
+            .findFirst()
+            .orElseThrow();
+    }
+
+    private void resetPilotTurnActions(Long matchId, Long userId) {
+        jdbcTemplate.update(
+            "DELETE FROM match_actions WHERE match_id = ? AND user_id = ? AND action_type IN ('DRAW_TURN', 'TURN_CHEER')",
+            matchId,
+            userId
+        );
+    }
+
+    private void resetTurnCheerAction(Long matchId, Long userId) {
+        jdbcTemplate.update(
+            "DELETE FROM match_actions WHERE match_id = ? AND user_id = ? AND action_type = 'TURN_CHEER'",
+            matchId,
+            userId
+        );
+    }
+
+    private int actionCount(Long matchId, Long userId, String actionType) {
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM match_actions WHERE match_id = ? AND user_id = ? AND action_type = ?",
+            Integer.class,
+            matchId,
+            userId,
+            actionType
+        );
+        return count == null ? 0 : count;
+    }
+
+    private int pendingDecisionCount(Long matchId, Long userId, String decisionType) {
+        Integer count = jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM match_pending_decisions
+            WHERE match_id = ?
+              AND user_id = ?
+              AND decision_type = ?
+              AND status = 'PENDING'
+            """,
+            Integer.class,
+            matchId,
+            userId,
+            decisionType
+        );
+        return count == null ? 0 : count;
     }
 
     private String bearerTokenFor(Long userId) {

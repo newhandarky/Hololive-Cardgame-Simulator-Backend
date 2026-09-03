@@ -2,7 +2,6 @@ package com.hololive.cardgame.service;
 
 import com.hololive.cardgame.entity.MatchEntity;
 import com.hololive.cardgame.error.GameRuleException;
-import com.hololive.cardgame.model.LobbyMatchStatus;
 import com.hololive.cardgame.model.MatchPhase;
 import com.hololive.cardgame.repository.MatchPlayerRepository;
 import com.hololive.cardgame.repository.MatchRepository;
@@ -24,7 +23,7 @@ public class EndTurnApplicationService {
     private final MatchRepository matchRepository;
     private final MatchPlayerRepository matchPlayerRepository;
     private final JdbcTemplate jdbcTemplate;
-    private final PendingDecisionReader pendingDecisionReader;
+    private final TurnActionRuleService turnActionRuleService;
 
     public EndTurnApplicationService(
         EndTurnActionValidator endTurnActionValidator,
@@ -35,7 +34,8 @@ public class EndTurnApplicationService {
         MatchTurnLifecycleService matchTurnLifecycleService,
         MatchRepository matchRepository,
         MatchPlayerRepository matchPlayerRepository,
-        JdbcTemplate jdbcTemplate
+        JdbcTemplate jdbcTemplate,
+        TurnActionRuleService turnActionRuleService
     ) {
         this.endTurnActionValidator = endTurnActionValidator;
         this.endTurnActionResolver = endTurnActionResolver;
@@ -46,7 +46,7 @@ public class EndTurnApplicationService {
         this.matchRepository = matchRepository;
         this.matchPlayerRepository = matchPlayerRepository;
         this.jdbcTemplate = jdbcTemplate;
-        this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
+        this.turnActionRuleService = turnActionRuleService;
     }
 
     public void handle(EndTurnAction action) {
@@ -105,10 +105,10 @@ public class EndTurnApplicationService {
     private EndTurnValidationContext loadValidationContext(EndTurnAction action) {
         MatchEntity match = matchRepository.findByIdForUpdate(action.matchId())
             .orElseThrow(() -> new IllegalArgumentException("找不到對戰"));
-        if (!"active".equalsIgnoreCase(String.valueOf(match.getStatus()))) {
+        if (!turnActionRuleService.isMatchActive(match)) {
             throw new IllegalStateException("對戰已結束");
         }
-        if (!LobbyMatchStatus.STARTED.name().equals(match.getLobbyStatus())) {
+        if (!turnActionRuleService.isMatchStarted(match)) {
             throw new IllegalStateException("對戰尚未開始");
         }
         if (!matchPlayerRepository.existsByMatchIdAndUserId(action.matchId(), action.actorUserId())) {
@@ -117,7 +117,7 @@ public class EndTurnApplicationService {
 
         int turnNumber = match.getTurnNumber() == null ? 1 : match.getTurnNumber();
         Long opponentUserId = resolveOpponent(match, action.actorUserId());
-        MatchPhase currentPhase = parsePhase(match.getCurrentPhase());
+        MatchPhase currentPhase = turnActionRuleService.parsePhase(match.getCurrentPhase());
         EndTurnRequiredActionSummary requiredActionSummary = buildRequiredActionSummary(
             action.matchId(),
             action.actorUserId(),
@@ -165,13 +165,15 @@ public class EndTurnApplicationService {
                 return true;
             }
         }
-        return hasAction(action.matchId(), action.actorUserId(), action.requestedTurnNumber(), "END_TURN");
+        return turnActionRuleService.hasAction(
+            action.matchId(), action.actorUserId(), action.requestedTurnNumber(), "END_TURN"
+        );
     }
 
     private EndTurnRequiredActionSummary buildRequiredActionSummary(Long matchId, Long userId, int turnNumber) {
-        boolean drawTurnCompleted = hasAction(matchId, userId, turnNumber, "DRAW_TURN");
-        boolean requiresTurnCheer = canPerformTurnCheerAction(matchId, userId);
-        boolean turnCheerCompleted = hasAction(matchId, userId, turnNumber, "TURN_CHEER");
+        boolean drawTurnCompleted = turnActionRuleService.hasDrawTurnAction(matchId, userId, turnNumber);
+        boolean requiresTurnCheer = turnActionRuleService.canPerformTurnCheerAction(matchId, userId);
+        boolean turnCheerCompleted = turnActionRuleService.hasTurnCheerAction(matchId, userId, turnNumber);
         var missingActions = new ArrayList<String>();
         if (!drawTurnCompleted) {
             missingActions.add("抽卡");
@@ -187,62 +189,12 @@ public class EndTurnApplicationService {
         );
     }
 
-    private boolean hasAction(Long matchId, Long userId, int turnNumber, String actionType) {
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_actions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND turn_number = ?
-              AND action_type = ?
-            """,
-            Integer.class,
-            matchId,
-            userId,
-            turnNumber,
-            actionType
-        );
-        return count != null && count > 0;
-    }
-
-    private boolean canPerformTurnCheerAction(Long matchId, Long userId) {
-        Integer cheerDeckCount = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CHEER_DECK'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        if (cheerDeckCount == null || cheerDeckCount <= 0) {
-            return false;
-        }
-        Integer stageHolomemCount = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('CENTER', 'COLLAB', 'BACK')
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        return stageHolomemCount != null && stageHolomemCount > 0;
-    }
-
     private boolean hasPendingDecision(Long matchId, Long userId) {
-        return pendingDecisionReader.hasAnyPendingDecision(matchId, userId);
+        return turnActionRuleService.hasAnyPendingDecision(matchId, userId);
     }
 
     private boolean hasAnyPendingDecision(Long matchId) {
-        return pendingDecisionReader.hasAnyPendingDecision(matchId);
+        return turnActionRuleService.hasAnyPendingDecision(matchId);
     }
 
     private Long resolveOpponent(MatchEntity match, Long actorUserId) {
@@ -258,14 +210,4 @@ public class EndTurnApplicationService {
         return null;
     }
 
-    private MatchPhase parsePhase(String phaseValue) {
-        if (phaseValue == null || phaseValue.isBlank()) {
-            return MatchPhase.RESET;
-        }
-        try {
-            return MatchPhase.valueOf(phaseValue.trim().toUpperCase());
-        } catch (IllegalArgumentException ex) {
-            throw new IllegalStateException("未知對戰階段: " + phaseValue, ex);
-        }
-    }
 }

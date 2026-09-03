@@ -59,6 +59,7 @@ public class MatchGameStateService {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final MatchEffectCombatModifierService matchEffectCombatModifierService;
+    private final TurnActionCapabilityService turnActionCapabilityService;
 
     /**
      * 建立對戰狀態查詢服務，統整 DB 資料成前端可直接渲染的 GameState。
@@ -68,13 +69,15 @@ public class MatchGameStateService {
         MatchPlayerRepository matchPlayerRepository,
         JdbcTemplate jdbcTemplate,
         ObjectMapper objectMapper,
-        MatchEffectCombatModifierService matchEffectCombatModifierService
+        MatchEffectCombatModifierService matchEffectCombatModifierService,
+        TurnActionCapabilityService turnActionCapabilityService
     ) {
         this.matchRepository = matchRepository;
         this.matchPlayerRepository = matchPlayerRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.matchEffectCombatModifierService = matchEffectCombatModifierService;
+        this.turnActionCapabilityService = turnActionCapabilityService;
     }
 
     @Transactional(readOnly = true)
@@ -88,6 +91,7 @@ public class MatchGameStateService {
         GameStateResponse response = getGameState(matchId);
         response.getPendingDecisions().addAll(loadPendingDecisions(matchId, userId));
         response.getPendingInteractions().addAll(loadPendingInteractions(matchId, userId));
+        response.getActionCapabilities().addAll(turnActionCapabilityService.getCapabilities(matchId, userId));
         return response;
     }
 

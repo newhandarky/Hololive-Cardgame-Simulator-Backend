@@ -68,6 +68,7 @@ public class MatchActionService {
     private final ObjectMapper objectMapper;
     private final MatchPayloadJsonService matchPayloadJsonService;
     private final PendingDecisionReader pendingDecisionReader;
+    private final TurnActionRuleService turnActionRuleService;
     private final PendingDecisionStore pendingDecisionStore;
     private final PendingDecisionCreationService pendingDecisionCreationService;
     private final MatchDecisionResolutionService matchDecisionResolutionService;
@@ -145,6 +146,7 @@ public class MatchActionService {
         MatchPlayerRepository matchPlayerRepository,
         MatchActionRepository matchActionRepository,
         JdbcTemplate jdbcTemplate,
+        TurnActionRuleService turnActionRuleService,
         ObjectMapper objectMapper,
         MatchEffectService matchEffectService,
         MatchEffectCombatModifierService matchEffectCombatModifierService,
@@ -178,6 +180,7 @@ public class MatchActionService {
         this.matchPlayerRepository = matchPlayerRepository;
         this.matchActionRepository = matchActionRepository;
         this.jdbcTemplate = jdbcTemplate;
+        this.turnActionRuleService = turnActionRuleService;
         this.objectMapper = objectMapper;
         this.matchPayloadJsonService = new MatchPayloadJsonService(objectMapper);
         this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
@@ -2726,21 +2729,21 @@ public class MatchActionService {
         MatchEntity match = matchRepository.findByIdForUpdate(matchId)
             .orElseThrow(() -> new IllegalArgumentException("找不到對戰"));
 
-        if (!"active".equalsIgnoreCase(asString(match.getStatus()))) {
+        if (!turnActionRuleService.isMatchActive(match)) {
             throw new IllegalStateException("對戰已結束");
         }
-        if (!LobbyMatchStatus.STARTED.name().equals(match.getLobbyStatus())) {
+        if (!turnActionRuleService.isMatchStarted(match)) {
             throw new IllegalStateException("對戰尚未開始");
         }
         if (!matchPlayerRepository.existsByMatchIdAndUserId(matchId, userId)) {
             throw new IllegalArgumentException("你不在此房間中");
         }
-        boolean isCurrentTurnPlayer = match.getCurrentTurnPlayerId() != null && match.getCurrentTurnPlayerId().equals(userId);
+        boolean isCurrentTurnPlayer = turnActionRuleService.isCurrentTurnPlayer(match, userId);
         if (!isCurrentTurnPlayer && (!allowPendingDecision || !hasBlockingPendingDecision(matchId, userId))) {
             throw new GameRuleException(GameErrorCode.NOT_YOUR_TURN, "現在不是你的回合");
         }
 
-        MatchPhase phase = parsePhase(match.getCurrentPhase());
+        MatchPhase phase = turnActionRuleService.parsePhase(match.getCurrentPhase());
         if (!allowedPhases.contains(phase)) {
             throw new GameRuleException(
                 GameErrorCode.PHASE_ACTION_NOT_ALLOWED,
@@ -2804,22 +2807,7 @@ public class MatchActionService {
         if (matchId == null || userId == null || turnNumber <= 0) {
             return false;
         }
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_actions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND turn_number = ?
-              AND action_type = ?
-            """,
-            Integer.class,
-            matchId,
-            userId,
-            turnNumber,
-            ACTION_TYPE_DRAW_TURN
-        );
-        return count != null && count > 0;
+        return turnActionRuleService.hasDrawTurnAction(matchId, userId, turnNumber);
     }
 
     /**
@@ -2829,69 +2817,21 @@ public class MatchActionService {
         if (matchId == null || userId == null || turnNumber <= 0) {
             return false;
         }
-        Integer count = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_actions
-            WHERE match_id = ?
-              AND user_id = ?
-              AND turn_number = ?
-              AND action_type = ?
-            """,
-            Integer.class,
-            matchId,
-            userId,
-            turnNumber,
-            ACTION_TYPE_TURN_CHEER
-        );
-        return count != null && count > 0;
+        return turnActionRuleService.hasTurnCheerAction(matchId, userId, turnNumber);
     }
 
     /**
      * 判斷是否為先攻玩家的第一回合。
      */
     private boolean isFirstPlayerFirstTurn(MatchEntity match, Long userId, int turnNumber) {
-        if (match == null || userId == null) {
-            return false;
-        }
-        return turnNumber == 1 && userId.equals(match.getPlayerAId());
+        return turnActionRuleService.isFirstPlayerFirstTurn(match, userId, turnNumber);
     }
 
     /**
      * 判斷是否具備執行回合 Cheer 的必要條件（牌庫有 Cheer 且場上有 Holomem）。
      */
     private boolean canPerformTurnCheerAction(Long matchId, Long userId) {
-        if (matchId == null || userId == null) {
-            return false;
-        }
-        Integer cheerDeckCount = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CHEER_DECK'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        if (cheerDeckCount == null || cheerDeckCount <= 0) {
-            return false;
-        }
-        Integer stageHolomemCount = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('CENTER', 'COLLAB', 'BACK')
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        return stageHolomemCount != null && stageHolomemCount > 0;
+        return turnActionRuleService.canPerformTurnCheerAction(matchId, userId);
     }
 
     /**
@@ -3985,14 +3925,14 @@ public class MatchActionService {
      * 判斷是否存在會阻擋操作的 pending 決策。
      */
     private boolean hasBlockingPendingDecision(Long matchId, Long userId) {
-        return pendingDecisionReader.hasBlockingPendingDecision(matchId, userId);
+        return turnActionRuleService.hasBlockingPendingDecision(matchId, userId);
     }
 
     /**
      * 判斷此對戰是否存在任何 pending 決策。
      */
     private boolean hasAnyPendingDecision(Long matchId) {
-        return pendingDecisionReader.hasAnyPendingDecision(matchId);
+        return turnActionRuleService.hasAnyPendingDecision(matchId);
     }
 
     private Map<String, Object> applyTriggeredEffectAfterConfirm(
