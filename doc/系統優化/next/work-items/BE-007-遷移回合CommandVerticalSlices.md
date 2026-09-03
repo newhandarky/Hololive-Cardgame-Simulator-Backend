@@ -1,6 +1,6 @@
 # BE-007：遷移回合 Command Vertical Slices
 
-狀態：READY_AFTER_BE-002
+狀態：IN_PROGRESS
 風險：中
 Repository：`hololive-cardgame-backend`
 前置工作：BE-001、BE-002
@@ -124,7 +124,16 @@ npx gitnexus detect-changes --repo Hololive-Cardgame-Simulator-Backend --scope a
 
 | Action | 狀態 | Commit | Legacy responsibility removed |
 | --- | --- | --- | --- |
-| DRAW_TURN | TODO |  |  |
+| DRAW_TURN | DONE | `f0cbfb1` | controller、Hard NPC 與 test support 改走 typed command；從 `MatchActionService` 移除交易入口、抽牌 SQL、pending 建立協調、action payload 與 128 行 legacy orchestration |
 | SEND_TURN_CHEER | TODO |  |  |
 | ADVANCE_PHASE | TODO |  |  |
 | END_TURN | TODO |  |  |
+
+## 十一、DRAW_TURN checkpoint（2026-09-03）
+
+- 新增 `DrawTurnCommand`、`DrawTurnCommandHandler` 與 `DrawTurnApplicationService`；公開 REST path/request/response 保持不變。
+- capability 與 command 共用 `TurnActionRuleService` 的 active/started/current-player/phase/pending/duplicate facts。
+- `MatchActionService` 不再暴露 `drawTurn`，也不保留抽牌 SQL 或雙入口；既有內部 dependency 數沒有增加。
+- `MatchTurnLifecycleService` 統一寫入 DRAW_TURN、DRAW_REVEAL pending 與 DRAW_DECK_OUT 結算。
+- 驗證：4 個 handler/application unit tests、9 個 `MatchControllerEndTurnApiIntegrationTest`、2 個正常抽牌/deck-out focused integration tests、compile、test-compile 與 diff check 通過。
+- GitNexus staged detect-changes：21 files、33 symbols、17 flows、CRITICAL；主因是 controller/Hard NPC 與共用 integration test support 皆切換 command 入口，已由 REST、capability、pending、正常抽牌與 deck-out gates 覆蓋。

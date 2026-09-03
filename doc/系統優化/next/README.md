@@ -71,7 +71,7 @@ flowchart LR
 | --- | --- | --- |
 | [BE-001](work-items/BE-001-建立MatchCommandGateway.md) | DONE | 建立 command gateway pilot |
 | [BE-002](work-items/BE-002-建立ActionCapabilities.md) | DONE | 四個回合操作的 server-authoritative capabilities |
-| [BE-007](work-items/BE-007-遷移回合CommandVerticalSlices.md) | READY | 逐條遷移回合 command vertical slices |
+| [BE-007](work-items/BE-007-遷移回合CommandVerticalSlices.md) | IN_PROGRESS | DRAW_TURN 已完成；下一條為 SEND_TURN_CHEER |
 | [BE-003](work-items/BE-003-統一PendingChoice.md) | READY_AFTER_BE-007 | 收斂 decision/interaction 為 PendingChoice |
 | [BE-005](work-items/BE-005-導入狀態版本與冪等.md) | READY_AFTER_BE-003 | state version、command idempotency、gap detection |
 | [BE-004](work-items/BE-004-建立EffectPrimitive管線.md) | BLOCKED_BY_BE-003_BE-005 | typed effect/timing pilot |
