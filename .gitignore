@@ -32,5 +32,12 @@ build/
 ### VS Code ###
 .vscode/
 doc/
+!doc/
+doc/*
+!doc/系統優化/
+doc/系統優化/*
+!doc/系統優化/next/
+!doc/系統優化/next/**
 
 .DS_Store
+.gitnexus
