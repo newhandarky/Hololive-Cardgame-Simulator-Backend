@@ -35,8 +35,8 @@
 - `GameRoomScreen.tsx`：約 1,942 行。
 - `services/api.ts`：約 622 行。
 - `App.css`：約 1,626 行。
-- build 通過，但 lint 有 11 errors、15 warnings，主要集中在 GameRoom derived state/effect/memo。
-- 尚無 `test` script、unit/component/E2E baseline。
+- FE-000 已完成：build 與 lint 通過（0 errors、0 warnings），Vitest 5 tests 通過。
+- 已有 pure selector/test baseline；component/E2E recovery net 於後續 FE-003～FE-005 逐步補齊。
 - STARTED match 同時使用 WebSocket full snapshot 與每 1.5 秒兩個 GET 的常態 polling。
 
 ## 三、相較舊計畫的調整
@@ -81,8 +81,8 @@ flowchart LR
 
 | ID | 狀態 | 目的 |
 | --- | --- | --- |
-| FE-000 | READY | 建立 lint/build/test 綠色基線 |
-| FE-001 | BLOCKED_BY_FE-000 | 拆 API contracts 與 feature clients |
+| FE-000 | DONE | 建立 lint/build/test 綠色基線 |
+| FE-001 | READY | 拆 API contracts 與 feature clients |
 | FE-003 | BLOCKED_BY_FE-001 | GameRoom selectors、ChoiceHost、metadata seam |
 | FE-004 | BLOCKED_BY_FE-003 | 改由 ActionCapabilities 驅動畫面 |
 | FE-002 | BLOCKED_BY_FE-001 | 抽 auth/lobby session，縮小 App |
