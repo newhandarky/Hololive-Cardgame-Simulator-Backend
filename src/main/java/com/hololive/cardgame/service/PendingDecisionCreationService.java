@@ -152,34 +152,39 @@ class PendingDecisionCreationService {
         );
     }
 
-    Long createTurnSendCheerPendingInteraction(Long matchId, Long userId) {
-        if (userId == null || userId <= 0) {
+    Long createTurnSendCheerPendingInteraction(
+        Long matchId,
+        Long userId,
+        TurnCheerAvailabilityService.TurnCheerAvailability availability
+    ) {
+        if (matchId == null || userId == null || userId <= 0 || availability == null) {
             return null;
         }
-        Long cheerCardInstanceId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CHEER_DECK'
-            ORDER BY order_index NULLS LAST, id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId
-        );
-        if (cheerCardInstanceId == null) {
-            return null;
+        List<Long> candidateCardInstanceIds = new ArrayList<>();
+        List<Map<String, Object>> candidateCards = new ArrayList<>();
+        for (TurnCheerAvailabilityService.TurnCheerTarget target : availability.targets()) {
+            candidateCardInstanceIds.add(target.cardInstanceId());
+            Map<String, Object> candidate = new LinkedHashMap<>();
+            candidate.put("cardInstanceId", target.cardInstanceId());
+            candidate.put("cardId", target.cardId());
+            candidate.put("name", target.name());
+            candidate.put("cardType", target.cardType());
+            candidate.put("levelType", target.levelType());
+            candidate.put("zone", target.zone());
+            candidate.put("imageUrl", target.imageUrl());
+            candidateCards.add(candidate);
         }
-        return createSendCheerPendingInteraction(
+        return insertSendCheerPendingInteraction(
             matchId,
             userId,
-            cheerCardInstanceId,
+            availability.sourceCardInstanceId(),
+            availability.sourceCardId(),
+            availability.sourceZone(),
             "TURN_CHEER",
             "回合吶喊",
-            "請從エール牌庫發送 1 張吶喊到我方 Holomem。"
+            "請從エール牌庫發送 1 張吶喊到我方 Holomem。",
+            candidateCardInstanceIds,
+            candidateCards
         );
     }
 
@@ -282,11 +287,37 @@ class PendingDecisionCreationService {
         if (candidateCards.isEmpty()) {
             return null;
         }
+        return insertSendCheerPendingInteraction(
+            matchId,
+            userId,
+            sourceCardInstanceId,
+            sourceCardId,
+            MatchEffectValueHelper.normalize(sourceCard.get("zone")),
+            sourceActionType,
+            title,
+            message,
+            candidateCardInstanceIds,
+            candidateCards
+        );
+    }
+
+    private Long insertSendCheerPendingInteraction(
+        Long matchId,
+        Long userId,
+        Long sourceCardInstanceId,
+        String sourceCardId,
+        String sourceZone,
+        String sourceActionType,
+        String title,
+        String message,
+        List<Long> candidateCardInstanceIds,
+        List<Map<String, Object>> candidateCards
+    ) {
         Map<String, Object> context = new LinkedHashMap<>();
         context.put("interactionType", INTERACTION_TYPE_SEND_CHEER);
         context.put("title", title);
         context.put("message", message);
-        context.put("sourceZone", MatchEffectValueHelper.normalize(sourceCard.get("zone")));
+        context.put("sourceZone", MatchEffectValueHelper.normalize(sourceZone));
         context.put("cards", candidateCards);
         context.put("candidateCardInstanceIds", candidateCardInstanceIds);
 

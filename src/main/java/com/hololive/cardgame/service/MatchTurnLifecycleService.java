@@ -249,6 +249,14 @@ public class MatchTurnLifecycleService {
         return pendingDecisionCreationService.createDrawRevealPendingInteraction(matchId, userId, drawnCardInstanceId);
     }
 
+    public Long createTurnSendCheerPendingInteraction(
+        Long matchId,
+        Long userId,
+        TurnCheerAvailabilityService.TurnCheerAvailability availability
+    ) {
+        return pendingDecisionCreationService.createTurnSendCheerPendingInteraction(matchId, userId, availability);
+    }
+
     /**
      * 以敗北結束對戰，供回合 lifecycle vertical slice 共用。
      */

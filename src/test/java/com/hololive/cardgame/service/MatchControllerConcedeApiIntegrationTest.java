@@ -60,7 +60,7 @@ class MatchControllerConcedeApiIntegrationTest extends MatchIntegrationTestSuppo
         }
         resolvePendingInteractionIfExists(matchId, userId, "DRAW_REVEAL");
         try {
-            matchActionService.sendTurnCheer(matchId, userId);
+            executeSendTurnCheer(matchId, userId);
         } catch (IllegalStateException | com.hololive.cardgame.error.GameRuleException ex) {
             if (ex instanceof com.hololive.cardgame.error.GameRuleException gameRuleException
                 && gameRuleException.getCode() == GameErrorCode.TURN_CHEER_ALREADY_USED) {

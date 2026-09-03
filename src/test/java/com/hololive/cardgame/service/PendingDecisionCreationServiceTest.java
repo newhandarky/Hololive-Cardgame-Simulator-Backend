@@ -111,6 +111,45 @@ class PendingDecisionCreationServiceTest {
     }
 
     @Test
+    void createTurnSendCheerPendingInteractionShouldUseResolvedAvailabilityWithoutRequeryingSource() {
+        TurnCheerAvailabilityService.TurnCheerAvailability availability =
+            new TurnCheerAvailabilityService.TurnCheerAvailability(
+                500L,
+                "hY01-001",
+                "CHEER_DECK",
+                List.of(new TurnCheerAvailabilityService.TurnCheerTarget(
+                    900L,
+                    "hBP01-001",
+                    "Tokino Sora",
+                    "HOLOMEM",
+                    "DEBUT",
+                    "CENTER",
+                    "center.png"
+                ))
+            );
+        ArgumentCaptor<String> contextCaptor = ArgumentCaptor.forClass(String.class);
+        when(jdbcTemplate.query(
+            contains("INSERT INTO match_pending_decisions"),
+            any(ResultSetExtractor.class),
+            eq(100L),
+            eq(10L),
+            eq("SEND_CHEER"),
+            eq("TURN_CHEER"),
+            eq(500L),
+            eq("hY01-001"),
+            eq("SEND_CHEER"),
+            eq(PendingDecisionReader.PENDING_STATUS),
+            contextCaptor.capture()
+        )).thenReturn(777L);
+
+        Long decisionId = service.createTurnSendCheerPendingInteraction(100L, 10L, availability);
+
+        assertThat(decisionId).isEqualTo(777L);
+        assertThat(contextCaptor.getValue()).contains("\"sourceZone\":\"CHEER_DECK\"");
+        assertThat(contextCaptor.getValue()).contains("\"candidateCardInstanceIds\":[900]");
+    }
+
+    @Test
     void createCardSelectionPendingDecisionShouldRejectWhenBlockingPendingExists() {
         when(pendingDecisionReader.hasBlockingPendingDecision(100L, 10L)).thenReturn(true);
         MatchEffectService.SupportDecisionPlan decisionPlan = new MatchEffectService.SupportDecisionPlan(

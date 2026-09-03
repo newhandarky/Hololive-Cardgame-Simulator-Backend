@@ -26,6 +26,7 @@ import com.hololive.cardgame.service.MatchActionService;
 import com.hololive.cardgame.service.MatchCommandGateway;
 import com.hololive.cardgame.service.MatchCommandResult;
 import com.hololive.cardgame.service.MatchGameStateService;
+import com.hololive.cardgame.service.SendTurnCheerCommand;
 import com.hololive.cardgame.websocket.MatchSocketHandler;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -304,7 +305,7 @@ public class MatchController {
      */
     public LobbyMatchResponse sendTurnCheer(@PathVariable Long matchId) {
         try {
-            matchActionService.sendTurnCheer(matchId, currentUserId());
+            matchCommandGateway.submit(new SendTurnCheerCommand(matchId, currentUserId()));
             LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
             publish(matchId, "TURN_CHEER", response);
             return response;

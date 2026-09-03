@@ -120,6 +120,10 @@ abstract class MatchIntegrationTestSupport extends AbstractPostgresIntegrationTe
         matchCommandGateway.submit(new DrawTurnCommand(matchId, userId));
     }
 
+    protected void executeSendTurnCheer(Long matchId, Long userId) {
+        matchCommandGateway.submit(new SendTurnCheerCommand(matchId, userId));
+    }
+
     protected Long playOpeningCenter(Long matchId, Long userId) {
         Long memberCardInstanceId = findDebutMemberCardFromHand(matchId, userId);
         assertThat(memberCardInstanceId).isNotNull();

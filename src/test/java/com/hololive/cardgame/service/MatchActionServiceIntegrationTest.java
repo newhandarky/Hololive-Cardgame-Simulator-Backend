@@ -1763,7 +1763,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
         matchActionService.resolveDecision(matchId, guestId, resolveTurnStart);
         executeDrawTurn(matchId, guestId);
         resolvePendingInteractionIfExists(matchId, guestId, "DRAW_REVEAL");
-        matchActionService.sendTurnCheer(matchId, guestId);
+        executeSendTurnCheer(matchId, guestId);
 
         Map<String, Object> sendCheerPending = jdbcTemplate.queryForMap(
             """
@@ -1831,7 +1831,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
         matchActionService.resolveDecision(matchId, guestId, resolveTurnStart);
         executeDrawTurn(matchId, guestId);
         resolvePendingInteractionIfExists(matchId, guestId, "DRAW_REVEAL");
-        matchActionService.sendTurnCheer(matchId, guestId);
+        executeSendTurnCheer(matchId, guestId);
 
         Map<String, Object> sendCheerPending = jdbcTemplate.queryForMap(
             """
@@ -2162,7 +2162,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
             .satisfies(ex -> assertThat(((GameRuleException) ex).getCode()).isEqualTo(GameErrorCode.TURN_ACTIONS_INCOMPLETE))
             .hasMessageContaining("發送吶喊");
 
-        matchActionService.sendTurnCheer(matchId, hostId);
+        executeSendTurnCheer(matchId, hostId);
         Long sendCheerDecisionId = jdbcTemplate.query(
             """
             SELECT id

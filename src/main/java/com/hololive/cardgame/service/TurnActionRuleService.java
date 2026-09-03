@@ -14,10 +14,15 @@ public class TurnActionRuleService {
 
     private final JdbcTemplate jdbcTemplate;
     private final PendingDecisionReader pendingDecisionReader;
+    private final TurnCheerAvailabilityService turnCheerAvailabilityService;
 
-    public TurnActionRuleService(JdbcTemplate jdbcTemplate) {
+    public TurnActionRuleService(
+        JdbcTemplate jdbcTemplate,
+        TurnCheerAvailabilityService turnCheerAvailabilityService
+    ) {
         this.jdbcTemplate = jdbcTemplate;
         this.pendingDecisionReader = new PendingDecisionReader(jdbcTemplate);
+        this.turnCheerAvailabilityService = turnCheerAvailabilityService;
     }
 
     public boolean isMatchActive(MatchEntity match) {
@@ -74,37 +79,7 @@ public class TurnActionRuleService {
     }
 
     public boolean canPerformTurnCheerAction(Long matchId, Long userId) {
-        if (matchId == null || userId == null) {
-            return false;
-        }
-        Integer cheerDeckCount = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CHEER_DECK'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        if (cheerDeckCount == null || cheerDeckCount <= 0) {
-            return false;
-        }
-        Integer stageHolomemCount = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('CENTER', 'COLLAB', 'BACK')
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        return stageHolomemCount != null && stageHolomemCount > 0;
+        return turnCheerAvailabilityService.findAvailability(matchId, userId).isPresent();
     }
 
     public boolean hasOpeningCenterPlaced(Long matchId, Long userId) {

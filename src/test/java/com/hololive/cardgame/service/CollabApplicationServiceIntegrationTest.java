@@ -110,7 +110,7 @@ class CollabApplicationServiceIntegrationTest extends MatchIntegrationTestSuppor
         }
         resolvePendingInteractionIfExists(matchId, userId, "DRAW_REVEAL");
         try {
-            matchActionService.sendTurnCheer(matchId, userId);
+            executeSendTurnCheer(matchId, userId);
         } catch (IllegalStateException | GameRuleException ex) {
             if (ex instanceof GameRuleException gameRuleException
                 && gameRuleException.getCode() == GameErrorCode.TURN_CHEER_ALREADY_USED) {

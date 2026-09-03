@@ -1,5 +1,6 @@
 package com.hololive.cardgame.service;
 
+import com.hololive.cardgame.dto.ActionCapabilityCode;
 import com.hololive.cardgame.dto.BloomActionRequest;
 import com.hololive.cardgame.dto.GameStateResponse;
 import com.hololive.cardgame.dto.MoveStageHolomemActionRequest;
@@ -311,11 +312,11 @@ public class HardNpcService {
             }
         }
         if ("CHEER".equals(phase)) {
-            if (!canSendTurnCheer(matchId, npcUserId)) {
+            if (!canPerformTurnAction(state, ActionCapabilityCode.SEND_TURN_CHEER)) {
                 return true;
             }
             try {
-                matchActionService.sendTurnCheer(matchId, npcUserId);
+                matchCommandGateway.submit(new SendTurnCheerCommand(matchId, npcUserId));
                 return true;
             } catch (RuntimeException ex) {
                 log.warn(
@@ -350,10 +351,10 @@ public class HardNpcService {
         if (
             "MAIN".equals(phase)
                 && !hasActionInTurn(matchId, npcUserId, turnNumber, "TURN_CHEER")
-                && canSendTurnCheer(matchId, npcUserId)
+                && canPerformTurnAction(state, ActionCapabilityCode.SEND_TURN_CHEER)
         ) {
             try {
-                matchActionService.sendTurnCheer(matchId, npcUserId);
+                matchCommandGateway.submit(new SendTurnCheerCommand(matchId, npcUserId));
                 return true;
             } catch (RuntimeException ex) {
                 log.warn(
@@ -563,40 +564,11 @@ public class HardNpcService {
         return count != null && count > 0;
     }
 
-    /**
-     * 判斷是否具備「發送回合 Cheer」前提：
-     * 1) Cheer 牌庫仍有牌
-     * 2) 場上至少有一張 Holomem 可附加
-     */
-    private boolean canSendTurnCheer(Long matchId, Long userId) {
-        Integer cheerDeckCount = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'CHEER_DECK'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        if (cheerDeckCount == null || cheerDeckCount <= 0) {
-            return false;
-        }
-        Integer stageHolomemCount = jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*)
-            FROM match_holomems
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone IN ('CENTER', 'COLLAB', 'BACK')
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        return stageHolomemCount != null && stageHolomemCount > 0;
+    private boolean canPerformTurnAction(GameStateResponse state, ActionCapabilityCode actionCode) {
+        return state != null
+            && state.getActionCapabilities() != null
+            && state.getActionCapabilities().stream()
+                .anyMatch(capability -> capability.type() == actionCode && capability.enabled());
     }
 
     /**

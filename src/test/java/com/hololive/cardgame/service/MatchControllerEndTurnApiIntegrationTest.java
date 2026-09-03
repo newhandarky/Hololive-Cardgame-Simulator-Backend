@@ -66,7 +66,7 @@ class MatchControllerEndTurnApiIntegrationTest extends MatchIntegrationTestSuppo
         }
         resolvePendingInteractionIfExists(matchId, userId, "DRAW_REVEAL");
         try {
-            matchActionService.sendTurnCheer(matchId, userId);
+            executeSendTurnCheer(matchId, userId);
         } catch (IllegalStateException | com.hololive.cardgame.error.GameRuleException ex) {
             if (ex instanceof com.hololive.cardgame.error.GameRuleException gameRuleException
                 && gameRuleException.getCode() == GameErrorCode.TURN_CHEER_ALREADY_USED) {
@@ -362,7 +362,7 @@ class MatchControllerEndTurnApiIntegrationTest extends MatchIntegrationTestSuppo
         assertThat(actionCapability(afterDrawState, ActionCapabilityCode.SEND_TURN_CHEER))
             .isEqualTo(ActionCapability.enabled(ActionCapabilityCode.SEND_TURN_CHEER));
 
-        matchActionService.sendTurnCheer(matchId, hostId);
+        executeSendTurnCheer(matchId, hostId);
 
         assertThat(actionCount(matchId, hostId, "TURN_CHEER")).isZero();
         assertThat(pendingDecisionCount(matchId, hostId, "SEND_CHEER")).isEqualTo(1);
@@ -390,6 +390,27 @@ class MatchControllerEndTurnApiIntegrationTest extends MatchIntegrationTestSuppo
         assertThat(actionCount(matchId, hostId, "DRAW_TURN")).isEqualTo(1);
         assertThat(pendingDecisionCount(matchId, hostId, "DRAW_REVEAL")).isEqualTo(1);
         assertThat(matchGameStateService.getGameStateForUser(matchId, hostId).getPhase()).isEqualTo(MatchPhase.DRAW);
+    }
+
+    @Test
+    void sendTurnCheerEndpointShouldDispatchCommandAndPreserveResponseContract() throws Exception {
+        StartedMatchContext context = createStartedMatch("cheer-command-host", "cheer-command-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        resetPilotTurnActions(matchId, hostId);
+        executeDrawTurn(matchId, hostId);
+        resolvePendingInteractionIfExists(matchId, hostId, "DRAW_REVEAL");
+
+        mockMvc.perform(
+                post("/api/matches/{matchId}/actions/send-turn-cheer", matchId)
+                    .header("Authorization", bearerTokenFor(hostId))
+            )
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.matchId").value(matchId));
+
+        assertThat(actionCount(matchId, hostId, "TURN_CHEER")).isZero();
+        assertThat(pendingDecisionCount(matchId, hostId, "SEND_CHEER")).isEqualTo(1);
+        assertThat(matchGameStateService.getGameStateForUser(matchId, hostId).getPhase()).isEqualTo(MatchPhase.CHEER);
     }
 
     @Test
@@ -451,7 +472,7 @@ class MatchControllerEndTurnApiIntegrationTest extends MatchIntegrationTestSuppo
             ));
         assertThat(actionCapability(state, ActionCapabilityCode.ADVANCE_PHASE))
             .isEqualTo(ActionCapability.enabled(ActionCapabilityCode.ADVANCE_PHASE));
-        assertThatThrownBy(() -> matchActionService.sendTurnCheer(matchId, hostId))
+        assertThatThrownBy(() -> executeSendTurnCheer(matchId, hostId))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("目前無法發送吶喊");
     }
@@ -477,7 +498,7 @@ class MatchControllerEndTurnApiIntegrationTest extends MatchIntegrationTestSuppo
             ));
         assertThat(actionCapability(state, ActionCapabilityCode.ADVANCE_PHASE))
             .isEqualTo(ActionCapability.enabled(ActionCapabilityCode.ADVANCE_PHASE));
-        assertThatThrownBy(() -> matchActionService.sendTurnCheer(matchId, hostId))
+        assertThatThrownBy(() -> executeSendTurnCheer(matchId, hostId))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("目前無法發送吶喊");
     }

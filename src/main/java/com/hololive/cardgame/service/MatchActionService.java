@@ -1005,36 +1005,6 @@ public class MatchActionService {
     }
 
     /**
-     * 發送回合 Cheer（每回合一次）。
-     * 實際附加目標透過 SEND_CHEER pending interaction 讓玩家選擇。
-     */
-    @Transactional
-    public void sendTurnCheer(Long matchId, Long userId) {
-        ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN, MatchPhase.CHEER));
-        if (context.blockedByPendingInteraction()) {
-            return;
-        }
-        validateTurnCheerAvailable(matchId, userId, context.turnNumber);
-
-        Long interactionId = prepareTurnCheerInteraction(matchId, userId);
-        matchTurnLifecycleService.beginTurnCheer(context.match, userId, context.turnNumber, interactionId);
-    }
-
-    private void validateTurnCheerAvailable(Long matchId, Long userId, int turnNumber) {
-        if (hasTurnCheerAction(matchId, userId, turnNumber)) {
-            throw new GameRuleException(GameErrorCode.TURN_CHEER_ALREADY_USED, "這回合你已經發送過吶喊了");
-        }
-    }
-
-    private Long prepareTurnCheerInteraction(Long matchId, Long userId) {
-        Long interactionId = pendingDecisionCreationService.createTurnSendCheerPendingInteraction(matchId, userId);
-        if (interactionId == null) {
-            throw new IllegalStateException("目前無法發送吶喊：請確認你有可用吶喊卡且場上有 Holomem");
-        }
-        return interactionId;
-    }
-
-    /**
      * 推進目前回合 phase。
      * MAIN -> PERFORMANCE；若為先攻玩家第一回合則直接跳到 END。
      * PERFORMANCE -> END。
