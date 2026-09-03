@@ -22,10 +22,10 @@
 
 ### 後端
 
-- `MatchActionService.java`：約 5,003 行、約 157 個 methods、75 個依賴欄位。
+- `MatchActionService.java`：4,845 行、75 個依賴欄位；DRAW 與 SEND_TURN_CHEER orchestration 已搬移。
 - `MatchEffectService.java`：約 4,910 行、約 140 個 methods、48 個依賴欄位。
-- `service/`：約 311 個 Java 檔。
-- `MatchActionServiceIntegrationTest.java`：約 32,302 行。
+- `service/`：324 個 Java 檔。
+- `MatchActionServiceIntegrationTest.java`：32,318 行。
 - BE-001、BE-002 已 commit；BE-002 以 9 個 unit、8 個 focused integration、compile 與 diff check 完成驗收。
 - GitNexus 對 BE-002 識別出 41 個 changed symbols、20 條受影響流程，風險為 CRITICAL；主因是共用 rule 與 game-state projection 橫跨多條 action flow，已由 pilot parity/contract tests 鎖定。
 
@@ -71,7 +71,7 @@ flowchart LR
 | --- | --- | --- |
 | [BE-001](work-items/BE-001-建立MatchCommandGateway.md) | DONE | 建立 command gateway pilot |
 | [BE-002](work-items/BE-002-建立ActionCapabilities.md) | DONE | 四個回合操作的 server-authoritative capabilities |
-| [BE-007](work-items/BE-007-遷移回合CommandVerticalSlices.md) | IN_PROGRESS | DRAW_TURN 已完成；下一條為 SEND_TURN_CHEER |
+| [BE-007](work-items/BE-007-遷移回合CommandVerticalSlices.md) | IN_PROGRESS | DRAW_TURN、SEND_TURN_CHEER 已完成；下一條為 ADVANCE_PHASE |
 | [BE-003](work-items/BE-003-統一PendingChoice.md) | READY_AFTER_BE-007 | 收斂 decision/interaction 為 PendingChoice |
 | [BE-005](work-items/BE-005-導入狀態版本與冪等.md) | READY_AFTER_BE-003 | state version、command idempotency、gap detection |
 | [BE-004](work-items/BE-004-建立EffectPrimitive管線.md) | BLOCKED_BY_BE-003_BE-005 | typed effect/timing pilot |

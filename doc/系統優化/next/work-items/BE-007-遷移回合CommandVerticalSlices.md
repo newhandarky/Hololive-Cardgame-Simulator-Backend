@@ -125,7 +125,7 @@ npx gitnexus detect-changes --repo Hololive-Cardgame-Simulator-Backend --scope a
 | Action | 狀態 | Commit | Legacy responsibility removed |
 | --- | --- | --- | --- |
 | DRAW_TURN | DONE | `f0cbfb1` | controller、Hard NPC 與 test support 改走 typed command；從 `MatchActionService` 移除交易入口、抽牌 SQL、pending 建立協調、action payload 與 128 行 legacy orchestration |
-| SEND_TURN_CHEER | TODO |  |  |
+| SEND_TURN_CHEER | DONE | `ae59019` | controller、Hard NPC 與 test support 改走 typed command；移除 `MatchActionService.sendTurnCheer` orchestration、pending source/target 重複查詢與 NPC 重複 SQL |
 | ADVANCE_PHASE | TODO |  |  |
 | END_TURN | TODO |  |  |
 
@@ -137,3 +137,14 @@ npx gitnexus detect-changes --repo Hololive-Cardgame-Simulator-Backend --scope a
 - `MatchTurnLifecycleService` 統一寫入 DRAW_TURN、DRAW_REVEAL pending 與 DRAW_DECK_OUT 結算。
 - 驗證：4 個 handler/application unit tests、9 個 `MatchControllerEndTurnApiIntegrationTest`、2 個正常抽牌/deck-out focused integration tests、compile、test-compile 與 diff check 通過。
 - GitNexus staged detect-changes：21 files、33 symbols、17 flows、CRITICAL；主因是 controller/Hard NPC 與共用 integration test support 皆切換 command 入口，已由 REST、capability、pending、正常抽牌與 deck-out gates 覆蓋。
+
+## 十二、SEND_TURN_CHEER checkpoint（2026-09-03）
+
+- 新增 `SendTurnCheerCommand`、`SendTurnCheerCommandHandler` 與 `SendTurnCheerApplicationService`；公開 REST path/request/response 與 `TURN_CHEER` publish event 保持不變。
+- 新增 `TurnCheerAvailabilityService`，將 Cheer source 與 stage target 收旂為單一 fact；`TurnActionRuleService`、command 與 Hard NPC 共用同一份 capability/availability 結果。
+- `PendingDecisionCreationService` 使用已解析 availability 建立 `SEND_CHEER` payload，不再重新查詢回合 Cheer source/target。
+- `MatchActionService` 移除 30 行 send-turn-cheer 交易入口與 orchestration；`HardNpcService` 移除 39 行重複 Cheer deck/stage SQL。
+- 有 pending interaction 時改為明確拒絕 `PENDING_INTERACTION_BLOCKED`，與 `DRAW_TURN` 及 capability contract 一致；未改 DB schema、REST DTO 或 effect/timing 語意。
+- 驗證：handler/application/availability/pending/capability focused tests 20 個、REST integration 11 個、Hard NPC integration 8 個、gateway 4 個，及 send-turn-cheer/phase focused integration 2 個均通過；`test-compile` 與 diff check 通過。
+- GitNexus staged detect-changes：26 files、41 symbols、21 flows、CRITICAL；主因是 controller、Hard NPC、pending 與共用 turn rule 切換入口，已由 REST parity、NPC、pending、capability 與 phase gates 覆蓋。
+- Rollback：可單獨 revert `ae59019`，回到已驗證的 `MatchActionService.sendTurnCheer` 入口；本 slice 沒有 migration 或資料回填。
