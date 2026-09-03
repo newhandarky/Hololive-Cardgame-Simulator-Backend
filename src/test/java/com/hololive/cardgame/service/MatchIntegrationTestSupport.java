@@ -27,6 +27,9 @@ abstract class MatchIntegrationTestSupport extends AbstractPostgresIntegrationTe
     protected MatchActionService matchActionService;
 
     @Autowired
+    protected MatchCommandGateway matchCommandGateway;
+
+    @Autowired
     protected MatchGameStateService matchGameStateService;
 
     @Autowired
@@ -112,6 +115,10 @@ abstract class MatchIntegrationTestSupport extends AbstractPostgresIntegrationTe
         Long userId,
         Long sendCheerTargetCardInstanceId
     );
+
+    protected void executeDrawTurn(Long matchId, Long userId) {
+        matchCommandGateway.submit(new DrawTurnCommand(matchId, userId));
+    }
 
     protected Long playOpeningCenter(Long matchId, Long userId) {
         Long memberCardInstanceId = findDebutMemberCardFromHand(matchId, userId);

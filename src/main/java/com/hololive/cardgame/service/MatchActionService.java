@@ -20,7 +20,6 @@ import com.hololive.cardgame.error.GameRuleException;
 import com.hololive.cardgame.game.action.ActionResult;
 import com.hololive.cardgame.game.action.EffectContext;
 import com.hololive.cardgame.game.action.GameActionExecutor;
-import com.hololive.cardgame.game.action.MoveZoneAction;
 import com.hololive.cardgame.game.action.ReduceLifeAction;
 import com.hololive.cardgame.model.LobbyMatchStatus;
 import com.hololive.cardgame.model.MatchPhase;
@@ -49,7 +48,6 @@ public class MatchActionService {
     private static final String SUPPORT_DECISION_TYPE_CARD_SELECTION = "CARD_SELECTION";
     private static final String INTERACTION_TYPE_SEND_CHEER = "SEND_CHEER";
     private static final String INTERACTION_TYPE_TRIGGER_EFFECT_CONFIRM = "TRIGGER_EFFECT_CONFIRM";
-    private static final String ACTION_TYPE_DRAW_TURN = "DRAW_TURN";
     private static final String ACTION_TYPE_TURN_CHEER = "TURN_CHEER";
     private static final String ACTION_TYPE_USE_OSHI_SKILL = "USE_OSHI_SKILL";
     private static final String ACTION_TYPE_EFFECT_POST_TRIGGER = "EFFECT_POST_TRIGGER";
@@ -1007,33 +1005,6 @@ public class MatchActionService {
     }
 
     /**
-     * 執行回合抽牌（每回合一次）。
-     * 抽牌後會建立 DRAW_REVEAL 互動，供前端以 modal 呈現確認。
-     */
-    @Transactional
-    public void drawTurn(Long matchId, Long userId) {
-        ActionContext context = loadActionContext(matchId, userId, Set.of(MatchPhase.MAIN, MatchPhase.DRAW));
-        if (context.blockedByPendingInteraction()) {
-            return;
-        }
-        validateDrawTurnAvailable(matchId, userId, context.turnNumber);
-
-        DrawTurnResult result = executeDrawTurn(matchId, userId, context);
-        if (result.deckOut()) {
-            return;
-        }
-
-        appendDrawTurnAction(context.match, userId, context.turnNumber, result.drawnCardInstanceId());
-        matchTurnLifecycleService.beginDrawTurn(
-            context.match,
-            userId,
-            context.turnNumber,
-            result.drawnCardInstanceId(),
-            result.drawInteractionId()
-        );
-    }
-
-    /**
      * 發送回合 Cheer（每回合一次）。
      * 實際附加目標透過 SEND_CHEER pending interaction 讓玩家選擇。
      */
@@ -1047,42 +1018,6 @@ public class MatchActionService {
 
         Long interactionId = prepareTurnCheerInteraction(matchId, userId);
         matchTurnLifecycleService.beginTurnCheer(context.match, userId, context.turnNumber, interactionId);
-    }
-
-    private void validateDrawTurnAvailable(Long matchId, Long userId, int turnNumber) {
-        if (hasDrawTurnAction(matchId, userId, turnNumber)) {
-            throw new GameRuleException(GameErrorCode.TURN_DRAW_ALREADY_USED, "這回合你已經抽過卡了");
-        }
-    }
-
-    private DrawTurnResult executeDrawTurn(Long matchId, Long userId, ActionContext context) {
-        Long drawnCardInstanceId = drawTopDeckCardToHand(matchId, userId);
-        if (drawnCardInstanceId == null) {
-            finishMatchByDefeat(context.match, userId, "DRAW_DECK_OUT", context.turnNumber);
-            touchUpdatedAt(context.match);
-            matchRepository.saveAndFlush(context.match);
-            return DrawTurnResult.deckedOut();
-        }
-
-        Long drawInteractionId = pendingDecisionCreationService.createDrawRevealPendingInteraction(
-            matchId,
-            userId,
-            drawnCardInstanceId
-        );
-        return DrawTurnResult.drawn(drawnCardInstanceId, drawInteractionId);
-    }
-
-    private void appendDrawTurnAction(MatchEntity match, Long userId, int turnNumber, Long drawnCardInstanceId) {
-        Map<String, Object> drawPayload = new LinkedHashMap<>();
-        drawPayload.put("drawCount", 1);
-        drawPayload.put("drawnCardInstanceIds", List.of(drawnCardInstanceId));
-        appendAction(
-            match,
-            userId,
-            ACTION_TYPE_DRAW_TURN,
-            toJson(drawPayload),
-            turnNumber
-        );
     }
 
     private void validateTurnCheerAvailable(Long matchId, Long userId, int turnNumber) {
@@ -3243,55 +3178,6 @@ public class MatchActionService {
     }
 
     /**
-     * 從牌庫頂抽 1 張到手牌。
-     */
-    private Long drawTopDeckCardToHand(Long matchId, Long userId) {
-        Long deckCardInstanceId = jdbcTemplate.query(
-            """
-            SELECT id
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'DECK'
-            ORDER BY order_index NULLS LAST, id
-            LIMIT 1
-            """,
-            rs -> rs.next() ? rs.getLong("id") : null,
-            matchId,
-            userId
-        );
-        if (deckCardInstanceId == null) {
-            return null;
-        }
-        Integer nextHandOrder = jdbcTemplate.queryForObject(
-            """
-            SELECT COALESCE(MAX(order_index), 0) + 1
-            FROM match_cards
-            WHERE match_id = ?
-              AND owner_user_id = ?
-              AND zone = 'HAND'
-            """,
-            Integer.class,
-            matchId,
-            userId
-        );
-        EffectContext effectContext = EffectContext.system(matchId, userId, ACTION_TYPE_DRAW_TURN);
-        MoveZoneAction moveZoneAction = new MoveZoneAction(
-            deckCardInstanceId,
-            userId,
-            "DECK",
-            "HAND",
-            nextHandOrder == null ? 1 : nextHandOrder,
-            false
-        );
-        List<ActionResult> results = gameActionExecutor.execute(effectContext, List.of(moveZoneAction));
-        if (results.isEmpty() || !results.get(0).success()) {
-            return null;
-        }
-        return deckCardInstanceId;
-    }
-
-    /**
      * 計算指定 zone 卡片數量。
      */
     private int countCardsInZone(Long matchId, Long userId, String zone) {
@@ -4977,20 +4863,6 @@ public class MatchActionService {
         Long opponentUserId,
         boolean blockedByPendingInteraction
     ) {
-    }
-
-    private record DrawTurnResult(
-        Long drawnCardInstanceId,
-        Long drawInteractionId,
-        boolean deckOut
-    ) {
-        private static DrawTurnResult drawn(Long drawnCardInstanceId, Long drawInteractionId) {
-            return new DrawTurnResult(drawnCardInstanceId, drawInteractionId, false);
-        }
-
-        private static DrawTurnResult deckedOut() {
-            return new DrawTurnResult(null, null, true);
-        }
     }
 
     private record MulliganResolution(

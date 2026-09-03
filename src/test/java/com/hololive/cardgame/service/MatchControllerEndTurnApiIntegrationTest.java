@@ -17,6 +17,7 @@ import com.hololive.cardgame.dto.GameStateResponse;
 import com.hololive.cardgame.dto.ResolveDecisionRequest;
 import com.hololive.cardgame.entity.User;
 import com.hololive.cardgame.error.GameErrorCode;
+import com.hololive.cardgame.model.MatchPhase;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -45,7 +46,7 @@ class MatchControllerEndTurnApiIntegrationTest extends MatchIntegrationTestSuppo
     protected void executeRequiredTurnActions(Long matchId, Long userId, Long sendCheerTargetCardInstanceId) {
         resolvePendingInteractionIfExists(matchId, userId, "TURN_START");
         try {
-            matchActionService.drawTurn(matchId, userId);
+            executeDrawTurn(matchId, userId);
         } catch (IllegalStateException | com.hololive.cardgame.error.GameRuleException ex) {
             if (ex instanceof com.hololive.cardgame.error.GameRuleException gameRuleException
                 && gameRuleException.getCode() == GameErrorCode.TURN_DRAW_ALREADY_USED) {
@@ -345,7 +346,7 @@ class MatchControllerEndTurnApiIntegrationTest extends MatchIntegrationTestSuppo
                 ActionCapabilityReasonCode.TURN_ACTIONS_INCOMPLETE
             ));
 
-        matchActionService.drawTurn(matchId, hostId);
+        executeDrawTurn(matchId, hostId);
 
         assertThat(actionCount(matchId, hostId, "DRAW_TURN")).isEqualTo(1);
         assertThat(pendingDecisionCount(matchId, hostId, "DRAW_REVEAL")).isEqualTo(1);
@@ -369,6 +370,25 @@ class MatchControllerEndTurnApiIntegrationTest extends MatchIntegrationTestSuppo
 
         assertThat(actionCount(matchId, hostId, "TURN_CHEER")).isEqualTo(1);
         assertThat(pendingDecisionCount(matchId, hostId, "SEND_CHEER")).isZero();
+    }
+
+    @Test
+    void drawTurnEndpointShouldDispatchCommandAndPreserveResponseContract() throws Exception {
+        StartedMatchContext context = createStartedMatch("draw-command-host", "draw-command-guest");
+        Long matchId = context.matchId();
+        Long hostId = context.hostId();
+        resetPilotTurnActions(matchId, hostId);
+
+        mockMvc.perform(
+                post("/api/matches/{matchId}/actions/draw-turn", matchId)
+                    .header("Authorization", bearerTokenFor(hostId))
+            )
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.matchId").value(matchId));
+
+        assertThat(actionCount(matchId, hostId, "DRAW_TURN")).isEqualTo(1);
+        assertThat(pendingDecisionCount(matchId, hostId, "DRAW_REVEAL")).isEqualTo(1);
+        assertThat(matchGameStateService.getGameStateForUser(matchId, hostId).getPhase()).isEqualTo(MatchPhase.DRAW);
     }
 
     @Test

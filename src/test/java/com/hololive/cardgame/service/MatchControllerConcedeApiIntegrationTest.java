@@ -41,7 +41,7 @@ class MatchControllerConcedeApiIntegrationTest extends MatchIntegrationTestSuppo
     protected void executeRequiredTurnActions(Long matchId, Long userId, Long sendCheerTargetCardInstanceId) {
         resolvePendingInteractionIfExists(matchId, userId, "TURN_START");
         try {
-            matchActionService.drawTurn(matchId, userId);
+            executeDrawTurn(matchId, userId);
         } catch (IllegalStateException | com.hololive.cardgame.error.GameRuleException ex) {
             if (ex instanceof com.hololive.cardgame.error.GameRuleException gameRuleException
                 && gameRuleException.getCode() == GameErrorCode.TURN_DRAW_ALREADY_USED) {

@@ -210,6 +210,17 @@ public class MatchTurnLifecycleService {
         if (match == null || userId == null || drawnCardInstanceId == null || drawnCardInstanceId <= 0) {
             throw new IllegalArgumentException("DRAW_TURN 結算流程缺少必要參數");
         }
+        Map<String, Object> drawPayload = new LinkedHashMap<>();
+        drawPayload.put("drawCount", 1);
+        drawPayload.put("drawnCardInstanceIds", List.of(drawnCardInstanceId));
+        appendAction(
+            match,
+            userId,
+            ACTION_TYPE_DRAW_TURN,
+            toJson(drawPayload),
+            turnNumber
+        );
+
         match.setCurrentPhase(MatchPhase.DRAW.name());
         match.setUpdatedAt(LocalDateTime.now());
         matchRepository.saveAndFlush(match);
@@ -229,6 +240,54 @@ public class MatchTurnLifecycleService {
             toJson(interactionPayload),
             turnNumber
         );
+    }
+
+    public Long createDrawRevealPendingInteraction(Long matchId, Long userId, Long drawnCardInstanceId) {
+        return pendingDecisionCreationService.createDrawRevealPendingInteraction(matchId, userId, drawnCardInstanceId);
+    }
+
+    /**
+     * 以敗北結束對戰，供回合 lifecycle vertical slice 共用。
+     */
+    public void finishDrawDeckOut(MatchEntity match, Long loserUserId, int turnNumber) {
+        if (match == null || loserUserId == null) {
+            throw new IllegalArgumentException("對戰敗北結算缺少必要參數");
+        }
+        String reasonCode = "DRAW_DECK_OUT";
+        Long winnerUserId = loserUserId.equals(match.getPlayerAId())
+            ? match.getPlayerBId()
+            : match.getPlayerAId();
+        match.setStatus("finished");
+        match.setWinnerUserId(winnerUserId);
+        match.setFinishedAt(LocalDateTime.now());
+        match.setCurrentTurnPlayerId(null);
+        match.setCurrentPhase(MatchPhase.END.name());
+
+        Map<String, Object> finishPayload = new LinkedHashMap<>();
+        finishPayload.put("reason", reasonCode);
+        finishPayload.put("reasonCode", reasonCode);
+        finishPayload.put("loserUserId", loserUserId);
+        finishPayload.put("winnerUserId", winnerUserId);
+        appendAction(match, loserUserId, "MATCH_FINISHED", toJson(finishPayload), turnNumber);
+
+        Map<String, Object> rulePayload = new LinkedHashMap<>();
+        rulePayload.put("eventType", "MATCH_FINISHED");
+        rulePayload.put("reasonCode", reasonCode);
+        rulePayload.put("matchStatus", match.getStatus());
+        rulePayload.put("currentPhase", match.getCurrentPhase());
+        rulePayload.put("turnNumber", turnNumber);
+        rulePayload.put(
+            "details",
+            Map.of(
+                "winnerUserId", winnerUserId,
+                "loserUserId", loserUserId,
+                "draw", false
+            )
+        );
+        appendAction(match, loserUserId, "RULE_EVENT", toJson(rulePayload), turnNumber);
+
+        match.setUpdatedAt(LocalDateTime.now());
+        matchRepository.saveAndFlush(match);
     }
 
     public void confirmTurnStartDecision(MatchEntity match, Long userId, int turnNumber, Long decisionId) {

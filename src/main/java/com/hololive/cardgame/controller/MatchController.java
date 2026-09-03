@@ -19,6 +19,7 @@ import com.hololive.cardgame.dto.UseOshiSkillActionRequest;
 import com.hololive.cardgame.model.LobbyMatch;
 import com.hololive.cardgame.service.AuthUserResolver;
 import com.hololive.cardgame.service.ConcedeMatchCommand;
+import com.hololive.cardgame.service.DrawTurnCommand;
 import com.hololive.cardgame.service.HardNpcService;
 import com.hololive.cardgame.service.LobbyMatchService;
 import com.hololive.cardgame.service.MatchActionService;
@@ -286,7 +287,7 @@ public class MatchController {
      */
     public LobbyMatchResponse drawTurn(@PathVariable Long matchId) {
         try {
-            matchActionService.drawTurn(matchId, currentUserId());
+            matchCommandGateway.submit(new DrawTurnCommand(matchId, currentUserId()));
             LobbyMatchResponse response = LobbyMatchResponse.from(lobbyMatchService.getMatch(matchId));
             publish(matchId, "DRAW_TURN", response);
             return response;

@@ -963,7 +963,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
             resolveTurnStart.setDecisionId(turnStartDecisionId);
             matchActionService.resolveDecision(matchId, guestId, resolveTurnStart);
         }
-        matchActionService.drawTurn(matchId, guestId);
+        executeDrawTurn(matchId, guestId);
 
         int guestDeckAfter = countZone(matchId, guestId, "DECK");
         int guestHandAfter = countZone(matchId, guestId, "HAND");
@@ -1238,7 +1238,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
             resolveTurnStart.setDecisionId(turnStartDecisionId);
             matchActionService.resolveDecision(matchId, guestId, resolveTurnStart);
         }
-        matchActionService.drawTurn(matchId, guestId);
+        executeDrawTurn(matchId, guestId);
 
         Long decisionId = jdbcTemplate.queryForObject(
             """
@@ -1702,7 +1702,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
             resolveTurnStart.setDecisionId(turnStartDecisionId);
             matchActionService.resolveDecision(matchId, guestId, resolveTurnStart);
         }
-        matchActionService.drawTurn(matchId, guestId);
+        executeDrawTurn(matchId, guestId);
 
         Long handCardInstanceId = jdbcTemplate.queryForObject(
             """
@@ -1761,7 +1761,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
         ResolveDecisionRequest resolveTurnStart = new ResolveDecisionRequest();
         resolveTurnStart.setDecisionId(turnStartDecisionId);
         matchActionService.resolveDecision(matchId, guestId, resolveTurnStart);
-        matchActionService.drawTurn(matchId, guestId);
+        executeDrawTurn(matchId, guestId);
         resolvePendingInteractionIfExists(matchId, guestId, "DRAW_REVEAL");
         matchActionService.sendTurnCheer(matchId, guestId);
 
@@ -1829,7 +1829,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
         ResolveDecisionRequest resolveTurnStart = new ResolveDecisionRequest();
         resolveTurnStart.setDecisionId(turnStartDecisionId);
         matchActionService.resolveDecision(matchId, guestId, resolveTurnStart);
-        matchActionService.drawTurn(matchId, guestId);
+        executeDrawTurn(matchId, guestId);
         resolvePendingInteractionIfExists(matchId, guestId, "DRAW_REVEAL");
         matchActionService.sendTurnCheer(matchId, guestId);
 
@@ -2154,7 +2154,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
             .satisfies(ex -> assertThat(((GameRuleException) ex).getCode()).isEqualTo(GameErrorCode.TURN_ACTIONS_INCOMPLETE))
             .hasMessageContaining("抽卡");
 
-        matchActionService.drawTurn(matchId, hostId);
+        executeDrawTurn(matchId, hostId);
         resolvePendingInteractionIfExists(matchId, hostId, "DRAW_REVEAL");
 
         assertThatThrownBy(() -> matchActionService.attackArt(matchId, hostId, request))
@@ -2232,7 +2232,7 @@ class MatchActionServiceIntegrationTest extends MatchActionFlowIntegrationTestSu
         advanceToEndPhase(matchId, hostId, hostCenterCardInstanceId);
         matchActionService.endTurn(matchId, hostId);
         resolvePendingInteractionIfExists(matchId, guestId, "TURN_START");
-        matchActionService.drawTurn(matchId, guestId);
+        executeDrawTurn(matchId, guestId);
 
         String matchStatus = jdbcTemplate.queryForObject(
             "SELECT status FROM matches WHERE id = ?",

@@ -38,6 +38,7 @@ public class HardNpcService {
 
     private final LobbyMatchService lobbyMatchService;
     private final MatchActionService matchActionService;
+    private final MatchCommandGateway matchCommandGateway;
     private final MatchGameStateService matchGameStateService;
     private final MatchRepository matchRepository;
     private final UserRepository userRepository;
@@ -50,6 +51,7 @@ public class HardNpcService {
     public HardNpcService(
         LobbyMatchService lobbyMatchService,
         MatchActionService matchActionService,
+        MatchCommandGateway matchCommandGateway,
         MatchGameStateService matchGameStateService,
         MatchRepository matchRepository,
         UserRepository userRepository,
@@ -58,6 +60,7 @@ public class HardNpcService {
     ) {
         this.lobbyMatchService = lobbyMatchService;
         this.matchActionService = matchActionService;
+        this.matchCommandGateway = matchCommandGateway;
         this.matchGameStateService = matchGameStateService;
         this.matchRepository = matchRepository;
         this.userRepository = userRepository;
@@ -294,7 +297,7 @@ public class HardNpcService {
         }
         if ("DRAW".equals(phase)) {
             try {
-                matchActionService.drawTurn(matchId, npcUserId);
+                matchCommandGateway.submit(new DrawTurnCommand(matchId, npcUserId));
                 return true;
             } catch (RuntimeException ex) {
                 log.warn(
@@ -331,7 +334,7 @@ public class HardNpcService {
 
         if ("MAIN".equals(phase) && !hasActionInTurn(matchId, npcUserId, turnNumber, "DRAW_TURN")) {
             try {
-                matchActionService.drawTurn(matchId, npcUserId);
+                matchCommandGateway.submit(new DrawTurnCommand(matchId, npcUserId));
                 return true;
             } catch (RuntimeException ex) {
                 log.warn(
